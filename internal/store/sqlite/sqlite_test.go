@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"fluxion/internal/models"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -16,7 +17,8 @@ func TestSqliteStore_Snapshots(t *testing.T) {
 
 	// 1. Create Snapshot
 	rootPath := "/test/root"
-	snap, err := s.CreateSnapshot(rootPath)
+	snapName := "test-snapshot-1"
+	snap, err := s.CreateSnapshot(rootPath, snapName)
 	if err != nil {
 		t.Fatalf("CreateSnapshot failed: %v", err)
 	}
@@ -25,6 +27,9 @@ func TestSqliteStore_Snapshots(t *testing.T) {
 	}
 	if snap.RootPath != rootPath {
 		t.Errorf("Expected root path %s, got %s", rootPath, snap.RootPath)
+	}
+	if snap.Name != snapName {
+		t.Errorf("Expected name %s, got %s", snapName, snap.Name)
 	}
 	if snap.Status != "in_progress" {
 		t.Errorf("Expected status 'in_progress', got %s", snap.Status)
@@ -38,8 +43,27 @@ func TestSqliteStore_Snapshots(t *testing.T) {
 	if last.ID != snap.ID {
 		t.Errorf("GetLastSnapshot ID mismatch. Want %d, got %d", snap.ID, last.ID)
 	}
+	
+	// 3. FindSnapshot
+	// By ID
+	found, err := s.FindSnapshot(fmt.Sprintf("%d", snap.ID))
+	if err != nil {
+		t.Fatalf("FindSnapshot(ID) failed: %v", err)
+	}
+	if found.ID != snap.ID {
+		t.Errorf("Found wrong snapshot by ID")
+	}
+	
+	// By Name
+	foundByName, err := s.FindSnapshot(snapName)
+	if err != nil {
+		t.Fatalf("FindSnapshot(Name) failed: %v", err)
+	}
+	if foundByName.ID != snap.ID {
+		t.Errorf("Found wrong snapshot by Name")
+	}
 
-	// 3. ListSnapshots
+	// 4. ListSnapshots
 	list, err := s.ListSnapshots()
 	if err != nil {
 		t.Fatalf("ListSnapshots failed: %v", err)
@@ -47,8 +71,11 @@ func TestSqliteStore_Snapshots(t *testing.T) {
 	if len(list) != 1 {
 		t.Errorf("Expected 1 snapshot, got %d", len(list))
 	}
+	if list[0].Name != snapName {
+		t.Errorf("List snapshot name mismatch")
+	}
 
-	// 4. Complete Snapshot
+	// 5. Complete Snapshot
 	err = s.CompleteSnapshot(snap.ID)
 	if err != nil {
 		t.Fatalf("CompleteSnapshot failed: %v", err)
@@ -73,7 +100,7 @@ func TestSqliteStore_Files(t *testing.T) {
 	}
 	defer s.Close()
 
-	snap, err := s.CreateSnapshot("/test/root")
+	snap, err := s.CreateSnapshot("/test/root", "test-snap-files")
 	if err != nil {
 		t.Fatalf("CreateSnapshot failed: %v", err)
 	}

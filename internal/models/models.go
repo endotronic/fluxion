@@ -14,6 +14,7 @@ const (
 
 type Snapshot struct {
 	ID         int64
+	Name       string
 	RootPath   string
 	StartedAt  time.Time
 	FinishedAt *time.Time

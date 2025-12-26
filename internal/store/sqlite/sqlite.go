@@ -5,6 +5,7 @@ import (
 	"fluxion/internal/models"
 	"fluxion/internal/store"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -43,6 +44,7 @@ func (s *SqliteStore) initSchema() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS snapshots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
 			root_path TEXT NOT NULL,
 			started_at DATETIME NOT NULL,
 			finished_at DATETIME,
@@ -69,10 +71,10 @@ func (s *SqliteStore) initSchema() error {
 	return nil
 }
 
-func (s *SqliteStore) CreateSnapshot(rootPath string) (*models.Snapshot, error) {
+func (s *SqliteStore) CreateSnapshot(rootPath, name string) (*models.Snapshot, error) {
 	now := time.Now()
-	res, err := s.db.Exec(`INSERT INTO snapshots (root_path, started_at, status) VALUES (?, ?, ?)`,
-		rootPath, now, models.StatusInProgress)
+	res, err := s.db.Exec(`INSERT INTO snapshots (name, root_path, started_at, status) VALUES (?, ?, ?, ?)`,
+		name, rootPath, now, models.StatusInProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -83,32 +85,57 @@ func (s *SqliteStore) CreateSnapshot(rootPath string) (*models.Snapshot, error) 
 	return &models.Snapshot{
 		ID:        id,
 		RootPath:  rootPath,
+		Name:      name,
 		StartedAt: now,
 		Status:    models.StatusInProgress,
 	}, nil
 }
 
 func (s *SqliteStore) GetLastSnapshot(rootPath string) (*models.Snapshot, error) {
-	row := s.db.QueryRow(`SELECT id, root_path, started_at, finished_at, status FROM snapshots WHERE root_path = ? ORDER BY id DESC LIMIT 1`, rootPath)
-	
+	row := s.db.QueryRow(`SELECT id, name, root_path, started_at, finished_at, status FROM snapshots WHERE root_path = ? ORDER BY id DESC LIMIT 1`, rootPath)
 	var snap models.Snapshot
-	var finishedAt sql.NullTime
-	err := row.Scan(&snap.ID, &snap.RootPath, &snap.StartedAt, &finishedAt, &snap.Status)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
+	if err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.StartedAt, &snap.FinishedAt, &snap.Status); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // No previous snapshot
+		}
 		return nil, err
-	}
-	if finishedAt.Valid {
-		t := finishedAt.Time
-		snap.FinishedAt = &t
 	}
 	return &snap, nil
 }
 
+func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
+	// 1. Try as ID
+	var snap models.Snapshot
+	// Clean query just in case
+	query = strings.TrimSpace(query)
+	
+	// Try parsing as int
+	// We can use a heuristic or just try query both.
+	// But let's try strict ID first.
+	// Actually, "123" could be a name. But name matches are strings.
+	// If query matches an ID perfectly, we return that. If not, we try name.
+	
+	row := s.db.QueryRow(`SELECT id, name, root_path, started_at, finished_at, status FROM snapshots WHERE id = ?`, query)
+	err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.StartedAt, &snap.FinishedAt, &snap.Status)
+	if err == nil {
+		return &snap, nil
+	}
+	
+	// If failed, try Name
+	row = s.db.QueryRow(`SELECT id, name, root_path, started_at, finished_at, status FROM snapshots WHERE name = ? ORDER BY id DESC LIMIT 1`, query)
+	err = row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.StartedAt, &snap.FinishedAt, &snap.Status)
+	if err == nil {
+		return &snap, nil
+	}
+	
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("snapshot not found for query: %s", query)
+	}
+	return nil, err
+}
+
 func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
-	rows, err := s.db.Query(`SELECT id, root_path, started_at, finished_at, status FROM snapshots ORDER BY id DESC`)
+	rows, err := s.db.Query(`SELECT id, name, root_path, started_at, finished_at, status FROM snapshots ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +145,7 @@ func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
 	for rows.Next() {
 		var snap models.Snapshot
 		var finishedAt sql.NullTime
-		if err := rows.Scan(&snap.ID, &snap.RootPath, &snap.StartedAt, &finishedAt, &snap.Status); err != nil {
+		if err := rows.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.StartedAt, &finishedAt, &snap.Status); err != nil {
 			return nil, err
 		}
 		if finishedAt.Valid {

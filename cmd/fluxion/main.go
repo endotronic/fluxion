@@ -66,14 +66,14 @@ func runList(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("ID\tStatus\tStarted At\t\t\tFinished At\t\t\tRoot Path")
-	fmt.Println("--\t------\t----------\t\t\t-----------\t\t\t---------")
+	fmt.Println("ID\tName\tStatus\tStarted At\t\t\tFinished At\t\t\tRoot Path")
+	fmt.Println("--\t----\t------\t----------\t\t\t-----------\t\t\t---------")
 	for _, s := range snaps {
 		finished := "N/A"
 		if s.FinishedAt != nil {
 			finished = s.FinishedAt.Format(time.RFC3339)
 		}
-		fmt.Printf("%d\t%s\t%s\t%s\t%s\n", s.ID, s.Status, s.StartedAt.Format(time.RFC3339), finished, s.RootPath)
+		fmt.Printf("%d\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Name, s.Status, s.StartedAt.Format(time.RFC3339), finished, s.RootPath)
 	}
 }
 
@@ -81,6 +81,7 @@ func runSnapshot(args []string) {
 	cmd := flag.NewFlagSet("snapshot", flag.ExitOnError)
 	dirPtr := cmd.String("dir", "", "Directory to scan (required)")
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (optional, defaults to <dirname>.db)")
+	namePtr := cmd.String("name", "", "Name for the snapshot (optional, defaults to <dirname>_<date>)")
 	threadsPtr := cmd.Int("threads", runtime.NumCPU(), "Number of threads")
 	forceNewPtr := cmd.Bool("new", false, "Force new scan (ignore previous)")
 	forceResumePtr := cmd.Bool("resume", false, "Force resume (if possible)")
@@ -109,6 +110,16 @@ func runSnapshot(args []string) {
 			base = "filesystem"
 		}
 		dbPath = base + ".db"
+	}
+	
+	// Determine Name
+	snapName := *namePtr
+	if snapName == "" {
+		base := filepath.Base(targetDir)
+		if base == "." || base == "/" {
+			base = "root"
+		}
+		snapName = fmt.Sprintf("%s_%s", base, time.Now().Format("2006-01-02"))
 	}
 
 	// Open DB
@@ -196,13 +207,13 @@ func runSnapshot(args []string) {
 	}
 
 	if mode == "new" {
-		snap, err := dbStore.CreateSnapshot(targetDir)
+		snap, err := dbStore.CreateSnapshot(targetDir, snapName)
 		if err != nil {
 			fmt.Printf("Error creating snapshot: %v\n", err)
 			os.Exit(1)
 		}
 		snapshotID = snap.ID
-		fmt.Printf("Created new snapshot ID %d\n", snapshotID)
+		fmt.Printf("Created new snapshot ID %d (Name: %s)\n", snapshotID, snapName)
 	}
 
 	// Run Scan
@@ -339,15 +350,9 @@ func runDiff(args []string) {
 		os.Exit(1)
 	}
 
-	oldIDStr := tail[0]
-	newIDStr := tail[1]
+	oldQuery := tail[0]
+	newQuery := tail[1]
 	
-	// Parse IDs... (assuming strconv needed, wait I forgot import)
-	// I'll add strconv import in a separate replace or use fmt.Sscanf
-	var oldID, newID int64
-	fmt.Sscanf(oldIDStr, "%d", &oldID)
-	fmt.Sscanf(newIDStr, "%d", &newID)
-
 	// Open DB
 	dbStore, err := sqlite.NewSqliteStore(*dbPtr)
 	if err != nil {
@@ -356,30 +361,21 @@ func runDiff(args []string) {
 	}
 	defer dbStore.Close()
 
-	// 1. Get Metadata
-	snaps, err := dbStore.ListSnapshots()
+	// 1. Find Snapshots
+	snapA, err := dbStore.FindSnapshot(oldQuery)
 	if err != nil {
-		fmt.Printf("Error listing snapshots: %v\n", err)
+		fmt.Printf("Error: could not find 'old' snapshot '%s': %v\n", oldQuery, err)
 		os.Exit(1)
 	}
-	// Logic to find specific snapshots? ListSnapshots returns all. 
-	// We might need GetSnapshot(id). But Store doesn't have it.
-	// We can iterate the list.
 	
-	var snapA, snapB *models.Snapshot
-	for _, s := range snaps {
-		if s.ID == oldID {
-			snapA = s
-		}
-		if s.ID == newID {
-			snapB = s
-		}
-	}
-	
-	if snapA == nil || snapB == nil {
-		fmt.Println("Error: could not find one or both snapshots.")
+	snapB, err := dbStore.FindSnapshot(newQuery)
+	if err != nil {
+		fmt.Printf("Error: could not find 'new' snapshot '%s': %v\n", newQuery, err)
 		os.Exit(1)
 	}
+	
+	oldID := snapA.ID
+	newID := snapB.ID
 	
 	// Validate Root Path
 	if snapA.RootPath != snapB.RootPath {
