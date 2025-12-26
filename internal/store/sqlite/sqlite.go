@@ -58,6 +58,7 @@ func (s *SqliteStore) initSchema() error {
 			size_bytes INTEGER NOT NULL,
 			mod_time DATETIME NOT NULL,
 			sha1 TEXT NOT NULL,
+			md5 TEXT NOT NULL,
 			FOREIGN KEY(snapshot_id) REFERENCES snapshots(id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_files_snapshot_path ON files(snapshot_id, path);`,
@@ -164,8 +165,8 @@ func (s *SqliteStore) CompleteSnapshot(id int64) error {
 }
 
 func (s *SqliteStore) AddFile(f *models.FileRecord) error {
-	_, err := s.db.Exec(`INSERT INTO files (snapshot_id, path, filename, size_bytes, mod_time, sha1) VALUES (?, ?, ?, ?, ?, ?)`,
-		f.SnapshotID, f.Path, f.Filename, f.SizeBytes, f.ModTime, f.SHA1)
+	_, err := s.db.Exec(`INSERT INTO files (snapshot_id, path, filename, size_bytes, mod_time, sha1, md5) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		f.SnapshotID, f.Path, f.Filename, f.SizeBytes, f.ModTime, f.SHA1, f.MD5)
 	return err
 }
 
@@ -174,7 +175,7 @@ func (s *SqliteStore) BatchAddFiles(files []*models.FileRecord) error {
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT INTO files (snapshot_id, path, filename, size_bytes, mod_time, sha1) VALUES (?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(`INSERT INTO files (snapshot_id, path, filename, size_bytes, mod_time, sha1, md5) VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -182,7 +183,7 @@ func (s *SqliteStore) BatchAddFiles(files []*models.FileRecord) error {
 	defer stmt.Close()
 
 	for _, f := range files {
-		_, err := stmt.Exec(f.SnapshotID, f.Path, f.Filename, f.SizeBytes, f.ModTime, f.SHA1)
+		_, err := stmt.Exec(f.SnapshotID, f.Path, f.Filename, f.SizeBytes, f.ModTime, f.SHA1, f.MD5)
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -198,7 +199,7 @@ func (s *SqliteStore) GetFileCount(snapshotID int64) (int64, error) {
 }
 
 func (s *SqliteStore) GetFilesForSnapshot(snapshotID int64, onProgress func(int)) (map[string]models.FileRecord, error) {
-	rows, err := s.db.Query(`SELECT id, snapshot_id, path, filename, size_bytes, mod_time, sha1 FROM files WHERE snapshot_id = ?`, snapshotID)
+	rows, err := s.db.Query(`SELECT id, snapshot_id, path, filename, size_bytes, mod_time, sha1, md5 FROM files WHERE snapshot_id = ?`, snapshotID)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +209,7 @@ func (s *SqliteStore) GetFilesForSnapshot(snapshotID int64, onProgress func(int)
 	count := 0
 	for rows.Next() {
 		var f models.FileRecord
-		if err := rows.Scan(&f.ID, &f.SnapshotID, &f.Path, &f.Filename, &f.SizeBytes, &f.ModTime, &f.SHA1); err != nil {
+		if err := rows.Scan(&f.ID, &f.SnapshotID, &f.Path, &f.Filename, &f.SizeBytes, &f.ModTime, &f.SHA1, &f.MD5); err != nil {
 			return nil, err
 		}
 		result[f.Path] = f

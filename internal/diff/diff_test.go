@@ -239,6 +239,48 @@ func TestCompareSnapshots(t *testing.T) {
 				{Path: "/root/subdir/file1", Status: StatusMove, SourcePath: "/root/file1"},
 			},
 		},
+		{
+			name: "MD5 Fallback Match",
+			filesA: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/file1": {MD5: "m1"}, // Only MD5 available (e.g. legacy import)
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/file1": {MD5: "m1", SHA1: "s1"}, // New scan has both
+			},
+			want: []DiffResult{
+				// file1 should be Unchanged because MD5 matches
+			},
+		},
+		{
+			name: "MD5 Fallback Diff",
+			filesA: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/file1": {MD5: "m1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/file1": {MD5: "m2", SHA1: "s2"}, // MD5 mismatch
+			},
+			want: []DiffResult{
+				{Path: "/root/file1", Status: StatusModified},
+			},
+		},
+		{
+			name: "Mixed Algo Mismatch",
+			filesA: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/file1": {SHA1: "s1"}, // Only SHA1
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/file1": {MD5: "m1"}, // Only MD5 (e.g. forced MD5 scan only?)
+			},
+			want: []DiffResult{
+				{Path: "/root/file1", Status: StatusModified},
+			},
+		},
 	}
 
 	for _, tt := range tests {

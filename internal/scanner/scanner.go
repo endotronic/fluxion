@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"crypto/md5"
 	"crypto/sha1"
 	"encoding/hex"
 	"fluxion/internal/consts"
@@ -24,6 +25,9 @@ type ScannerConfig struct {
 
 	CrossMounts bool
 	FailOnMount bool
+
+	// New: MD5 Computation
+	ComputeMD5 bool
 
 	// Callbacks
 	OnFileFound    func(path string, size int64)
@@ -66,7 +70,6 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 			// For WalkDir, returning error stops walk.
 			// Let's log it to results and skip.
 			results <- ScanResult{Error: err}
-			return nil // Don't stop walk for individual file permission errors
 			return nil // Don't stop walk for individual file permission errors
 		}
 
@@ -130,7 +133,7 @@ func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
 	}
 
 	// Hash the file
-	hash, err := hashFile(path)
+	sha1Hash, md5Hash, err := hashFile(path, cfg.ComputeMD5)
 	if err != nil {
 		results <- ScanResult{Error: err}
 		return
@@ -142,7 +145,8 @@ func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
 		Filename:   filepath.Base(path),
 		SizeBytes:  info.Size(),
 		ModTime:    info.ModTime(),
-		SHA1:       hash,
+		SHA1:       sha1Hash,
+		MD5:        md5Hash,
 	}
 
 	if cfg.OnFileFound != nil {
@@ -152,21 +156,37 @@ func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
 	results <- ScanResult{File: record}
 }
 
-func hashFile(path string) (string, error) {
+func hashFile(path string, computeMD5 bool) (string, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer f.Close()
 
 	// Use a small buffer if needed, but io.Copy handles it.
 	// SHA1 as requested
-	h := sha1.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	hSha1 := sha1.New()
+	var writers io.Writer = hSha1
+	
+	var md5Res interface{ Sum([]byte) []byte }
+	
+	if computeMD5 {
+		md5Hasher := md5.New()
+		md5Res = md5Hasher
+		writers = io.MultiWriter(hSha1, md5Hasher)
 	}
 
-	return hex.EncodeToString(h.Sum(nil)), nil
+	if _, err := io.Copy(writers, f); err != nil {
+		return "", "", err
+	}
+
+	sha1Str := hex.EncodeToString(hSha1.Sum(nil))
+	md5Str := ""
+	if computeMD5 {
+		md5Str = hex.EncodeToString(md5Res.Sum(nil))
+	}
+
+	return sha1Str, md5Str, nil
 }
 
 func getDevice(path string) (uint64, error) {

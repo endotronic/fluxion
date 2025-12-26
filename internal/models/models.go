@@ -29,4 +29,5 @@ type FileRecord struct {
 	SizeBytes  int64
 	ModTime    time.Time
 	SHA1       string
+	MD5        string
 }

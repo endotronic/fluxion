@@ -106,8 +106,8 @@ func TestSqliteStore_Files(t *testing.T) {
 	}
 
 	files := []*models.FileRecord{
-		{SnapshotID: snap.ID, Path: "/test/root/file1", SHA1: "hash1", SizeBytes: 100, ModTime: time.Now()},
-		{SnapshotID: snap.ID, Path: "/test/root/file2", SHA1: "hash2", SizeBytes: 200, ModTime: time.Now()},
+		{SnapshotID: snap.ID, Path: "/test/root/file1", SHA1: "hash1", MD5: "md5_1", SizeBytes: 100, ModTime: time.Now()},
+		{SnapshotID: snap.ID, Path: "/test/root/file2", SHA1: "hash2", MD5: "md5_2", SizeBytes: 200, ModTime: time.Now()},
 	}
 
 	// 1. Batch Add
@@ -135,5 +135,8 @@ func TestSqliteStore_Files(t *testing.T) {
 	}
 	if r, ok := retrieved["/test/root/file1"]; !ok || r.SHA1 != "hash1" {
 		t.Error("Failed to retrieve file1 correctly")
+	}
+	if r, ok := retrieved["/test/root/file1"]; !ok || r.MD5 != "md5_1" {
+		t.Error("Failed to retrieve MD5 for file1")
 	}
 }

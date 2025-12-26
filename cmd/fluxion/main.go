@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -36,6 +38,8 @@ func main() {
 		runList(os.Args[2:])
 	case "diff":
 		runDiff(os.Args[2:])
+	case "import":
+		runImport(os.Args[2:])
 	default:
 		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
 		os.Exit(1)
@@ -88,6 +92,7 @@ func runSnapshot(args []string) {
 	
 	crossMountsPtr := cmd.Bool("cross-mounts", true, "Traverse mount points")
 	failOnMountPtr := cmd.Bool("fail-on-mount", false, "Fail if mount point encountered")
+	md5Ptr := cmd.Bool("md5", false, "Compute MD5 checksums")
 	
 	cmd.Parse(args)
 
@@ -234,6 +239,7 @@ func runSnapshot(args []string) {
 		ResumeMap:   resumeMap,
 		CrossMounts: *crossMountsPtr,
 		FailOnMount: *failOnMountPtr,
+		ComputeMD5:  *md5Ptr,
 		OnFileFound: func(path string, size int64) {
 			foundCount.Add(1)
 			foundBytes.Add(size)
@@ -458,4 +464,160 @@ func runDiff(args []string) {
 		}
 		fmt.Printf("%s %s\n", symbol, path)
 	}
+}
+
+func runImport(args []string) {
+	cmd := flag.NewFlagSet("import", flag.ExitOnError)
+	// filePtr := cmd.String("file", "", "Path to legacy snapshot file (required)") // Deprecated
+	hashesPtr := cmd.String("hashes", "", "Path to hashes file (e.g. _hashes.txt)")
+	sizesPtr := cmd.String("sizes", "", "Path to sizes file (e.g. _sizes.txt)")
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	namePtr := cmd.String("name", "", "Name for the snapshot (optional, defaults to filename)")
+	rootPtr := cmd.String("root", "/", "Root path for the snapshot (defaults to /)")
+	
+	cmd.Parse(args)
+
+	if *sizesPtr == "" || *dbPtr == "" {
+		fmt.Println("Error: --sizes and --db are required. --hashes is optional but recommended.")
+		cmd.Usage()
+		os.Exit(1)
+	}
+
+	sizesPath := *sizesPtr
+	hashesPath := *hashesPtr
+	dbPath := *dbPtr
+	rootPath := *rootPtr
+	snapName := *namePtr
+
+	if snapName == "" {
+		snapName = filepath.Base(sizesPath)
+		// Clean up common suffixes
+		snapName = strings.TrimSuffix(snapName, "_files_sizes.txt")
+		snapName = strings.TrimSuffix(snapName, "_sizes.txt")
+		snapName = strings.TrimSuffix(snapName, ".txt")
+	}
+
+	// Open DB
+	dbStore, err := sqlite.NewSqliteStore(dbPath)
+	if err != nil {
+		fmt.Printf("Error opening DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer dbStore.Close()
+
+	// 1. Load Hashes into memory (if provided)
+	hashMap := make(map[string]string)
+	if hashesPath != "" {
+		fmt.Printf("Loading hashes from %s...\n", hashesPath)
+		hf, err := os.Open(hashesPath)
+		if err != nil {
+			fmt.Printf("Error opening hashes file: %v\n", err)
+			os.Exit(1)
+		}
+		defer hf.Close()
+		
+		hScanner := bufio.NewScanner(hf)
+		for hScanner.Scan() {
+			line := hScanner.Text()
+			// Format: HASH  ENCODING  BASE64_PATH
+			parts := strings.Split(line, "  ")
+			if len(parts) >= 3 {
+				hash := strings.TrimSpace(parts[0])
+				b64Path := strings.TrimSpace(parts[2])
+				hashMap[b64Path] = hash
+			}
+		}
+		fmt.Printf("Loaded %d hashes.\n", len(hashMap))
+	}
+
+	// 2. Stream Sizes and Create Records
+	sf, err := os.Open(sizesPath)
+	if err != nil {
+		fmt.Printf("Error opening sizes file: %v\n", err)
+		os.Exit(1)
+	}
+	defer sf.Close()
+
+	// Create Snapshot
+	snap, err := dbStore.CreateSnapshot(rootPath, snapName)
+	if err != nil {
+		fmt.Printf("Error creating snapshot: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Created snapshot ID %d (Name: %s)\n", snap.ID, snapName)
+
+	scanner := bufio.NewScanner(sf)
+	batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
+	var processedCount int64
+	
+	bar := progressbar.Default(-1, "Importing lines")
+	
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Split(line, "  ") // double space separator
+		if len(parts) < 3 {
+			continue
+		}
+		
+		sizeStr := strings.TrimSpace(parts[0])
+		b64Path := strings.TrimSpace(parts[2])
+		
+		size, err := strconv.ParseInt(sizeStr, 10, 64)
+		if err != nil {
+			continue
+		}
+		
+		decodedPathBytes, err := base64.StdEncoding.DecodeString(b64Path)
+		if err != nil {
+			continue
+		}
+		path := string(decodedPathBytes)
+		
+		// Lookup MD5
+		md5Hash := ""
+		if val, ok := hashMap[b64Path]; ok {
+			md5Hash = val
+		}
+
+		record := &models.FileRecord{
+			SnapshotID: snap.ID,
+			Path:       path,
+			Filename:   filepath.Base(path),
+			SizeBytes:  size,
+			ModTime:    time.Time{}, // Zero time
+			SHA1:       "",          // Empty SHA1 for legacy import
+			MD5:        md5Hash,     // MD5 from legacy
+		}
+		
+		batch = append(batch, record)
+		if len(batch) >= consts.DBBatchSize {
+			if err := dbStore.BatchAddFiles(batch); err != nil {
+				fmt.Printf("Error writing batch: %v\n", err)
+			}
+			processedCount += int64(len(batch))
+			bar.Add(len(batch))
+			batch = batch[:0]
+		}
+	}
+
+	if len(batch) > 0 {
+		if err := dbStore.BatchAddFiles(batch); err != nil {
+			fmt.Printf("Error writing batch: %v\n", err)
+		}
+		processedCount += int64(len(batch))
+		bar.Add(len(batch))
+	}
+	
+	bar.Finish()
+	fmt.Println()
+
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Error reading file: %v\n", err)
+	}
+	
+	if err := dbStore.CompleteSnapshot(snap.ID); err != nil {
+		fmt.Printf("Error completing snapshot: %v\n", err)
+	}
+	
+	fmt.Printf("Imported %d files.\n", processedCount)
 }

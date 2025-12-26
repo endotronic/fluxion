@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"crypto/md5"
 	"crypto/sha1"
 	"encoding/hex"
 	"fluxion/internal/models"
@@ -122,4 +123,62 @@ func sha1Sum(content string) string {
 	h := sha1.New()
 	h.Write([]byte(content))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func md5Sum(content string) string {
+	h := md5.New()
+	h.Write([]byte(content))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func TestRunScan_MD5(t *testing.T) {
+	// Setup Temp Dir
+	tmpDir, err := ioutil.TempDir("", "scanner_md5_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	file1Path := filepath.Join(tmpDir, "file1.txt")
+	err = ioutil.WriteFile(file1Path, []byte("hello"), 0644)
+	if err != nil {
+		t.Fatalf("Failed to write file1: %v", err)
+	}
+
+	hash1 := sha1Sum("hello")
+	md51 := md5Sum("hello")
+
+	// Config
+	resultsFn := make(chan ScanResult)
+	cfg := ScannerConfig{
+		RootPath:   tmpDir,
+		SnapshotID: 2,
+		NumWorkers: 1,
+		ComputeMD5: true,
+	}
+
+	// Run Scan
+	go RunScan(cfg, resultsFn)
+
+	// Collect Results
+	var files []*models.FileRecord
+	for res := range resultsFn {
+		if res.Error != nil {
+			t.Errorf("Scan error: %v", res.Error)
+			continue
+		}
+		files = append(files, res.File)
+	}
+
+	if len(files) != 1 {
+		t.Errorf("Expected 1 file, got %d", len(files))
+	} else {
+		f := files[0]
+		if f.SHA1 != hash1 {
+			t.Errorf("SHA1 mismatch. Want %s, got %s", hash1, f.SHA1)
+		}
+		if f.MD5 != md51 {
+			t.Errorf("MD5 mismatch. Want %s, got %s", md51, f.MD5)
+		}
+	}
 }

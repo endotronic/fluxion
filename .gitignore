@@ -1,2 +1,6 @@
-fluxion
+# Binary
+/fluxion
+
+# DBs and Test Data
+*.db
 testdata*
