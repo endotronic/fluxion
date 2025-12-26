@@ -1,4 +1,4 @@
-module file-hasher
+module fluxion
 
 go 1.25.5
 
