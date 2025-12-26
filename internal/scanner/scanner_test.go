@@ -40,6 +40,13 @@ func TestRunScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to write file2: %v", err)
 	}
+	
+	// Create a Symlink (should be skipped)
+	symlinkPath := filepath.Join(tmpDir, "symlink.txt")
+	err = os.Symlink(file1Path, symlinkPath)
+	if err != nil {
+		t.Fatalf("Failed to create symlink: %v", err)
+	}
 
 	// Expected Hashes
 	hash1 := sha1Sum("hello")
@@ -96,6 +103,8 @@ func TestRunScan(t *testing.T) {
 			if f.SHA1 != hash2 {
 				t.Errorf("File2 hash mismatch. Want %s, got %s", hash2, f.SHA1)
 			}
+		} else if f.Path == symlinkPath {
+			t.Errorf("Scanner included symlink: %s", f.Path)
 		} else {
 			t.Errorf("Unexpected file path: %s", f.Path)
 		}

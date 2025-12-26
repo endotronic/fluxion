@@ -91,6 +91,13 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 		}
 
 		if !d.IsDir() {
+			// Skip non-regular files (symlinks, devices, pipes, sockets)
+			if !d.Type().IsRegular() {
+				// Optional: Log skipped files? Or just silent ignore as requested.
+				// "ignore anything that could cause loops/cycles, blocking, etc."
+				return nil
+			}
+
 			// Check resume map
 			if cfg.ResumeMap != nil {
 				if _, exists := cfg.ResumeMap[path]; exists {
