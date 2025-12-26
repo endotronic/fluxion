@@ -423,11 +423,21 @@ func runDiff(args []string) {
 
 	for _, res := range results {
 		symbol := "?"
+		path := res.Path
 		switch res.Status {
-		case diff.StatusAdded: symbol = "[+]"
-		case diff.StatusRemoved: symbol = "[-]"
-		case diff.StatusModified: symbol = "[M]"
+		case diff.StatusAdded:
+			symbol = "[+]"
+		case diff.StatusRemoved:
+			symbol = "[-]"
+		case diff.StatusModified:
+			symbol = "[M]"
+		case diff.StatusMove:
+			symbol = "[>]"
+			path = fmt.Sprintf("%s -> %s", res.SourcePath, res.Path)
+		case diff.StatusCopy:
+			symbol = "[C]"
+			path = fmt.Sprintf("%s -> %s", res.SourcePath, res.Path)
 		}
-		fmt.Printf("%s %s\n", symbol, res.Path)
+		fmt.Printf("%s %s\n", symbol, path)
 	}
 }
