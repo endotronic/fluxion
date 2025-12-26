@@ -141,7 +141,13 @@ func (s *SqliteStore) BatchAddFiles(files []*models.FileRecord) error {
 	return tx.Commit()
 }
 
-func (s *SqliteStore) GetFilesForSnapshot(snapshotID int64) (map[string]models.FileRecord, error) {
+func (s *SqliteStore) GetFileCount(snapshotID int64) (int64, error) {
+	var count int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM files WHERE snapshot_id = ?`, snapshotID).Scan(&count)
+	return count, err
+}
+
+func (s *SqliteStore) GetFilesForSnapshot(snapshotID int64, onProgress func(int)) (map[string]models.FileRecord, error) {
 	rows, err := s.db.Query(`SELECT id, snapshot_id, path, filename, size_bytes, mod_time, sha1 FROM files WHERE snapshot_id = ?`, snapshotID)
 	if err != nil {
 		return nil, err
@@ -149,12 +155,20 @@ func (s *SqliteStore) GetFilesForSnapshot(snapshotID int64) (map[string]models.F
 	defer rows.Close()
 
 	result := make(map[string]models.FileRecord)
+	count := 0
 	for rows.Next() {
 		var f models.FileRecord
 		if err := rows.Scan(&f.ID, &f.SnapshotID, &f.Path, &f.Filename, &f.SizeBytes, &f.ModTime, &f.SHA1); err != nil {
 			return nil, err
 		}
 		result[f.Path] = f
+		count++
+		if onProgress != nil && count%1000 == 0 {
+			onProgress(count)
+		}
+	}
+	if onProgress != nil {
+		onProgress(count)
 	}
 	return result, nil
 }

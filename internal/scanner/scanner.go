@@ -24,6 +24,10 @@ type ScannerConfig struct {
 
 	CrossMounts bool
 	FailOnMount bool
+
+	// Callbacks
+	OnFileFound    func(path string, size int64)
+	OnWalkComplete func()
 }
 
 type ScanResult struct {
@@ -103,6 +107,10 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 		results <- ScanResult{Error: err}
 	}
 
+	if cfg.OnWalkComplete != nil {
+		cfg.OnWalkComplete()
+	}
+
 	close(paths)
 	wg.Wait()
 }
@@ -128,6 +136,10 @@ func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
 		SizeBytes:  info.Size(),
 		ModTime:    info.ModTime(),
 		SHA1:       hash,
+	}
+
+	if cfg.OnFileFound != nil {
+		cfg.OnFileFound(path, info.Size())
 	}
 
 	results <- ScanResult{File: record}
