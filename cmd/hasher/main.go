@@ -21,20 +21,75 @@ import (
 )
 
 func main() {
-	dirPtr := flag.String("dir", "", "Directory to scan (required)")
-	dbPtr := flag.String("db", "", "Path to sqlite DB (optional, defaults to <dirname>.db)")
-	threadsPtr := flag.Int("threads", runtime.NumCPU(), "Number of threads")
-	forceNewPtr := flag.Bool("new", false, "Force new scan (ignore previous)")
-	forceResumePtr := flag.Bool("resume", false, "Force resume (if possible)")
+	// Parse subcommand
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: file-hasher <subcommand> [flags]")
+		fmt.Println("Subcommands: snapshot, list")
+		os.Exit(1)
+	}
+
+	switch os.Args[1] {
+	case "snapshot":
+		runSnapshot(os.Args[2:])
+	case "list":
+		runList(os.Args[2:])
+	default:
+		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
+		os.Exit(1)
+	}
+}
+
+func runList(args []string) {
+	cmd := flag.NewFlagSet("list", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	cmd.Parse(args)
+
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required for list")
+		cmd.Usage()
+		os.Exit(1)
+	}
+
+	dbStore, err := sqlite.NewSqliteStore(*dbPtr)
+	if err != nil {
+		fmt.Printf("Error opening DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer dbStore.Close()
+
+	snaps, err := dbStore.ListSnapshots()
+	if err != nil {
+		fmt.Printf("Error listing snapshots: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("ID\tStatus\tStarted At\t\t\tFinished At\t\t\tRoot Path")
+	fmt.Println("--\t------\t----------\t\t\t-----------\t\t\t---------")
+	for _, s := range snaps {
+		finished := "N/A"
+		if s.FinishedAt != nil {
+			finished = s.FinishedAt.Format(time.RFC3339)
+		}
+		fmt.Printf("%d\t%s\t%s\t%s\t%s\n", s.ID, s.Status, s.StartedAt.Format(time.RFC3339), finished, s.RootPath)
+	}
+}
+
+func runSnapshot(args []string) {
+	cmd := flag.NewFlagSet("snapshot", flag.ExitOnError)
+	dirPtr := cmd.String("dir", "", "Directory to scan (required)")
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (optional, defaults to <dirname>.db)")
+	threadsPtr := cmd.Int("threads", runtime.NumCPU(), "Number of threads")
+	forceNewPtr := cmd.Bool("new", false, "Force new scan (ignore previous)")
+	forceResumePtr := cmd.Bool("resume", false, "Force resume (if possible)")
 	
-	crossMountsPtr := flag.Bool("cross-mounts", true, "Traverse mount points")
-	failOnMountPtr := flag.Bool("fail-on-mount", false, "Fail if mount point encountered")
+	crossMountsPtr := cmd.Bool("cross-mounts", true, "Traverse mount points")
+	failOnMountPtr := cmd.Bool("fail-on-mount", false, "Fail if mount point encountered")
 	
-	flag.Parse()
+	cmd.Parse(args)
 
 	if *dirPtr == "" {
 		fmt.Println("Error: --dir is required")
-		flag.Usage()
+		cmd.Usage()
 		os.Exit(1)
 	}
 
@@ -213,9 +268,6 @@ func main() {
 					found := foundCount.Load()
 					bar.Describe(fmt.Sprintf("Scanning (Found %d)...", found))
 					bar.ChangeMax64(int64(found) + 100) // Keep it moving / indeterminate illusion?
-					// actually progressbar v3 indeterminate is Max=-1.
-					// If we keep changing Max, it might look weird.
-					// Let's just update description.
 				} else {
 					bar.Describe("Hashing...")
 				}
@@ -233,9 +285,7 @@ func main() {
 		// count := 0 // use processedCount
 		for res := range results {
 			if res.Error != nil {
-				// Log to separate line so bar isn't messed up?
-				// progressbar handles stderr.
-				// fmt.Fprintf(os.Stderr, "Error: %v\n", res.Error)
+				// progressbar handles stderr
 				continue
 			}
 			batch = append(batch, res.File)

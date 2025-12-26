@@ -107,6 +107,29 @@ func (s *SqliteStore) GetLastSnapshot(rootPath string) (*models.Snapshot, error)
 	return &snap, nil
 }
 
+func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
+	rows, err := s.db.Query(`SELECT id, root_path, started_at, finished_at, status FROM snapshots ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var snaps []*models.Snapshot
+	for rows.Next() {
+		var snap models.Snapshot
+		var finishedAt sql.NullTime
+		if err := rows.Scan(&snap.ID, &snap.RootPath, &snap.StartedAt, &finishedAt, &snap.Status); err != nil {
+			return nil, err
+		}
+		if finishedAt.Valid {
+			t := finishedAt.Time
+			snap.FinishedAt = &t
+		}
+		snaps = append(snaps, &snap)
+	}
+	return snaps, nil
+}
+
 func (s *SqliteStore) CompleteSnapshot(id int64) error {
 	now := time.Now()
 	_, err := s.db.Exec(`UPDATE snapshots SET status = ?, finished_at = ? WHERE id = ?`, models.StatusCompleted, now, id)
