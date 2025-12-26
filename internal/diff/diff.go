@@ -307,15 +307,34 @@ func detectMovesCopies(root *Node) {
 			return 
 		}
 		
-		// If removed, add to removedMap
+		// If removed (or Modified: Treat old content as removed), add to removedMap
 		if n.Status == StatusRemoved {
 			removedMap[n.MerkleHash] = append(removedMap[n.MerkleHash], n.Path)
+		} else if n.Status == StatusModified && n.IsFile {
+			// For Modified files, HashA acts as "Removed"
+			if n.HashA != "" {
+				removedMap[n.HashA] = append(removedMap[n.HashA], n.Path)
+			}
 		}
 		
 		// If existed in A (Removed OR Modified OR Unchanged OR Mixed), add to ExistingMap
 		// (Used for Copy detection)
 		if n.Status != StatusAdded {
-			existingMap[n.MerkleHash] = append(existingMap[n.MerkleHash], n.Path)
+			// For Modified/Removed files, use HashA (Old Content)
+			if n.IsFile {
+				if n.HashA != "" {
+					existingMap[n.HashA] = append(existingMap[n.HashA], n.Path)
+				}
+			} else {
+				// Directories: MerkleHash is HashB. But we need HashA?
+				// Directory hash logic is simpler (Added/Removed/Copied).
+				// If StatusUnchanged, MerkleHash is correct.
+				// If StatusRemoved, MerkleHash is correct (HashA).
+				// We rely on MerkleHash for directories. 
+				// For Modified directories? We don't support "Modified Directory content" copy robustly yet.
+				// Just stick to MerkleHash for Dirs.
+				existingMap[n.MerkleHash] = append(existingMap[n.MerkleHash], n.Path)
+			}
 		}
 		
 		for _, child := range n.Children {
@@ -324,10 +343,10 @@ func detectMovesCopies(root *Node) {
 	}
 	index(root)
 	
-	// 2. Scan for Added nodes and match
+	// 2. Scan for Added/Modified nodes and match
 	var match func(*Node)
 	match = func(n *Node) {
-		if n.Status == StatusAdded && n.MerkleHash != "" {
+		if (n.Status == StatusAdded || n.Status == StatusModified) && n.MerkleHash != "" {
 			// Check Removed (Move) first
 			if paths, ok := removedMap[n.MerkleHash]; ok && len(paths) > 0 {
 				// Match found!
@@ -343,9 +362,10 @@ func detectMovesCopies(root *Node) {
 				n.SourcePath = src // Use SourcePath field
 				
 				// Mark Source as MovedSource to suppress removal
-				// We need to look up source node.
+				// Only suppress if it was actually "Removed".
+				// If it was "Modified" (Swap/Overwrite), we keep it to show the new content.
 				srcNode := findNode(root, paths[0])
-				if srcNode != nil {
+				if srcNode != nil && srcNode.Status == StatusRemoved {
 					srcNode.Status = StatusMovedSource
 				}
 				

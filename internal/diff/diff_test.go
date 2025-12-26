@@ -177,6 +177,68 @@ func TestCompareSnapshots(t *testing.T) {
 				{Path: "/root/file3", Status: StatusCopy, SourcePath: "/root/file1"},
 			},
 		},
+		{
+			name: "Nested Directory Move",
+			filesA: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/src/sub/file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/dst/sub/file1": {SHA1: "hash1"},
+			},
+			want: []DiffResult{
+				{Path: "/root/dst/", Status: StatusMove, SourcePath: "/root/src/"},
+			},
+		},
+		{
+			name: "File Swap",
+			filesA: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/fileA": {SHA1: "hashA"},
+				"/root/fileB": {SHA1: "hashB"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/fileA": {SHA1: "hashB"}, // Became hashB (Move from fileB)
+				"/root/fileB": {SHA1: "hashA"}, // Became hashA (Move from fileA)
+			},
+			// Expecting specific moves if logic allows swap detection
+			want: []DiffResult{
+				{Path: "/root/fileA", Status: StatusMove, SourcePath: "/root/fileB"},
+				{Path: "/root/fileB", Status: StatusMove, SourcePath: "/root/fileA"},
+			},
+		},
+		{
+			name: "Partial Directory Move",
+			filesA: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/src/file1": {SHA1: "hash1"},
+				"/root/src/file2": {SHA1: "hash2"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/src/file2": {SHA1: "hash2"}, // Stayed
+				"/root/dst/file1": {SHA1: "hash1"}, // Moved
+			},
+			want: []DiffResult{
+				{Path: "/root/dst/file1", Status: StatusMove, SourcePath: "/root/src/file1"},
+			},
+		},
+		{
+			name: "Root Level File Move into Subdir",
+			filesA: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/subdir/file1": {SHA1: "hash1"}, // Moved
+			},
+			want: []DiffResult{
+				{Path: "/root/subdir/file1", Status: StatusMove, SourcePath: "/root/file1"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
