@@ -14,6 +14,7 @@ import (
 	"github.com/schollz/progressbar/v3"
 
 	"file-hasher/internal/consts"
+	"file-hasher/internal/diff"
 	"file-hasher/internal/models"
 	"file-hasher/internal/scanner"
 	"file-hasher/internal/store"
@@ -24,7 +25,7 @@ func main() {
 	// Parse subcommand
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: file-hasher <subcommand> [flags]")
-		fmt.Println("Subcommands: snapshot, list")
+		fmt.Println("Subcommands: snapshot, list, diff")
 		os.Exit(1)
 	}
 
@@ -33,6 +34,8 @@ func main() {
 		runSnapshot(os.Args[2:])
 	case "list":
 		runList(os.Args[2:])
+	case "diff":
+		runDiff(os.Args[2:])
 	default:
 		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
 		os.Exit(1)
@@ -317,4 +320,114 @@ func runSnapshot(args []string) {
 	}
 	
 	fmt.Printf("Duration: %v\n", time.Since(start))
+}
+
+func runDiff(args []string) {
+	cmd := flag.NewFlagSet("diff", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	cmd.Parse(args)
+
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required for diff")
+		cmd.Usage()
+		os.Exit(1)
+	}
+	
+	tail := cmd.Args()
+	if len(tail) != 2 {
+		fmt.Println("Usage: file-hasher diff --db <db> <old_snapshot_id> <new_snapshot_id>")
+		os.Exit(1)
+	}
+
+	oldIDStr := tail[0]
+	newIDStr := tail[1]
+	
+	// Parse IDs... (assuming strconv needed, wait I forgot import)
+	// I'll add strconv import in a separate replace or use fmt.Sscanf
+	var oldID, newID int64
+	fmt.Sscanf(oldIDStr, "%d", &oldID)
+	fmt.Sscanf(newIDStr, "%d", &newID)
+
+	// Open DB
+	dbStore, err := sqlite.NewSqliteStore(*dbPtr)
+	if err != nil {
+		fmt.Printf("Error opening DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer dbStore.Close()
+
+	// 1. Get Metadata
+	snaps, err := dbStore.ListSnapshots()
+	if err != nil {
+		fmt.Printf("Error listing snapshots: %v\n", err)
+		os.Exit(1)
+	}
+	// Logic to find specific snapshots? ListSnapshots returns all. 
+	// We might need GetSnapshot(id). But Store doesn't have it.
+	// We can iterate the list.
+	
+	var snapA, snapB *models.Snapshot
+	for _, s := range snaps {
+		if s.ID == oldID {
+			snapA = s
+		}
+		if s.ID == newID {
+			snapB = s
+		}
+	}
+	
+	if snapA == nil || snapB == nil {
+		fmt.Println("Error: could not find one or both snapshots.")
+		os.Exit(1)
+	}
+	
+	// Validate Root Path
+	if snapA.RootPath != snapB.RootPath {
+		fmt.Printf("Error: Root paths do not match.\nSnapshot %d: %s\nSnapshot %d: %s\n", snapA.ID, snapA.RootPath, snapB.ID, snapB.RootPath)
+		os.Exit(1)
+	}
+
+	// 2. Load Maps with Progress
+	fmt.Printf("Loading Snapshot %d...\n", oldID)
+	countA, _ := dbStore.GetFileCount(oldID)
+	barA := progressbar.Default(countA)
+	filesA, err := dbStore.GetFilesForSnapshot(oldID, func(c int) { barA.Set(c) })
+	if err != nil { panic(err) }
+	
+	fmt.Printf("\nLoading Snapshot %d...\n", newID)
+	countB, _ := dbStore.GetFileCount(newID)
+	barB := progressbar.Default(countB)
+	filesB, err := dbStore.GetFilesForSnapshot(newID, func(c int) { barB.Set(c) })
+	if err != nil { panic(err) }
+	fmt.Println()
+
+	// 3. Compare with Progress
+	// Total ops = len(A) + len(B)
+	fmt.Println("Computing Diff...")
+	barDiff := progressbar.Default(int64(len(filesA) + len(filesB)))
+	
+	results, err := diff.CompareSnapshots(filesA, filesB, func(curr, total int) {
+		barDiff.Set(curr)
+	})
+	if err != nil {
+		fmt.Printf("Error during diff: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println()
+
+	// 4. Print Results
+	if len(results) == 0 {
+		fmt.Println("No differences found.")
+		return
+	}
+
+	for _, res := range results {
+		symbol := "?"
+		switch res.Status {
+		case diff.StatusAdded: symbol = "[+]"
+		case diff.StatusRemoved: symbol = "[-]"
+		case diff.StatusModified: symbol = "[M]"
+		}
+		fmt.Printf("%s %s\n", symbol, res.Path)
+	}
 }
