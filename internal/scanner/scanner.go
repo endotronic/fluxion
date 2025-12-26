@@ -3,8 +3,8 @@ package scanner
 import (
 	"crypto/sha1"
 	"encoding/hex"
-	"file-hasher/internal/consts"
-	"file-hasher/internal/models"
+	"fluxion/internal/consts"
+	"fluxion/internal/models"
 	"fmt"
 	"io"
 	"os"

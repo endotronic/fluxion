@@ -3,7 +3,7 @@ package scanner
 import (
 	"crypto/sha1"
 	"encoding/hex"
-	"file-hasher/internal/models"
+	"fluxion/internal/models"
 	"io/ioutil"
 	"os"
 	"path/filepath"

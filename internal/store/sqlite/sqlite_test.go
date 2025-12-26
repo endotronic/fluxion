@@ -1,7 +1,7 @@
 package sqlite
 
 import (
-	"file-hasher/internal/models"
+	"fluxion/internal/models"
 	"testing"
 	"time"
 )

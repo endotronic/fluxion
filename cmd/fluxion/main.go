@@ -13,12 +13,12 @@ import (
 
 	"github.com/schollz/progressbar/v3"
 
-	"file-hasher/internal/consts"
-	"file-hasher/internal/diff"
-	"file-hasher/internal/models"
-	"file-hasher/internal/scanner"
-	"file-hasher/internal/store"
-	"file-hasher/internal/store/sqlite"
+	"fluxion/internal/consts"
+	"fluxion/internal/diff"
+	"fluxion/internal/models"
+	"fluxion/internal/scanner"
+	"fluxion/internal/store"
+	"fluxion/internal/store/sqlite"
 )
 
 func main() {
@@ -404,9 +404,31 @@ func runDiff(args []string) {
 	// 3. Compare with Progress
 	// Total ops = len(A) + len(B)
 	fmt.Println("Computing Diff...")
-	barDiff := progressbar.Default(int64(len(filesA) + len(filesB)))
 	
-	results, err := diff.CompareSnapshots(filesA, filesB, func(curr, total int) {
+	// Prepare relative maps
+	relFilesA := make(map[string]models.FileRecord, len(filesA))
+	for k, v := range filesA {
+		rel, err := filepath.Rel(snapA.RootPath, k)
+		if err == nil {
+			relFilesA[rel] = v
+		} else {
+			relFilesA[k] = v // Fallback
+		}
+	}
+	
+	relFilesB := make(map[string]models.FileRecord, len(filesB))
+	for k, v := range filesB {
+		rel, err := filepath.Rel(snapB.RootPath, k)
+		if err == nil {
+			relFilesB[rel] = v
+		} else {
+			relFilesB[k] = v // Fallback
+		}
+	}
+
+	barDiff := progressbar.Default(int64(len(filesA) + len(filesB)))
+
+	results, err := diff.CompareSnapshots(relFilesA, relFilesB, snapA.RootPath, snapB.RootPath, func(curr, total int) {
 		barDiff.Set(curr)
 	})
 	if err != nil {

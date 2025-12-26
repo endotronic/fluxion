@@ -1,7 +1,7 @@
 package diff
 
 import (
-	"file-hasher/internal/models"
+	"fluxion/internal/models"
 	"testing"
 )
 
@@ -243,7 +243,23 @@ func TestCompareSnapshots(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := CompareSnapshots(tt.filesA, tt.filesB, nil)
+			// Tests mostly used /root as prefix. We can treat /root as the base.
+			// But the test data has inputs like "/root/file1".
+			// If we pass empty roots, the reconstructor might just use the relative paths (which are absolute strings here).
+			// Ideally, we should update test data to be relative?
+			// Or we pass root="/"?
+			
+			// Let's assume input maps are ALREADY relative for the test?
+			// The validation in main.go converts absolute to relative.
+			// CompareSnapshots EXPECTS relative keys.
+			// Currently test data uses keys like "/root/file1".
+			// If we pass root="/", then Join("/", "/root/file1") -> "/root/file1".
+			// That works.
+			
+			rootA := "/"
+			rootB := "/"
+			
+			got, err := CompareSnapshots(tt.filesA, tt.filesB, rootA, rootB, nil)
 			if err != nil {
 				t.Errorf("CompareSnapshots() error = %v", err)
 				return

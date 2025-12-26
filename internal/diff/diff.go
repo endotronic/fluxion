@@ -1,7 +1,8 @@
 package diff
 
 import (
-	"file-hasher/internal/models"
+	"fluxion/internal/models"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -48,7 +49,8 @@ type DiffResult struct {
 }
 
 // CompareSnapshots computes the diff between two sets of files.
-func CompareSnapshots(filesA, filesB map[string]models.FileRecord, onProgress func(current, total int)) ([]DiffResult, error) {
+// filesA and filesB keys must be relative paths to their respective roots.
+func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB string, onProgress func(current, total int)) ([]DiffResult, error) {
 	root := &Node{
 		Name:     "",
 		Path:     "",
@@ -96,13 +98,61 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, onProgress fu
 	// 7. Collapse and Collect (Top-Down)
 	var results []DiffResult
 	collectResults(root, &results)
+	
+	// 8. Reconstruct Absolute Paths for Result
+	// We want to present absolute paths to the user.
+	// Logic:
+	// - Added: rootB + Path
+	// - Removed: rootA + Path
+	// - Modified: rootB + Path
+	// - Move/Copy: SourcePath (rootA) -> Path (rootB)
+	
+	finalResults := make([]DiffResult, len(results))
+	for i, res := range results {
+		// Clean paths (remove leading slash if present from Node path construction)
+		relPath := strings.TrimPrefix(res.Path, "/")
+		
+		var absPath string
+		var absSource string
+		
+		switch res.Status {
+		case StatusAdded, StatusModified, StatusMove, StatusCopy:
+			absPath = filepath.Join(rootB, relPath)
+			// Ensure trailing slash for dirs if original had it?
+			// filepath.Join removes trailing slash.
+			if strings.HasSuffix(res.Path, "/") {
+				absPath += string(filepath.Separator)
+			}
+		case StatusRemoved:
+			absPath = filepath.Join(rootA, relPath)
+			if strings.HasSuffix(res.Path, "/") {
+				absPath += string(filepath.Separator)
+			}
+		default:
+			absPath = filepath.Join(rootB, relPath)
+		}
+		
+		if res.SourcePath != "" {
+			relSource := strings.TrimPrefix(res.SourcePath, "/")
+			absSource = filepath.Join(rootA, relSource)
+			if strings.HasSuffix(res.SourcePath, "/") {
+				absSource += string(filepath.Separator)
+			}
+		}
+		
+		finalResults[i] = DiffResult{
+			Path: absPath,
+			Status: res.Status,
+			SourcePath: absSource,
+		}
+	}
 
 	// Sort results
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Path < results[j].Path
+	sort.Slice(finalResults, func(i, j int) bool {
+		return finalResults[i].Path < finalResults[j].Path
 	})
 
-	return results, nil
+	return finalResults, nil
 }
 
 func insertNode(root *Node, path string, hash string, isA bool) {

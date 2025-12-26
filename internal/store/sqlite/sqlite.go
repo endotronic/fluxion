@@ -2,8 +2,8 @@ package sqlite
 
 import (
 	"database/sql"
-	"file-hasher/internal/models"
-	"file-hasher/internal/store"
+	"fluxion/internal/models"
+	"fluxion/internal/store"
 	"fmt"
 	"time"
 

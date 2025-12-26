@@ -1,6 +1,6 @@
 package store
 
-import "file-hasher/internal/models"
+import "fluxion/internal/models"
 
 type Store interface {
 	CreateSnapshot(rootPath string) (*models.Snapshot, error)
