@@ -342,15 +342,13 @@ func runSnapshot(args []string) {
 					found := foundCount.Load()
 					desc := fmt.Sprintf("Scanning (Found %d)...", found)
 					
-					// Check saturation (if channel is >= 90% full)
-					// Only relevant if we have a buffer
+					// Add buffer stats
 					capRes := cap(results)
-					if capRes > 0 && float64(len(results)) >= float64(capRes)*0.9 {
-						desc = fmt.Sprintf("Scanning (Found %d) [Pipeline Saturated]...", found)
+					if capRes > 0 {
+						desc = fmt.Sprintf("Scanning (Found %d) [%2.0f%% Saturated]...", found, float64(len(results))/float64(capRes)*100)
 					}
 					
 					bar.Describe(desc)
-					bar.ChangeMax64(int64(found) + 100) // Keep it moving / indeterminate illusion?
 				} else {
 					bar.Describe("Hashing...")
 				}
