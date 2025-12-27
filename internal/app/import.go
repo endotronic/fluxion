@@ -45,6 +45,11 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 		snapName = strings.TrimSuffix(snapName, ".txt")
 	}
 	
+	// Logic for Legacy Inference:
+	// We attempt to intelligently guess the 'sizes' file path if it's not provided,
+	// by assuming a standard naming convention (replacing "hashes" with "sizes").
+	// We also attempt to auto-detect the root path by finding the common prefix of files.
+	
 	// Infer Sizes File if not provided
 	sizesPath := cfg.SizesPath
 	if sizesPath == "" {

@@ -54,6 +54,12 @@ func RunDupes(cfg DupesConfig) error {
 	
 	fmt.Printf("Analyze %d files for duplicates (Min Size: %d)...\n", len(files), cfg.MinSize)
 	
+	// Optimization Note:
+	// We pass the file map directly to FindDuplicates to avoid expensive slice conversion/allocation.
+	// The `files` map comes from `GetFilesForSnapshot` which loads the entire snapshot into memory.
+	// For very large snapshots (millions of files), this might need to be refactored to a streaming approach
+	// or database-side duplicate detection, but for now this is efficient enough for typical use cases.
+	
 	// Run Dupes Analysis
 	// We use `FindDuplicates` from `internal/dupes/dupes.go`.
 	groups, err := dupes.FindDuplicates(files, cfg.MinSize, snap.RootPath)

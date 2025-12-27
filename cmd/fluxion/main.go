@@ -11,6 +11,12 @@ import (
 )
 
 func main() {
+	// Architecture Note:
+	// This main function acts as a thin wrapper (CLI Layer).
+	// It handles argument parsing using the `flag` package and delegates logical execution
+	// to the `internal/app` package. Each subcommand has a corresponding `Run<Command>` function
+	// in `internal/app` that accepts a configuration struct.
+	
 	// Parse subcommand
 	if len(os.Args) < 2 {
 		printUsage()
