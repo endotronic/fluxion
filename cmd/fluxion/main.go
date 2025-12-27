@@ -335,12 +335,9 @@ func runSnapshot(args []string) {
 			case <-walkDone:
 				walking = false
 				// Switch to determinate
-				total := foundBytes.Load()
-				bar.ChangeMax64(total)
+				bar.ChangeMax64(foundBytes.Load())
 			case <-ticker.C:
 				current := processedBytes.Load()
-				// Update description with found count if walking
-				// Update description with found count if walking
 				if walking {
 					found := foundCount.Load()
 					desc := fmt.Sprintf("Scanning (Found %d)...", found)
@@ -348,7 +345,10 @@ func runSnapshot(args []string) {
 					// Add buffer stats
 					capRes := cap(results)
 					if capRes > 0 {
-						desc = fmt.Sprintf("Scanning (Found %d) [%.0f%% Saturated]...", found, float64(len(results))/float64(capRes)*100)
+						saturation := float64(len(results)) / float64(capRes)
+						delta := foundCount.Load() - processedCount.Load()
+						sat2 := float64(delta) / float64(capRes)
+						desc = fmt.Sprintf("Scanning (Found %d) [%.0f%% Saturated %.0f%% ]...", found, saturation*100, sat2*100)
 					}
 					
 					bar.Describe(desc)

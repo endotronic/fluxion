@@ -112,12 +112,12 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 		results <- ScanResult{Error: err}
 	}
 
+	close(paths)
+	wg.Wait()
+
 	if cfg.OnWalkComplete != nil {
 		cfg.OnWalkComplete()
 	}
-
-	close(paths)
-	wg.Wait()
 }
 
 func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
