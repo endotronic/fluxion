@@ -332,9 +332,19 @@ func runSnapshot(args []string) {
 			case <-ticker.C:
 				current := processedCount.Load()
 				// Update description with found count if walking
+				// Update description with found count if walking
 				if walking {
 					found := foundCount.Load()
-					bar.Describe(fmt.Sprintf("Scanning (Found %d)...", found))
+					desc := fmt.Sprintf("Scanning (Found %d)...", found)
+					
+					// Check saturation (if channel is >= 90% full)
+					// Only relevant if we have a buffer
+					capRes := cap(results)
+					if capRes > 0 && float64(len(results)) >= float64(capRes)*0.9 {
+						desc = fmt.Sprintf("Scanning (Found %d) [Pipeline Saturated]...", found)
+					}
+					
+					bar.Describe(desc)
 					bar.ChangeMax64(int64(found) + 100) // Keep it moving / indeterminate illusion?
 				} else {
 					bar.Describe("Hashing...")
