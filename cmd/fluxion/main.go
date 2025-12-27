@@ -282,7 +282,7 @@ func runSnapshot(args []string) {
 	// Progress Reporting
 	var foundCount atomic.Int64
 	var foundBytes atomic.Int64
-	var processedCount atomic.Int64
+	var processedBytes atomic.Int64
 	
 	walkDone := make(chan bool)
 	done := make(chan bool)
@@ -337,7 +337,7 @@ func runSnapshot(args []string) {
 				total := foundCount.Load()
 				bar.ChangeMax64(total)
 			case <-ticker.C:
-				current := processedCount.Load()
+				current := processedBytes.Load()
 				// Update description with found count if walking
 				// Update description with found count if walking
 				if walking {
@@ -347,7 +347,7 @@ func runSnapshot(args []string) {
 					// Add buffer stats
 					capRes := cap(results)
 					if capRes > 0 {
-						desc = fmt.Sprintf("Scanning (Found %d) [%2.0f%% Saturated]...", found, float64(len(results))/float64(capRes)*100)
+						desc = fmt.Sprintf("Scanning (Found %d) [%.0f%% Saturated]...", found, float64(len(results))/float64(capRes)*100)
 					}
 					
 					bar.Describe(desc)
@@ -376,7 +376,12 @@ func runSnapshot(args []string) {
 				if err := dbStore.BatchAddFiles(batch); err != nil {
 					fmt.Printf("Error writing batch: %v\n", err)
 				}
-				processedCount.Add(int64(len(batch)))
+				
+				var sum int64
+				for _, f := range batch {
+					sum += f.SizeBytes
+				}
+				processedBytes.Add(sum)
 				batch = batch[:0]
 			}
 		}
@@ -385,7 +390,11 @@ func runSnapshot(args []string) {
 			if err := dbStore.BatchAddFiles(batch); err != nil {
 				fmt.Printf("Error writing batch: %v\n", err)
 			}
-			processedCount.Add(int64(len(batch)))
+			var sum int64
+			for _, f := range batch {
+				sum += f.SizeBytes
+			}
+			processedBytes.Add(sum)
 		}
 		done <- true
 	}()
