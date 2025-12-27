@@ -7,6 +7,8 @@ import (
 	"fluxion/internal/store"
 	"fluxion/internal/store/sqlite"
 	"fluxion/internal/util"
+
+	"github.com/sirupsen/logrus"
 )
 
 type DupesConfig struct {
@@ -38,7 +40,7 @@ func RunDupes(cfg DupesConfig) error {
 		return fmt.Errorf("error finding snapshot: %w", err)
 	}
 
-	fmt.Printf("Finding duplicates in snapshot '%s' (ID: %d)...\n", snap.Name, snap.ID)
+	logrus.Infof("Finding duplicates in snapshot '%s' (ID: %d)...", snap.Name, snap.ID)
 
 	// Determine strategy
 	// If snapshot has specific hashes, prioritize stronger ones?
@@ -46,14 +48,14 @@ func RunDupes(cfg DupesConfig) error {
 	// But `internal/dupes` might need `GetFilesForSnapshot`.
 	
 	// Load files
-	fmt.Println("Loading file list...")
+	logrus.Info("Loading file list...")
 	files, err := dbStore.GetFilesForSnapshot(snap.ID, nil) // No progress bar for now or simple
 	if err != nil {
 		return fmt.Errorf("error loading files: %w", err)
 	}
 	
 	
-	fmt.Printf("Analyze %d files for duplicates (Min Size: %s)...\n", len(files), util.FormatBytes(cfg.MinSize))
+	logrus.Infof("Analyze %d files for duplicates (Min Size: %s)...", len(files), util.FormatBytes(cfg.MinSize))
 	
 	// Optimization Note:
 	// We pass the file map directly to FindDuplicates to avoid expensive slice conversion/allocation.
@@ -69,7 +71,7 @@ func RunDupes(cfg DupesConfig) error {
 	}
 	
 	if len(groups) == 0 {
-		fmt.Println("No duplicates found.")
+		logrus.Info("No duplicates found.")
 		return nil
 	}
 	

@@ -15,6 +15,7 @@ import (
 	"fluxion/internal/store/sqlite"
 
 	"github.com/schollz/progressbar/v3"
+	"github.com/sirupsen/logrus"
 )
 
 type ImportLegacyConfig struct {
@@ -60,13 +61,13 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 			inferred := strings.Replace(cfg.HashesPath, "hashes", "sizes", 1)
 			if _, err := os.Stat(inferred); err == nil {
 				sizesPath = inferred
-				fmt.Printf("Inferred sizes file: %s\n", sizesPath)
+				logrus.Infof("Inferred sizes file: %s", sizesPath)
 			}
 		}
 	}
 	
 	if sizesPath == "" {
-		fmt.Println("Warning: Sizes file not provided and could not be inferred. Importing with 0 sizes.")
+		logrus.Warn("Sizes file not provided and could not be inferred. Importing with 0 sizes.")
 	}
 
 	// Open DB
@@ -79,7 +80,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 	// 1. Load Sizes into memory (if provided)
 	sizeMap := make(map[string]int64)
 	if sizesPath != "" {
-		fmt.Printf("Loading sizes from %s...\n", sizesPath)
+		logrus.Infof("Loading sizes from %s...", sizesPath)
 		sf, err := os.Open(sizesPath)
 		if err != nil {
 			return fmt.Errorf("error opening sizes file: %w", err)
@@ -101,7 +102,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 				}
 			}
 		}
-		fmt.Printf("Loaded %d size records.\n", len(sizeMap))
+		logrus.Infof("Loaded %d size records.", len(sizeMap))
 	}
 
 	// 2. Open Hashes File
@@ -113,7 +114,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 
 	// Autodetect Root if not provided (or default "/")
 	if rootPath == "/" {
-		fmt.Println("Autodetecting root path from hashes file...")
+		logrus.Info("Autodetecting root path from hashes file...")
 		scanner := bufio.NewScanner(hf)
 		var commonPrefix string
 		first := true
@@ -153,7 +154,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 		
 		if commonPrefix == "" { commonPrefix = "/" }
 		rootPath = commonPrefix
-		fmt.Printf("Detected root: %s\n", rootPath)
+		logrus.Infof("Detected root: %s", rootPath)
 		
 		// Rewind file
 		if _, err := hf.Seek(0, 0); err != nil {
@@ -173,7 +174,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 	if err != nil {
 		return fmt.Errorf("error creating snapshot: %w", err)
 	}
-	fmt.Printf("Created snapshot ID %d (Name: %s)\n", snap.ID, finalName)
+	logrus.Infof("Created snapshot ID %d (Name: %s)", snap.ID, finalName)
 
 	scanner := bufio.NewScanner(hf)
 	batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
@@ -236,7 +237,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 	fmt.Println()
 
 	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading file: %v\n", err)
+		logrus.Errorf("Error reading file: %v", err)
 	}
 	
 	// Get ModTime of the Hashes file to use as finish time
@@ -246,10 +247,10 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 	}
 
 	if err := dbStore.CompleteSnapshot(snap.ID, finishTime); err != nil {
-		fmt.Printf("Error completing snapshot: %v\n", err)
+		logrus.Errorf("Error completing snapshot: %v", err)
 	}
 	
-	fmt.Printf("Imported %d files.\n", processedCount)
+	logrus.Infof("Imported %d files.", processedCount)
 	return nil
 }
 
@@ -266,7 +267,7 @@ func RunImportDB(cfg ImportDBConfig) error {
 		return fmt.Errorf("destination DB path is required")
 	}
 
-	fmt.Printf("Importing from %s to %s\n", cfg.SourceDBPath, cfg.DestDBPath)
+	logrus.Infof("Importing from %s to %s", cfg.SourceDBPath, cfg.DestDBPath)
 
 	// Open Source
 	sourceStore, err := sqlite.NewSqliteStore(cfg.SourceDBPath)
@@ -289,19 +290,19 @@ func RunImportDB(cfg ImportDBConfig) error {
 	}
 
 	if len(snaps) == 0 {
-		fmt.Println("No snapshots found in source DB.")
+		logrus.Info("No snapshots found in source DB.")
 		return nil
 	}
 
-	fmt.Printf("Found %d snapshots in source. Importing...\n", len(snaps))
+	logrus.Infof("Found %d snapshots in source. Importing...", len(snaps))
 
 	for _, s := range snaps {
-		fmt.Printf("Importing snapshot '%s' (ID: %d)...\n", s.Name, s.ID)
+		logrus.Infof("Importing snapshot '%s' (ID: %d)...", s.Name, s.ID)
 
 		// Resolve unique name
 		finalName, err := getUniqueSnapshotName(destStore, s.Name, false)
 		if err != nil {
-			fmt.Printf("Error resolving name for '%s': %v\n", s.Name, err)
+			logrus.Errorf("Error resolving name for '%s': %v", s.Name, err)
 			continue
 		}
 		
@@ -309,7 +310,7 @@ func RunImportDB(cfg ImportDBConfig) error {
 		h, _ := os.Hostname()
 		newSnap, err := destStore.CreateSnapshot(s.RootPath, finalName, h)
 		if err != nil {
-			fmt.Printf("Error creating snapshot in dest: %v\n", err)
+			logrus.Errorf("Error creating snapshot in dest: %v", err)
 			continue
 		}
 		
@@ -323,11 +324,11 @@ func RunImportDB(cfg ImportDBConfig) error {
 			bar.Set(c)
 		})
 		if err != nil {
-			fmt.Printf("Error reading files from source: %v\n", err)
+			logrus.Errorf("Error reading files from source: %v", err)
 			continue
 		}
 		bar.Finish()
-		fmt.Println()
+		logrus.Println()
 
 		// Insert into Dest
 		batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
@@ -348,7 +349,7 @@ func RunImportDB(cfg ImportDBConfig) error {
 			
 			if len(batch) >= consts.DBBatchSize {
 				if err := destStore.BatchAddFiles(batch); err != nil {
-					fmt.Printf("Error writing batch: %v\n", err)
+					logrus.Errorf("Error writing batch: %v", err)
 				}
 				batch = batch[:0]
 			}
@@ -356,14 +357,14 @@ func RunImportDB(cfg ImportDBConfig) error {
 		
 		if len(batch) > 0 {
 			if err := destStore.BatchAddFiles(batch); err != nil {
-				fmt.Printf("Error writing batch: %v\n", err)
+				logrus.Errorf("Error writing batch: %v", err)
 			}
 		}
 		
 		if err := destStore.CompleteSnapshot(newSnap.ID, time.Time{}); err != nil {
-			fmt.Printf("Error completing snapshot: %v\n", err)
+			logrus.Errorf("Error completing snapshot: %v", err)
 		}
-		fmt.Printf("Successfully imported '%s' as '%s'.\n", s.Name, finalName)
+		logrus.Infof("Successfully imported '%s' as '%s'.", s.Name, finalName)
 	}
 	
 	return nil

@@ -17,6 +17,7 @@ import (
 	"fluxion/internal/util"
 
 	"github.com/schollz/progressbar/v3"
+	"github.com/sirupsen/logrus"
 )
 
 type SnapshotConfig struct {
@@ -87,20 +88,20 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			if doResume {
 				mode = "resume"
 				snapshotID = lastSnap.ID
-				fmt.Println("Resuming snapshot...")
+				logrus.Info("Resuming snapshot...")
 				// Get total files for progress bar
 				totalFiles, err := dbStore.GetFileCount(snapshotID)
 				if err != nil {
-					fmt.Printf("Warning: failed to get file count: %v\n", err)
+					logrus.Warnf("Failed to get file count: %v", err)
 					totalFiles = -1
 				}
 
 				bar := progressbar.Default(totalFiles, "Loading existing")
 				
 				if totalFiles > 0 {
-					fmt.Printf("Loading %d existing files...\n", totalFiles)
+					logrus.Infof("Loading %d existing files...", totalFiles)
 				} else {
-					fmt.Println("Loading existing map...")
+					logrus.Info("Loading existing map...")
 				}
 				
 				resumeMap, err = dbStore.GetFilesForSnapshot(snapshotID, func(count int) {
@@ -115,7 +116,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 					bar.Finish()
 					fmt.Println()
 				}
-				fmt.Printf("Already processed %d files. Skipping them.\n", len(resumeMap))
+				logrus.Infof("Already processed %d files. Skipping them.", len(resumeMap))
 			} else {
 				// Start new (abandon old)
 				// We don't delete the old one, just start new.
@@ -123,7 +124,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		} else {
 			// Last snapshot completed. Start a fresh scan.
 			if !cfg.ForceNew {
-				fmt.Printf("found previous completed snapshot from %v. Starting new scan.\n", lastSnap.FinishedAt)
+				logrus.Infof("Found previous completed snapshot from %v. Starting new scan.", lastSnap.FinishedAt)
 			}
 		}
 	}
@@ -170,7 +171,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			return fmt.Errorf("error creating snapshot: %w", err)
 		}
 		snapshotID = snap.ID
-		fmt.Printf("Created new snapshot ID %d (Name: %s) [Host: %s]\n", snapshotID, finalName, hostname)
+		logrus.Infof("Created new snapshot ID %d (Name: %s) [Host: %s]", snapshotID, finalName, hostname)
 	}
 
 	// Run Scan
@@ -271,7 +272,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			batch = append(batch, res.File)
 			if len(batch) >= consts.DBBatchSize {
 				if err := dbStore.BatchAddFiles(batch); err != nil {
-					fmt.Printf("Error writing batch: %v\n", err)
+					logrus.Errorf("Error writing batch: %v", err)
 				}
 				
 				var sum int64
@@ -286,7 +287,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		// final batch
 		if len(batch) > 0 {
 			if err := dbStore.BatchAddFiles(batch); err != nil {
-				fmt.Printf("Error writing batch: %v\n", err)
+				logrus.Errorf("Error writing batch: %v", err)
 			}
 			var sum int64
 			for _, f := range batch {
@@ -307,7 +308,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		fmt.Printf("Error completing snapshot: %v\n", err)
 	}
 	
-	fmt.Printf("Duration: %v\n", time.Since(start))
+	logrus.Infof("Duration: %v", time.Since(start))
 	
 	return nil
 }

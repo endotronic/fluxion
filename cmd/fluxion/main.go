@@ -9,7 +9,17 @@ import (
 
 	"fluxion/internal/app"
 	"fluxion/internal/consts"
+
+	"github.com/sirupsen/logrus"
 )
+
+func init() {
+	logrus.SetOutput(os.Stderr)
+	logrus.SetFormatter(&logrus.TextFormatter{
+		DisableTimestamp: true,
+	})
+	logrus.SetLevel(logrus.InfoLevel)
+}
 
 func main() {
 	// Architecture Note:
