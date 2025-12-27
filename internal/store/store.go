@@ -3,7 +3,7 @@ package store
 import "fluxion/internal/models"
 
 type Store interface {
-	CreateSnapshot(rootPath, name string) (*models.Snapshot, error)
+	CreateSnapshot(rootPath, name, computerName string) (*models.Snapshot, error)
 	GetLastSnapshot(rootPath string) (*models.Snapshot, error)
 	FindSnapshot(query string) (*models.Snapshot, error)
 	ListSnapshots() ([]*models.Snapshot, error)

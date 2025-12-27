@@ -29,7 +29,7 @@ func NewSqliteStore(dbPath string) (*SqliteStore, error) {
 	}
 
 	s := &SqliteStore{db: db}
-	if err := s.initSchema(); err != nil {
+	if err := s.migrate(); err != nil {
 		return nil, err
 	}
 
@@ -40,61 +40,10 @@ func (s *SqliteStore) Close() error {
 	return s.db.Close()
 }
 
-func (s *SqliteStore) initSchema() error {
-	queries := []string{
-		`CREATE TABLE IF NOT EXISTS snapshots (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			root_path TEXT NOT NULL,
-			started_at DATETIME NOT NULL,
-			finished_at DATETIME,
-			status TEXT NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS files (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			snapshot_id INTEGER NOT NULL,
-			path TEXT NOT NULL,
-			filename TEXT NOT NULL,
-			size_bytes INTEGER NOT NULL,
-			mod_time DATETIME NOT NULL,
-			sha1 TEXT NOT NULL,
-			md5 TEXT NOT NULL,
-			FOREIGN KEY(snapshot_id) REFERENCES snapshots(id),
-			CHECK (length(sha1) > 0 OR length(md5) > 0)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_files_snapshot_path ON files(snapshot_id, path);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_name ON snapshots(name);`,
-		// New column for supported hashes (v2)
-		// We use standard SQLite ALTER if we needed backward compat, but user said "start fresh"
-		// or "DB migration is not necessary".
-		// However, to strictly follow "start fresh", I should assume the table has this column if I create it.
-		// If I'm updating existing code, I'll add the column via ALTER to be safe if table exists?
-		// User said: "The DB migration is not necessary. We can start fresh."
-		// Implies: I can assume new DBs or I don't need to support old ones perfectly?
-		// I will include it in the CREATE statement.
-		// NOTE: If table exists without column, scanning will fail.
-		// Since user said "remove it", I will NOT do ALTER. (Assuming user wipes DB or accepts breakage).
-		// Wait, "add a string...". I should probably add it to CREATE.
-	}
-
-	for _, q := range queries {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("init schema error: %w", err)
-		}
-	}
-	
-	// Ensure column exists (idempotent for existing DBs to avoid crash)
-	// Even if "migration not necessary", failing on existing DBs is annoying during dev.
-	// I'll leave a silent ALTER just in case, but no backfill.
-	s.db.Exec(`ALTER TABLE snapshots ADD COLUMN hashes TEXT DEFAULT '';`)
-	
-	return nil
-}
-
-func (s *SqliteStore) CreateSnapshot(rootPath, name string) (*models.Snapshot, error) {
+func (s *SqliteStore) CreateSnapshot(rootPath, name, computerName string) (*models.Snapshot, error) {
 	now := time.Now()
-	res, err := s.db.Exec(`INSERT INTO snapshots (name, root_path, started_at, status) VALUES (?, ?, ?, ?)`,
-		name, rootPath, now, models.StatusInProgress)
+	res, err := s.db.Exec(`INSERT INTO snapshots (name, root_path, computer_name, started_at, status) VALUES (?, ?, ?, ?, ?)`,
+		name, rootPath, computerName, now, models.StatusInProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -103,23 +52,25 @@ func (s *SqliteStore) CreateSnapshot(rootPath, name string) (*models.Snapshot, e
 		return nil, err
 	}
 	return &models.Snapshot{
-		ID:        id,
-		RootPath:  rootPath,
-		Name:      name,
-		StartedAt: now,
-		Status:    models.StatusInProgress,
+		ID:           id,
+		RootPath:     rootPath,
+		Name:         name,
+		ComputerName: computerName,
+		StartedAt:    now,
+		Status:       models.StatusInProgress,
 	}, nil
 }
 
 func (s *SqliteStore) GetLastSnapshot(rootPath string) (*models.Snapshot, error) {
-	row := s.db.QueryRow(`SELECT id, name, root_path, started_at, finished_at, status, hashes FROM snapshots WHERE root_path = ? ORDER BY id DESC LIMIT 1`, rootPath)
+	row := s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots WHERE root_path = ? ORDER BY id DESC LIMIT 1`, rootPath)
 	var snap models.Snapshot
 	var hashStr sql.NullString
-	if err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr); err != nil {
+	if err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil // No previous snapshot
 		}
 		// If column missing, it might error. But we assume schema up to date.
+		// Actually, if we just migrated, we are good.
 		return nil, err
 	}
 	if hashStr.Valid && hashStr.String != "" {
@@ -134,8 +85,8 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 	query = strings.TrimSpace(query)
 	var hashStr sql.NullString
 	
-	row := s.db.QueryRow(`SELECT id, name, root_path, started_at, finished_at, status, hashes FROM snapshots WHERE id = ?`, query)
-	err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr)
+	row := s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots WHERE id = ?`, query)
+	err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr)
 	if err == nil {
 		if hashStr.Valid && hashStr.String != "" {
 			snap.Hashes = strings.Split(hashStr.String, ",")
@@ -144,8 +95,8 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 	}
 	
 	// If failed, try Name
-	row = s.db.QueryRow(`SELECT id, name, root_path, started_at, finished_at, status, hashes FROM snapshots WHERE name = ? ORDER BY id DESC LIMIT 1`, query)
-	err = row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr)
+	row = s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots WHERE name = ? ORDER BY id DESC LIMIT 1`, query)
+	err = row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr)
 	if err == nil {
 		if hashStr.Valid && hashStr.String != "" {
 			snap.Hashes = strings.Split(hashStr.String, ",")
@@ -160,7 +111,7 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 }
 
 func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
-	rows, err := s.db.Query(`SELECT id, name, root_path, started_at, finished_at, status, hashes FROM snapshots ORDER BY id DESC`)
+	rows, err := s.db.Query(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +122,7 @@ func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
 		var snap models.Snapshot
 		var finishedAt sql.NullTime
 		var hashStr sql.NullString
-		if err := rows.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.StartedAt, &finishedAt, &snap.Status, &hashStr); err != nil {
+		if err := rows.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &finishedAt, &snap.Status, &hashStr); err != nil {
 			return nil, err
 		}
 		if finishedAt.Valid {

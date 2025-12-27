@@ -14,12 +14,13 @@ const (
 )
 
 type Snapshot struct {
-	ID         int64
-	Name       string
-	RootPath   string
-	StartedAt  time.Time
-	FinishedAt *time.Time
-	Status     SnapshotStatus
+	ID           int64
+	Name         string
+	RootPath     string
+	ComputerName string
+	StartedAt    time.Time
+	FinishedAt   *time.Time
+	Status       SnapshotStatus
 	
 	// Available Hashes (e.g. "sha1", "md5")
 	Hashes []string

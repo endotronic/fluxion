@@ -18,7 +18,7 @@ func TestSqliteStore_Snapshots(t *testing.T) {
 	// 1. Create Snapshot
 	rootPath := "/test/root"
 	snapName := "test-snapshot-1"
-	snap, err := s.CreateSnapshot(rootPath, snapName)
+	snap, err := s.CreateSnapshot(rootPath, snapName, "test-host")
 	if err != nil {
 		t.Fatalf("CreateSnapshot failed: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestSqliteStore_Files(t *testing.T) {
 	}
 	defer s.Close()
 
-	snap, err := s.CreateSnapshot("/test/root", "test-snap-files")
+	snap, err := s.CreateSnapshot("/tmp/test", "test_snap", "test-host")
 	if err != nil {
 		t.Fatalf("CreateSnapshot failed: %v", err)
 	}

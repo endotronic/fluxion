@@ -90,7 +90,7 @@ func runList(args []string) {
 		return
 	}
 
-	tbl := table.New([]string{"ID", "Name", "Status", "Started At", "Finished At", "Root Path"})
+	tbl := table.New([]string{"ID", "Name", "Status", "Started At", "Finished At", "Computer", "Root Path"})
 
 	for _, s := range snaps {
 		finished := "N/A"
@@ -104,6 +104,7 @@ func runList(args []string) {
 			string(s.Status),
 			s.StartedAt.Format(time.RFC3339),
 			finished,
+			s.ComputerName,
 			s.RootPath,
 		})
 	}
@@ -119,6 +120,7 @@ func runSnapshot(args []string) {
 	threadsPtr := cmd.Int("threads", runtime.NumCPU(), "Number of threads")
 	forceNewPtr := cmd.Bool("new", false, "Force new scan (ignore previous)")
 	forceResumePtr := cmd.Bool("resume", false, "Force resume (if possible)")
+	hostnamePtr := cmd.String("hostname", "", "Computer name (defaults to os.Hostname())")
 	
 	crossMountsPtr := cmd.Bool("cross-mounts", true, "Traverse mount points")
 	failOnMountPtr := cmd.Bool("fail-on-mount", false, "Fail if mount point encountered")
@@ -266,14 +268,25 @@ func runSnapshot(args []string) {
 	// Open DB (Moved down? No, need DB to check name)
 	// Already opened above.
 
+	// Resolve Hostname
+	hostname := *hostnamePtr
+	if hostname == "" {
+		h, err := os.Hostname()
+		if err == nil {
+			hostname = h
+		} else {
+			hostname = "unknown"
+		}
+	}
+
 	if mode == "new" {
-		snap, err := dbStore.CreateSnapshot(targetDir, finalName)
+		snap, err := dbStore.CreateSnapshot(targetDir, finalName, hostname)
 		if err != nil {
 			fmt.Printf("Error creating snapshot: %v\n", err)
 			os.Exit(1)
 		}
 		snapshotID = snap.ID
-		fmt.Printf("Created new snapshot ID %d (Name: %s)\n", snapshotID, finalName)
+		fmt.Printf("Created new snapshot ID %d (Name: %s) [Host: %s]\n", snapshotID, finalName, hostname)
 	}
 
 	// Run Scan
@@ -816,7 +829,10 @@ func runImportLegacy(args []string) {
 	}
 
 	// Create Snapshot
-	snap, err := dbStore.CreateSnapshot(rootPath, finalName)
+	// Legacy import doesn't have hostname info, so we use current machine? Or "legacy"?
+	// Let's use "legacy_import" or just current machine.
+	h, _ := os.Hostname()
+	snap, err := dbStore.CreateSnapshot(rootPath, finalName, h)
 	if err != nil {
 		fmt.Printf("Error creating snapshot: %v\n", err)
 		os.Exit(1)
@@ -948,7 +964,7 @@ func runImportDB(args []string) {
 		}
 		
 		// Create new snapshot in Dest
-		newSnap, err := destStore.CreateSnapshot(s.RootPath, finalName)
+		newSnap, err := destStore.CreateSnapshot(s.RootPath, finalName, s.ComputerName)
 		if err != nil {
 			fmt.Printf("Error creating snapshot in dest: %v\n", err)
 			continue
