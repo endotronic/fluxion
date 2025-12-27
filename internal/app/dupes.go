@@ -6,6 +6,7 @@ import (
 	"fluxion/internal/dupes"
 	"fluxion/internal/store"
 	"fluxion/internal/store/sqlite"
+	"fluxion/internal/util"
 )
 
 type DupesConfig struct {
@@ -52,7 +53,7 @@ func RunDupes(cfg DupesConfig) error {
 	}
 	
 	
-	fmt.Printf("Analyze %d files for duplicates (Min Size: %d)...\n", len(files), cfg.MinSize)
+	fmt.Printf("Analyze %d files for duplicates (Min Size: %s)...\n", len(files), util.FormatBytes(cfg.MinSize))
 	
 	// Optimization Note:
 	// We pass the file map directly to FindDuplicates to avoid expensive slice conversion/allocation.
@@ -82,13 +83,13 @@ func RunDupes(cfg DupesConfig) error {
 		wasted := redundantCount * g.Size
 		totalWasted += wasted
 		
-		fmt.Printf("[DUPE] Size: %d | Count: %d | Wasted: %d\n", g.Size, len(g.Paths), wasted)
+		fmt.Printf("[DUPE] Size: %s | Count: %d | Wasted: %s\n", util.FormatBytes(g.Size), len(g.Paths), util.FormatBytes(wasted))
 		for _, p := range g.Paths {
 			fmt.Printf("  - %s\n", p)
 		}
 		fmt.Println()
 	}
-	fmt.Printf("Total Wasted Space: %d\n", totalWasted)
+	fmt.Printf("Total Wasted Space: %s\n", util.FormatBytes(totalWasted))
 	
 	return nil
 }

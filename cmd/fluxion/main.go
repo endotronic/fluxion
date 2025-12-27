@@ -8,6 +8,7 @@ import (
 	"runtime"
 
 	"fluxion/internal/app"
+	"fluxion/internal/consts"
 )
 
 func main() {
@@ -28,7 +29,7 @@ func main() {
 		runSnapshot(os.Args[2:])
 	case "list", "l":
 		runList(os.Args[2:])
-	case "delete":
+	case "delete", "x":
 		runDelete(os.Args[2:])
 	case "diff", "d":
 		runDiff(os.Args[2:])
@@ -36,8 +37,10 @@ func main() {
 		runImportDB(os.Args[2:])
 	case "import-legacy":
 		runImportLegacy(os.Args[2:])
-	case "dupes":
+	case "dupes", "z":
 		runDupes(os.Args[2:])
+	case "version", "v":
+		runVersion()
 	default:
 		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -51,10 +54,15 @@ func printUsage() {
 	fmt.Println("  snapshot (s)    Scan a directory")
 	fmt.Println("  list (l)        List snapshots")
 	fmt.Println("  diff (d)        Compare snapshots")
-	fmt.Println("  delete          Delete a snapshot")
+	fmt.Println("  delete (x)      Delete a snapshot")
 	fmt.Println("  import (i)      Import from another DB")
 	fmt.Println("  import-legacy   Import legacy format")
-	fmt.Println("  dupes           Find duplicates within a snapshot")
+	fmt.Println("  dupes (z)       Find duplicates within a snapshot")
+	fmt.Println("  version (v)     Print version")
+}
+
+func runVersion() {
+	fmt.Printf("fluxion version %s\n", consts.Version)
 }
 
 func runSnapshot(args []string) {

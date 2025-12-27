@@ -1,4 +1,4 @@
-package dupes
+package util
 
 import (
 	"fmt"
@@ -57,16 +57,16 @@ func ParseSize(s string) (int64, error) {
 	return int64(val * multiplier), nil
 }
 
-// FormatSize formats bytes to human readable string
-func FormatSize(b int64) string {
+// FormatBytes formats bytes to human readable string using IEC (1024) units
+func FormatBytes(bytes int64) string {
 	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
 	}
 	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
+	for n := bytes / unit; n >= unit; n /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %c", float64(b)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }

@@ -40,3 +40,4 @@ func getUniqueSnapshotName(s store.Store, baseName string, exact bool) (string, 
 
 	return "", fmt.Errorf("could not generate unique name for %s", baseName)
 }
+

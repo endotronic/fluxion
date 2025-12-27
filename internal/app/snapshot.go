@@ -14,6 +14,7 @@ import (
 	"fluxion/internal/scanner"
 	"fluxion/internal/store"
 	"fluxion/internal/store/sqlite"
+	"fluxion/internal/util"
 
 	"github.com/schollz/progressbar/v3"
 )
@@ -238,8 +239,13 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				if walking {
 					found := foundCount.Load()
 					delta := foundCount.Load() - processedCount.Load()
+					desc := fmt.Sprintf("Scanning (Found %d/%s)...", found, util.FormatBytes(foundBytes.Load()))
+
 					saturation := float64(delta) / totalBuffer
-					desc := fmt.Sprintf("Scanning (Found %d) [%.0f%% Saturated]...", found, saturation*100)
+					if saturation > 0.5 {
+						desc = fmt.Sprintf("Scanning (Found %d/%s) [%.0f%% Saturated]...", found, util.FormatBytes(foundBytes.Load()), saturation*100)
+					}
+
 					bar.Describe(desc)
 				} else {
 					desc := fmt.Sprintf("Found (%d). Hashing (%d done)...", foundCount.Load(), processedCount.Load())
