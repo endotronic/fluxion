@@ -98,8 +98,11 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 
 			// Check resume map
 			if cfg.ResumeMap != nil {
-				if _, exists := cfg.ResumeMap[path]; exists {
-					// Already processed in this snapshot
+				if rec, ok := cfg.ResumeMap[path]; ok {
+					// Already processed, but we still want to count it for the progress bar
+					if cfg.OnFileFound != nil {
+						cfg.OnFileFound(path, rec.SizeBytes)
+					}
 					return nil
 				}
 			}
