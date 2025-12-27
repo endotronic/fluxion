@@ -238,7 +238,12 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	var errEst error
 	var subMounts []string
 
-	if !cfg.SkipEstimation || cfg.EstimateOnly {
+	isMount, _ := util.IsMountPoint(targetDir)
+	if !isMount && cfg.EstimateOnly{
+		return fmt.Errorf("Cannot estimate size for non-mount point: %s", targetDir)
+	}
+
+	if isMount && (!cfg.SkipEstimation || cfg.EstimateOnly) {
 		if cfg.CrossMounts {
 			used, _, subMounts, errEst = util.GetRecursiveFSUsage(targetDir)
 		} else {
@@ -259,7 +264,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		}
 	}
 
-	if cfg.EstimateOnly {
+	if isMount && cfg.EstimateOnly {
 		fmt.Printf("Estimating scan size for: %s\n", targetDir)
 		if cfg.CrossMounts {
 			fmt.Println("Cross-mounts: ENABLED (recursive check)")
@@ -404,14 +409,26 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	start := time.Now()
 	scanner.RunScan(scanConfig, results)
 
+	logrus.Infof("Scan duration: %v", time.Since(start))
+	
+	// Permission Warning Check
+	if estimatedTotal > 0 {
+		finalBytes := foundBytes.Load()
+		// If we scanned less than 50% of the estimate, warn the user.
+		// This is a heuristic to catch "Permission Denied" on top-level folders without spamming.
+		if float64(finalBytes) < float64(estimatedTotal)*0.5 {
+			logrus.Warnf("Scanned size (%s) is significantly lower than estimated FS usage (%s).", util.FormatBytes(finalBytes), util.FormatBytes(estimatedTotal))
+			logrus.Warn("You may be missing files due to permissions. Try running as root.")
+		}
+	}
+
 	<-done
 	
 	if err := dbStore.CompleteSnapshot(snapshotID, time.Time{}); err != nil {
 		fmt.Printf("Error completing snapshot: %v\n", err)
 	}
 	
-	logrus.Infof("Duration: %v", time.Since(start))
-	
+	logrus.Infof("Finished. Total duration: %v", time.Since(start))
 	return nil
 }
 

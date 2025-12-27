@@ -68,6 +68,26 @@ func ResolveMountPoint(arg string) (string, error) {
 	return "", fmt.Errorf("argument '%s' is neither a valid directory nor a known mount source", arg)
 }
 
+// IsMountPoint checks if the given path is a mount point.
+func IsMountPoint(path string) (bool, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+
+	mounts, err := GetMounts()
+	if err != nil {
+		return false, err
+	}
+
+	for _, m := range mounts {
+		if m.Target == absPath {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func getMountsLinux() ([]MountInfo, error) {
 	f, err := os.Open("/proc/mounts")
 	if err != nil {
