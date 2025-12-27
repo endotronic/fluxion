@@ -148,15 +148,6 @@ func runSnapshot(args []string) {
 		dbPath = base + ".db"
 	}
 	
-	// Determine Name
-	snapName := *namePtr
-	if snapName == "" {
-		base := filepath.Base(targetDir)
-		if base == "." || base == "/" {
-			base = "root"
-		}
-		snapName = fmt.Sprintf("%s_%s", base, time.Now().Format("2006-01-02"))
-	}
 
 	// Open DB
 	var dbStore store.Store
@@ -242,14 +233,40 @@ func runSnapshot(args []string) {
 		}
 	}
 
+	// Determine Base Name and Uniqueness Strategy
+	baseName := *namePtr
+	explicitName := true
+	if baseName == "" {
+		explicitName = false
+		base := filepath.Base(targetDir)
+		if base == "." || base == "/" {
+			base = "root"
+		}
+		baseName = fmt.Sprintf("%s_%s", base, time.Now().Format("2006-01-02"))
+	}
+	
+	// Resolve final name
+	finalName := baseName
 	if mode == "new" {
-		snap, err := dbStore.CreateSnapshot(targetDir, snapName)
+		var err error
+		finalName, err = getUniqueSnapshotName(dbStore, baseName, explicitName)
+		if err != nil {
+			fmt.Printf("Error resolving snapshot name: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Open DB (Moved down? No, need DB to check name)
+	// Already opened above.
+
+	if mode == "new" {
+		snap, err := dbStore.CreateSnapshot(targetDir, finalName)
 		if err != nil {
 			fmt.Printf("Error creating snapshot: %v\n", err)
 			os.Exit(1)
 		}
 		snapshotID = snap.ID
-		fmt.Printf("Created new snapshot ID %d (Name: %s)\n", snapshotID, snapName)
+		fmt.Printf("Created new snapshot ID %d (Name: %s)\n", snapshotID, finalName)
 	}
 
 	// Run Scan
@@ -646,13 +663,20 @@ func runImportLegacy(args []string) {
 		}
 	}
 
+	// Resolve unique name (Import always increments on collision)
+	finalName, err := getUniqueSnapshotName(dbStore, snapName, false)
+	if err != nil {
+		fmt.Printf("Error resolving name: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Create Snapshot
-	snap, err := dbStore.CreateSnapshot(rootPath, snapName)
+	snap, err := dbStore.CreateSnapshot(rootPath, finalName)
 	if err != nil {
 		fmt.Printf("Error creating snapshot: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Created snapshot ID %d (Name: %s)\n", snap.ID, snapName)
+	fmt.Printf("Created snapshot ID %d (Name: %s)\n", snap.ID, finalName)
 
 	scanner := bufio.NewScanner(hf)
 	batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
@@ -770,9 +794,16 @@ func runImportDB(args []string) {
 
 	for _, s := range snaps {
 		fmt.Printf("Importing snapshot '%s' (ID: %d)...\n", s.Name, s.ID)
+
+		// Resolve unique name
+		finalName, err := getUniqueSnapshotName(destStore, s.Name, false)
+		if err != nil {
+			fmt.Printf("Error resolving name for '%s': %v\n", s.Name, err)
+			continue
+		}
 		
 		// Create new snapshot in Dest
-		newSnap, err := destStore.CreateSnapshot(s.RootPath, s.Name)
+		newSnap, err := destStore.CreateSnapshot(s.RootPath, finalName)
 		if err != nil {
 			fmt.Printf("Error creating snapshot in dest: %v\n", err)
 			continue
@@ -830,4 +861,36 @@ func runImportDB(args []string) {
 	}
 	
 	fmt.Println("Import complete.")
+}
+
+func getUniqueSnapshotName(s store.Store, baseName string, mustFail bool) (string, error) {
+	// Check if exists
+	existing, err := s.FindSnapshot(baseName)
+	if err != nil && !strings.Contains(err.Error(), "not found") {
+		return "", err
+	}
+	
+	if existing == nil {
+		return baseName, nil
+	}
+	
+	// Exists
+	if mustFail {
+		return "", fmt.Errorf("snapshot with name '%s' already exists", baseName)
+	}
+	
+	// Auto-increment
+	// Try appending -2, -3, ...
+	i := 2
+	for {
+		newName := fmt.Sprintf("%s-%d", baseName, i)
+		existing, err := s.FindSnapshot(newName)
+		if err != nil && !strings.Contains(err.Error(), "not found") {
+			return "", err
+		}
+		if existing == nil {
+			return newName, nil
+		}
+		i++
+	}
 }

@@ -59,9 +59,11 @@ func (s *SqliteStore) initSchema() error {
 			mod_time DATETIME NOT NULL,
 			sha1 TEXT NOT NULL,
 			md5 TEXT NOT NULL,
-			FOREIGN KEY(snapshot_id) REFERENCES snapshots(id)
+			FOREIGN KEY(snapshot_id) REFERENCES snapshots(id),
+			CHECK (length(sha1) > 0 OR length(md5) > 0)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_files_snapshot_path ON files(snapshot_id, path);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_name ON snapshots(name);`,
 	}
 
 	for _, q := range queries {
