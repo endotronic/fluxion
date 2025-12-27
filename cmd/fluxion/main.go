@@ -555,6 +555,60 @@ func runImportLegacy(args []string) {
 	}
 	defer sf.Close()
 
+	// Autodetect Root if not provided (or default "/")
+	if *rootPtr == "/" {
+		fmt.Println("Autodetecting root path...")
+		scanner := bufio.NewScanner(sf)
+		var commonPrefix string
+		first := true
+		
+		count := 0
+		for scanner.Scan() {
+			line := scanner.Text()
+			parts := strings.Split(line, "  ")
+			if len(parts) < 3 { continue }
+			
+			b64Path := strings.TrimSpace(parts[2])
+			decodedBytes, err := base64.StdEncoding.DecodeString(b64Path)
+			if err != nil { continue }
+			path := string(decodedBytes)
+			
+			if first {
+				commonPrefix = filepath.Dir(path) // Start with dir of first file
+				first = false
+			} else {
+				// Find common prefix
+				// Simple approach: shrink commonPrefix until it fits
+				// Ensure we don't break mid-directory name?
+				// filepath.Rel?
+				// Let's iterate.
+				for !strings.HasPrefix(path, commonPrefix) {
+					// Move up one dir
+					if commonPrefix == "" || commonPrefix == "/" || commonPrefix == "." {
+						commonPrefix = "/"
+						break
+					}
+					commonPrefix = filepath.Dir(commonPrefix)
+				}
+			}
+			count++
+			if count % 10000 == 0 {
+			    // Optimization: if commonPrefix is already root, stop?
+			    if commonPrefix == "/" { break }
+			}
+		}
+		
+		if commonPrefix == "" { commonPrefix = "/" }
+		rootPath = commonPrefix
+		fmt.Printf("Detected root: %s\n", rootPath)
+		
+		// Rewind file
+		if _, err := sf.Seek(0, 0); err != nil {
+			fmt.Printf("Error rewinding file: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// Create Snapshot
 	snap, err := dbStore.CreateSnapshot(rootPath, snapName)
 	if err != nil {
