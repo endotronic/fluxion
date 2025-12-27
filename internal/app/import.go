@@ -239,7 +239,13 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 		fmt.Printf("Error reading file: %v\n", err)
 	}
 	
-	if err := dbStore.CompleteSnapshot(snap.ID); err != nil {
+	// Get ModTime of the Hashes file to use as finish time
+	var finishTime time.Time
+	if fi, err := hf.Stat(); err == nil {
+		finishTime = fi.ModTime()
+	}
+
+	if err := dbStore.CompleteSnapshot(snap.ID, finishTime); err != nil {
 		fmt.Printf("Error completing snapshot: %v\n", err)
 	}
 	
@@ -354,7 +360,7 @@ func RunImportDB(cfg ImportDBConfig) error {
 			}
 		}
 		
-		if err := destStore.CompleteSnapshot(newSnap.ID); err != nil {
+		if err := destStore.CompleteSnapshot(newSnap.ID, time.Time{}); err != nil {
 			fmt.Printf("Error completing snapshot: %v\n", err)
 		}
 		fmt.Printf("Successfully imported '%s' as '%s'.\n", s.Name, finalName)

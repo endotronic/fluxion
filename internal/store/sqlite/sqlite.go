@@ -111,7 +111,7 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 }
 
 func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
-	rows, err := s.db.Query(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots ORDER BY id DESC`)
+	rows, err := s.db.Query(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots ORDER BY finished_at DESC, id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
 	return snaps, nil
 }
 
-func (s *SqliteStore) CompleteSnapshot(id int64) error {
+func (s *SqliteStore) CompleteSnapshot(id int64, finishedAt time.Time) error {
 	// Determine available hashes
 	var hashes []string
 	
@@ -151,8 +151,11 @@ func (s *SqliteStore) CompleteSnapshot(id int64) error {
 	
 	hashesStr := strings.Join(hashes, ",")
 
-	now := time.Now()
-	_, err := s.db.Exec(`UPDATE snapshots SET status = ?, finished_at = ?, hashes = ? WHERE id = ?`, models.StatusCompleted, now, hashesStr, id)
+	if finishedAt.IsZero() {
+		finishedAt = time.Now()
+	}
+
+	_, err := s.db.Exec(`UPDATE snapshots SET status = ?, finished_at = ?, hashes = ? WHERE id = ?`, models.StatusCompleted, finishedAt, hashesStr, id)
 	return err
 }
 

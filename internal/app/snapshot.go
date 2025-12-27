@@ -297,7 +297,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 
 	<-done
 	
-	if err := dbStore.CompleteSnapshot(snapshotID); err != nil {
+	if err := dbStore.CompleteSnapshot(snapshotID, time.Time{}); err != nil {
 		fmt.Printf("Error completing snapshot: %v\n", err)
 	}
 	
