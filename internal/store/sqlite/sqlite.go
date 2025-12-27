@@ -241,3 +241,29 @@ func (s *SqliteStore) GetFilesForSnapshot(snapshotID int64, onProgress func(int)
 	}
 	return result, nil
 }
+
+func (s *SqliteStore) GetFileList(snapshotID int64, onProgress func(int)) ([]*models.FileRecord, error) {
+	rows, err := s.db.Query(`SELECT id, snapshot_id, path, filename, size_bytes, mod_time, sha1, md5 FROM files WHERE snapshot_id = ?`, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*models.FileRecord
+	count := 0
+	for rows.Next() {
+		var f models.FileRecord
+		if err := rows.Scan(&f.ID, &f.SnapshotID, &f.Path, &f.Filename, &f.SizeBytes, &f.ModTime, &f.SHA1, &f.MD5); err != nil {
+			return nil, err
+		}
+		result = append(result, &f)
+		count++
+		if onProgress != nil && count%1000 == 0 {
+			onProgress(count)
+		}
+	}
+	if onProgress != nil {
+		onProgress(count)
+	}
+	return result, nil
+}

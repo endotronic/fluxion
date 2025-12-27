@@ -49,6 +49,8 @@ func main() {
 		runImportLegacy(os.Args[2:])
 	case "dupes", "z":
 		runDupes(os.Args[2:])
+	case "merge", "m":
+		runMerge(os.Args[2:])
 	case "version", "v":
 		runVersion()
 	default:
@@ -68,6 +70,7 @@ func printUsage() {
 	fmt.Println("  import (i)      Import from another DB")
 	fmt.Println("  import-legacy   Import legacy format")
 	fmt.Println("  dupes (z)       Find duplicates within a snapshot")
+	fmt.Println("  merge (m)       Merge multiple snapshots into one")
 	fmt.Println("  version (v)     Print version")
 }
 
@@ -309,6 +312,44 @@ func runDupes(args []string) {
 	}
 
 	if err := app.RunDupes(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runMerge(args []string) {
+	cmd := flag.NewFlagSet("merge", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	namePtr := cmd.String("name", "", "Name for the new merged snapshot (required)")
+	hostnamePtr := cmd.String("hostname", "", "Computer name for the snapshot (defaults to current hostname)")
+	
+	cmd.Parse(args)
+	
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required")
+		cmd.Usage()
+		os.Exit(1)
+	}
+	
+	if *namePtr == "" {
+		fmt.Println("Error: --name is required for the new snapshot")
+		cmd.Usage()
+		os.Exit(1)
+	}
+	
+	if cmd.NArg() < 2 {
+		fmt.Println("Usage: fluxion merge --db <db> --name <new_name> [--hostname <name>] <snap1> <snap2> ...")
+		os.Exit(1)
+	}
+	
+	cfg := app.MergeConfig{
+		DBPath:    *dbPtr,
+		Name:      *namePtr,
+		Hostname:  *hostnamePtr,
+		Snapshots: cmd.Args(),
+	}
+	
+	if err := app.RunMerge(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

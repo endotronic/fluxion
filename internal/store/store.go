@@ -15,6 +15,7 @@ type Store interface {
 	BatchAddFiles(files []*models.FileRecord) error
 	GetFileCount(snapshotID int64) (int64, error)
 	GetFilesForSnapshot(snapshotID int64, onProgress func(int)) (map[string]models.FileRecord, error)
+	GetFileList(snapshotID int64, onProgress func(int)) ([]*models.FileRecord, error)
 	DeleteSnapshot(id int64) error
 	Close() error
 }
