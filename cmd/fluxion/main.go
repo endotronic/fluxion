@@ -28,18 +28,23 @@ func main() {
 	// Parse subcommand
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: fluxion <subcommand> [flags]")
-		fmt.Println("Subcommands: snapshot, list, diff, import, import-legacy")
+		fmt.Println("Subcommands:")
+		fmt.Println("  snapshot (s)    Scan a directory")
+		fmt.Println("  list (l)        List snapshots")
+		fmt.Println("  diff (d)        Compare snapshots")
+		fmt.Println("  import (i)      Import from another DB")
+		fmt.Println("  import-legacy   Import legacy format")
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
-	case "snapshot":
+	case "snapshot", "s":
 		runSnapshot(os.Args[2:])
-	case "list":
+	case "list", "l":
 		runList(os.Args[2:])
-	case "diff":
+	case "diff", "d":
 		runDiff(os.Args[2:])
-	case "import":
+	case "import", "i":
 		runImportDB(os.Args[2:])
 	case "import-legacy":
 		runImportLegacy(os.Args[2:])
@@ -101,7 +106,7 @@ func runList(args []string) {
 
 func runSnapshot(args []string) {
 	cmd := flag.NewFlagSet("snapshot", flag.ExitOnError)
-	dirPtr := cmd.String("dir", "", "Directory to scan (required)")
+	dirPtr := cmd.String("dir", "", "Directory to scan (optional if provided as argument)")
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (optional, defaults to <dirname>.db)")
 	namePtr := cmd.String("name", "", "Name for the snapshot (optional, defaults to <dirname>_<date>)")
 	threadsPtr := cmd.Int("threads", runtime.NumCPU(), "Number of threads")
@@ -114,13 +119,21 @@ func runSnapshot(args []string) {
 	
 	cmd.Parse(args)
 
-	if *dirPtr == "" {
-		fmt.Println("Error: --dir is required")
+	// Check for positional argument if flag is empty
+	targetArg := *dirPtr
+	if targetArg == "" {
+		if cmd.NArg() > 0 {
+			targetArg = cmd.Arg(0)
+		}
+	}
+
+	if targetArg == "" {
+		fmt.Println("Error: Directory required (via argument or --dir)")
 		cmd.Usage()
 		os.Exit(1)
 	}
 
-	targetDir, err := filepath.Abs(*dirPtr)
+	targetDir, err := filepath.Abs(targetArg)
 	if err != nil {
 		fmt.Printf("Error getting abs path: %v\n", err)
 		os.Exit(1)
@@ -400,12 +413,6 @@ func runDiff(args []string) {
 	
 	oldID := snapA.ID
 	newID := snapB.ID
-	
-	// Validate Root Path
-	if snapA.RootPath != snapB.RootPath {
-		fmt.Printf("Error: Root paths do not match.\nSnapshot %d: %s\nSnapshot %d: %s\n", snapA.ID, snapA.RootPath, snapB.ID, snapB.RootPath)
-		os.Exit(1)
-	}
 
 	// 2. Load Maps with Progress
 	fmt.Printf("Loading Snapshot %d...\n", oldID)
