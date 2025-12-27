@@ -10,6 +10,7 @@ func TestCompareSnapshots(t *testing.T) {
 		name     string
 		filesA   map[string]models.FileRecord
 		filesB   map[string]models.FileRecord
+		strategy string // "sha1" or "md5", defaults to "sha1"
 		want     []DiffResult
 	}{
 		{
@@ -242,13 +243,14 @@ func TestCompareSnapshots(t *testing.T) {
 		{
 			name: "MD5 Fallback Match",
 			filesA: map[string]models.FileRecord{
-				"/root/common": {SHA1: "common"},
+				"/root/common": {SHA1: "common", MD5: "c_md5"},
 				"/root/file1": {MD5: "m1"}, // Only MD5 available (e.g. legacy import)
 			},
 			filesB: map[string]models.FileRecord{
-				"/root/common": {SHA1: "common"},
+				"/root/common": {SHA1: "common", MD5: "c_md5"},
 				"/root/file1": {MD5: "m1", SHA1: "s1"}, // New scan has both
 			},
+			strategy: "md5",
 			want: []DiffResult{
 				// file1 should be Unchanged because MD5 matches
 			},
@@ -256,13 +258,14 @@ func TestCompareSnapshots(t *testing.T) {
 		{
 			name: "MD5 Fallback Diff",
 			filesA: map[string]models.FileRecord{
-				"/root/common": {SHA1: "common"},
+				"/root/common": {SHA1: "common", MD5: "c_md5"},
 				"/root/file1": {MD5: "m1"},
 			},
 			filesB: map[string]models.FileRecord{
-				"/root/common": {SHA1: "common"},
+				"/root/common": {SHA1: "common", MD5: "c_md5"},
 				"/root/file1": {MD5: "m2", SHA1: "s2"}, // MD5 mismatch
 			},
+			strategy: "md5",
 			want: []DiffResult{
 				{Path: "/root/file1", Status: StatusModified},
 			},
@@ -301,7 +304,12 @@ func TestCompareSnapshots(t *testing.T) {
 			rootA := "/"
 			rootB := "/"
 			
-			got, err := CompareSnapshots(tt.filesA, tt.filesB, rootA, rootB, nil)
+			strategy := tt.strategy
+			if strategy == "" {
+				strategy = "sha1"
+			}
+			
+			got, err := CompareSnapshots(tt.filesA, tt.filesB, rootA, rootB, strategy, nil)
 			if err != nil {
 				t.Errorf("CompareSnapshots() error = %v", err)
 				return

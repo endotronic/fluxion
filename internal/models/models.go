@@ -19,6 +19,9 @@ type Snapshot struct {
 	StartedAt  time.Time
 	FinishedAt *time.Time
 	Status     SnapshotStatus
+	
+	// Available Hashes (e.g. "sha1", "md5")
+	Hashes []string
 }
 
 type FileRecord struct {

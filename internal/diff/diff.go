@@ -29,14 +29,12 @@ type Node struct {
 	Status   Status
 	Children map[string]*Node
 
-	// Metadata for comparison
-	SHA1A string
-	MD5A  string
-	SHA1B string
-	MD5B  string
+	// Metadata for comparison (Generic, set based on strategy)
+	HashA string
+	HashB string
 	
-	// Merkle Hash (computed for dirs)
-	MerkleHash string
+	// Merkle Hash (computed for dirs) -> reusing HashA/HashB for dirs?
+	// Yes, HashA for Dir is its Merkle Hash in A.
 	
 	// For Move/Copy
 	SourcePath string
@@ -49,9 +47,8 @@ type DiffResult struct {
 	SourcePath string
 }
 
-// CompareSnapshots computes the diff between two sets of files.
-// filesA and filesB keys must be relative paths to their respective roots.
-func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB string, onProgress func(current, total int)) ([]DiffResult, error) {
+// CompareSnapshots computes the diff between two sets of files using a specific hash strategy.
+func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB string, hashType string, onProgress func(current, total int)) ([]DiffResult, error) {
 	root := &Node{
 		Name:     "",
 		Path:     "",
@@ -62,18 +59,18 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 	total := len(filesA) + len(filesB)
 	current := 0
 
-	// 1. Insert A (Files present in old snapshot) -> Mark as Removed (default)
+	// 1. Insert A
 	for path, record := range filesA {
-		insertNode(root, path, record, true)
+		insertNode(root, path, record, true, hashType)
 		current++
 		if onProgress != nil && current%1000 == 0 {
 			onProgress(current, total)
 		}
 	}
 
-	// 2. Insert B (Files present in new snapshot)
+	// 2. Insert B
 	for path, record := range filesB {
-		insertNode(root, path, record, false)
+		insertNode(root, path, record, false, hashType)
 		current++
 		if onProgress != nil && current%1000 == 0 {
 			onProgress(current, total)
@@ -87,27 +84,20 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 	// 3. Compute Merkle Hashes (Post-Order)
 	computeMerkleHashes(root)
 
-	// 4. Propagate Status (Pass 1 - Identify Added/Removed Dirs)
+	// 4. Propagate Status (Pass 1)
 	propagateStatus(root)
 
 	// 5. Detect Moves/Copies
 	detectMovesCopies(root)
 
-	// 6. Propagate Status (Pass 2 - Handle Suppression)
+	// 6. Propagate Status (Pass 2)
 	propagateStatus(root)
 
-	// 7. Collapse and Collect (Top-Down)
+	// 7. Collapse and Collect
 	var results []DiffResult
 	collectResults(root, &results)
 	
-	// 8. Reconstruct Absolute Paths for Result
-	// We want to present absolute paths to the user.
-	// Logic:
-	// - Added: rootB + Path
-	// - Removed: rootA + Path
-	// - Modified: rootB + Path
-	// - Move/Copy: SourcePath (rootA) -> Path (rootB)
-	
+	// 8. Reconstruct Absolute Paths
 	finalResults := make([]DiffResult, len(results))
 	for i, res := range results {
 		// Clean paths (remove leading slash if present from Node path construction)
@@ -119,8 +109,6 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 		switch res.Status {
 		case StatusAdded, StatusModified, StatusMove, StatusCopy:
 			absPath = filepath.Join(rootB, relPath)
-			// Ensure trailing slash for dirs if original had it?
-			// filepath.Join removes trailing slash.
 			if strings.HasSuffix(res.Path, "/") {
 				absPath += string(filepath.Separator)
 			}
@@ -156,9 +144,7 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 	return finalResults, nil
 }
 
-func insertNode(root *Node, path string, record models.FileRecord, isA bool) {
-	// Parse path (assuming unix-style from DB/filepath)
-	
+func insertNode(root *Node, path string, record models.FileRecord, isA bool, hashType string) {
 	cleanPath := strings.TrimPrefix(path, "/")
 	parts := strings.Split(cleanPath, "/")
 
@@ -174,11 +160,9 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool) {
 		if !exists {
 			child = &Node{
 				Name:     part,
-				Path:     "", // Will construct path? Or assume we only care at leaves?
-				// Actually we need path for directories too for output.
-				// Construction: current.Path + "/" + part
+				Path:     "", 
 				Children: make(map[string]*Node),
-				Status:   StatusUnchanged, // Default
+				Status:   StatusUnchanged, 
 			}
 			if current.Path == "" {
 				child.Path = "/" + part
@@ -196,35 +180,25 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool) {
 
 	// At leaf
 	current.IsFile = true
-	// Logic:
-	// If isA (Old):
-	//   Found in Old. Set HashA. Set Status = Removed. (Later if B visits, it checks HashA).
-	// If !isA (New):
-	//   Found in New. Set HashB.
-	//   If HashA is set (means existed in A):
-	//      Compare Hashes. Same -> Unchanged. Diff -> Modified.
-	//   If HashA empty (didn't exist in A):
-	//      Status -> Added.
+	
+	// Extract correct hash
+	hash := ""
+	if hashType == "sha1" {
+		hash = record.SHA1
+	} else if hashType == "md5" {
+		hash = record.MD5
+	}
+	// Fallback? If requested hash missing, use empty string (treated as changed/missing)
 
 	if isA {
-		current.SHA1A = record.SHA1
-		current.MD5A = record.MD5
+		current.HashA = hash
 		current.Status = StatusRemoved
 	} else {
-		current.SHA1B = record.SHA1
-		current.MD5B = record.MD5
+		current.HashB = hash
 		
-		if current.SHA1A != "" || current.MD5A != "" {
+		if current.HashA != "" {
 			// Existed in A
-			match := false
-			if current.SHA1A != "" && current.SHA1B != "" {
-				match = (current.SHA1A == current.SHA1B)
-			} else if current.MD5A != "" && current.MD5B != "" {
-				match = (current.MD5A == current.MD5B)
-			}
-			// If neither pair present, we assume Modified (couldn't verify equality)
-			
-			if match {
+			if current.HashA == current.HashB {
 				current.Status = StatusUnchanged
 			} else {
 				current.Status = StatusModified
@@ -297,19 +271,10 @@ func propagateStatus(node *Node) Status {
 }
 
 
-// computeMerkleHashes computes SHA1 of directory content (sorted children hashes)
+// computeMerkleHashes computes Merkle hash of directory content
+// Now uses generic HashA/HashB fields.
 func computeMerkleHashes(node *Node) {
 	if node.IsFile {
-		// Use SHA1 if available, else MD5.
-		// Prioritize SHA1 for stability.
-		
-		hash := ""
-		if node.SHA1B != "" { hash = node.SHA1B }
-		if hash == "" && node.MD5B != "" { hash = node.MD5B }
-		if hash == "" && node.SHA1A != "" { hash = node.SHA1A }
-		if hash == "" && node.MD5A != "" { hash = node.MD5A }
-		
-		node.MerkleHash = hash
 		return
 	}
 
@@ -318,25 +283,29 @@ func computeMerkleHashes(node *Node) {
 		return
 	}
 
-	var hashes []string
+	var hashesA []string
+	var hashesB []string
+	
 	for _, child := range node.Children {
 		computeMerkleHashes(child)
-		if child.MerkleHash != "" {
-			hashes = append(hashes, child.Name+":"+child.MerkleHash) // Include name to avoid struct collision? Or just content?
-			// User said: "If multiple copies happened...".
-			// Directory hash should rely on content.
-			// Ideally: SHA1(sort(child_merkle_hashes)).
-			// Using name: specific to path structure? No, user said "collapse... moved together".
-			// If I rename a directory, the content (children) names match, but parent name differs.
-			// So inclusion of child name IS correct for directory Merkle.
+		
+		if child.HashA != "" {
+			hashesA = append(hashesA, child.Name+":"+child.HashA) 
+		}
+		if child.HashB != "" {
+			hashesB = append(hashesB, child.Name+":"+child.HashB)
 		}
 	}
-	sort.Strings(hashes)
 	
-	// Create hash of strings by joining sorted child hashes.
-	// Simple string concatenation is sufficient for our internal map keys.
+	if len(hashesA) > 0 {
+		sort.Strings(hashesA)
+		node.HashA = strings.Join(hashesA, ",")
+	}
 	
-	node.MerkleHash = strings.Join(hashes, ",")
+	if len(hashesB) > 0 {
+		sort.Strings(hashesB)
+		node.HashB = strings.Join(hashesB, ",")
+	}
 }
 
 func detectMovesCopies(root *Node) {
@@ -346,7 +315,7 @@ func detectMovesCopies(root *Node) {
 
 	var index func(*Node)
 	index = func(n *Node) {
-		if n.MerkleHash == "" && n.SHA1A == "" && n.MD5A == "" {
+		if n.HashA == "" {
 			return 
 		}
 		
@@ -359,26 +328,14 @@ func detectMovesCopies(root *Node) {
 		
 		// If removed (or Modified: Treat old content as removed), add to removedMap
 		if n.Status == StatusRemoved {
-			if n.IsFile {
-				add(removedMap, n.SHA1A, n.Path)
-				add(removedMap, n.MD5A, n.Path)
-			} else {
-				add(removedMap, n.MerkleHash, n.Path)
-			}
-		} else if n.Status == StatusModified && n.IsFile {
-			add(removedMap, n.SHA1A, n.Path)
-			add(removedMap, n.MD5A, n.Path)
+			add(removedMap, n.HashA, n.Path)
+		} else if n.Status == StatusModified {
+			add(removedMap, n.HashA, n.Path)
 		}
 		
 		// If existed in A (Removed OR Modified OR Unchanged OR Mixed), add to ExistingMap
-		// (Used for Copy detection)
 		if n.Status != StatusAdded {
-			if n.IsFile {
-				add(existingMap, n.SHA1A, n.Path)
-				add(existingMap, n.MD5A, n.Path)
-			} else {
-				add(existingMap, n.MerkleHash, n.Path)
-			}
+			add(existingMap, n.HashA, n.Path)
 		}
 		
 		for _, child := range n.Children {
@@ -391,55 +348,43 @@ func detectMovesCopies(root *Node) {
 	var match func(*Node)
 	match = func(n *Node) {
 		if (n.Status == StatusAdded || n.Status == StatusModified) {
-			// Try matching with available hashes.
-			// Priority: SHA1, then MD5, then Merkle (if dir)
-			
-			hashesToCheck := []string{}
-			if n.IsFile {
-				if n.SHA1B != "" { hashesToCheck = append(hashesToCheck, n.SHA1B) }
-				if n.MD5B != "" { hashesToCheck = append(hashesToCheck, n.MD5B) }
-			} else {
-				if n.MerkleHash != "" { hashesToCheck = append(hashesToCheck, n.MerkleHash) }
+			// Use HashB
+			hash := n.HashB
+			if hash == "" {
+				// Cannot match if no hash
+				return
 			}
 			
-			foundMatch := false
-			
-			for _, h := range hashesToCheck {
-				if foundMatch { break }
-				
-				// Check Removed (Move) first
-				if paths, ok := removedMap[h]; ok && len(paths) > 0 {
-					// Match found!
-					src := paths[0]
-					n.Status = StatusMove
-					if !n.IsFile {
-						if !strings.HasSuffix(src, "/") {
-							src += "/"
-						}
+			// Check Removed (Move) first
+			if paths, ok := removedMap[hash]; ok && len(paths) > 0 {
+				// Match found!
+				src := paths[0]
+				n.Status = StatusMove
+				if !n.IsFile {
+					if !strings.HasSuffix(src, "/") {
+						src += "/"
 					}
-					n.SourcePath = src
-					
-					// Mark Source as MovedSource
-					srcNode := findNode(root, paths[0])
-					if srcNode != nil && srcNode.Status == StatusRemoved {
-						srcNode.Status = StatusMovedSource
-					}
-					
-					// Consume
-					removedMap[h] = paths[1:]
-					foundMatch = true
-				} else if paths, ok := existingMap[h]; ok && len(paths) > 0 {
-					// Copy
-					src := paths[0]
-					n.Status = StatusCopy
-					if !n.IsFile {
-						if !strings.HasSuffix(src, "/") {
-							src += "/"
-						}
-					}
-					n.SourcePath = src
-					foundMatch = true
 				}
+				n.SourcePath = src
+				
+				// Mark Source as MovedSource
+				srcNode := findNode(root, paths[0])
+				if srcNode != nil && srcNode.Status == StatusRemoved {
+					srcNode.Status = StatusMovedSource
+				}
+				
+				// Consume
+				removedMap[hash] = paths[1:]
+			} else if paths, ok := existingMap[hash]; ok && len(paths) > 0 {
+				// Copy
+				src := paths[0]
+				n.Status = StatusCopy
+				if !n.IsFile {
+					if !strings.HasSuffix(src, "/") {
+						src += "/"
+					}
+				}
+				n.SourcePath = src
 			}
 		}
 		

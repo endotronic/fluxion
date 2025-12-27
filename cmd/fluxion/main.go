@@ -443,6 +443,37 @@ func runDiff(args []string) {
 	
 	oldID := snapA.ID
 	newID := snapB.ID
+	
+	// Determine Hash Strategy
+	hasSHA1A, hasMD5A := false, false
+	for _, h := range snapA.Hashes {
+		if h == "sha1" { hasSHA1A = true }
+		if h == "md5" { hasMD5A = true }
+	}
+	
+	hasSHA1B, hasMD5B := false, false
+	for _, h := range snapB.Hashes {
+		if h == "sha1" { hasSHA1B = true }
+		if h == "md5" { hasMD5B = true }
+	}
+	
+	commonSHA1 := hasSHA1A && hasSHA1B
+	commonMD5 := hasMD5A && hasMD5B
+	
+	var strategy string
+	if commonSHA1 {
+		strategy = "sha1"
+	} else if commonMD5 {
+		strategy = "md5"
+	} else {
+		fmt.Printf("Error: Incompatible hash types.\n")
+		fmt.Printf("Snapshot A Hashes: %v\n", snapA.Hashes)
+		fmt.Printf("Snapshot B Hashes: %v\n", snapB.Hashes)
+		fmt.Println("Snapshots must share at least one common hash algorithm.")
+		os.Exit(1)
+	}
+	
+	fmt.Printf("Comparing using strategy: %s\n", strings.ToUpper(strategy))
 
 	// 2. Load Maps with Progress
 	fmt.Printf("Loading Snapshot %d...\n", oldID)
@@ -485,7 +516,7 @@ func runDiff(args []string) {
 
 	barDiff := progressbar.Default(int64(len(filesA) + len(filesB)))
 
-	results, err := diff.CompareSnapshots(relFilesA, relFilesB, snapA.RootPath, snapB.RootPath, func(curr, total int) {
+	results, err := diff.CompareSnapshots(relFilesA, relFilesB, snapA.RootPath, snapB.RootPath, strategy, func(curr, total int) {
 		barDiff.Set(curr)
 	})
 	if err != nil {
