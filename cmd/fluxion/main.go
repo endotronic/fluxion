@@ -493,32 +493,61 @@ func runDiff(args []string) {
 
 func runImportLegacy(args []string) {
 	cmd := flag.NewFlagSet("import-legacy", flag.ExitOnError)
-	hashesPtr := cmd.String("hashes", "", "Path to hashes file (e.g. _hashes.txt)")
-	sizesPtr := cmd.String("sizes", "", "Path to sizes file (e.g. _sizes.txt)")
+	sizesPtr := cmd.String("sizes", "", "Path to sizes file (optional, defaults to inferred from hashes)")
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
 	namePtr := cmd.String("name", "", "Name for the snapshot (optional, defaults to filename)")
 	rootPtr := cmd.String("root", "/", "Root path for the snapshot (defaults to /)")
 	
 	cmd.Parse(args)
 
-	if *sizesPtr == "" || *dbPtr == "" {
-		fmt.Println("Error: --sizes and --db are required. --hashes is optional but recommended.")
+	// Validate Arguments
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required.")
+		cmd.Usage()
+		os.Exit(1)
+	}
+	
+	// Hashes File is Positional
+	hashesPath := ""
+	if cmd.NArg() > 0 {
+		hashesPath = cmd.Arg(0)
+	}
+	
+	if hashesPath == "" {
+		fmt.Println("Error: hashes file path is required as positional argument.")
 		cmd.Usage()
 		os.Exit(1)
 	}
 
-	sizesPath := *sizesPtr
-	hashesPath := *hashesPtr
 	dbPath := *dbPtr
 	rootPath := *rootPtr
 	snapName := *namePtr
 
 	if snapName == "" {
-		snapName = filepath.Base(sizesPath)
+		snapName = filepath.Base(hashesPath)
 		// Clean up common suffixes
-		snapName = strings.TrimSuffix(snapName, "_files_sizes.txt")
-		snapName = strings.TrimSuffix(snapName, "_sizes.txt")
+		snapName = strings.TrimSuffix(snapName, "_files_hashes.txt")
+		snapName = strings.TrimSuffix(snapName, "_hashes.txt")
 		snapName = strings.TrimSuffix(snapName, ".txt")
+	}
+	
+	// Infer Sizes File if not provided
+	sizesPath := *sizesPtr
+	if sizesPath == "" {
+		// Infer
+		// Try replacing "hashes" with "sizes"
+		// Logic: _hashes.txt -> _sizes.txt
+		if strings.Contains(hashesPath, "hashes") {
+			inferred := strings.Replace(hashesPath, "hashes", "sizes", 1)
+			if _, err := os.Stat(inferred); err == nil {
+				sizesPath = inferred
+				fmt.Printf("Inferred sizes file: %s\n", sizesPath)
+			}
+		}
+	}
+	
+	if sizesPath == "" {
+		fmt.Println("Warning: Sizes file not provided and could not be inferred. Importing with 0 sizes.")
 	}
 
 	// Open DB
@@ -529,43 +558,47 @@ func runImportLegacy(args []string) {
 	}
 	defer dbStore.Close()
 
-	// 1. Load Hashes into memory (if provided)
-	hashMap := make(map[string]string)
-	if hashesPath != "" {
-		fmt.Printf("Loading hashes from %s...\n", hashesPath)
-		hf, err := os.Open(hashesPath)
+	// 1. Load Sizes into memory (if provided)
+	sizeMap := make(map[string]int64)
+	if sizesPath != "" {
+		fmt.Printf("Loading sizes from %s...\n", sizesPath)
+		sf, err := os.Open(sizesPath)
 		if err != nil {
-			fmt.Printf("Error opening hashes file: %v\n", err)
+			fmt.Printf("Error opening sizes file: %v\n", err)
 			os.Exit(1)
 		}
-		defer hf.Close()
+		defer sf.Close()
 		
-		hScanner := bufio.NewScanner(hf)
-		for hScanner.Scan() {
-			line := hScanner.Text()
-			// Format: HASH  ENCODING  BASE64_PATH
+		sScanner := bufio.NewScanner(sf)
+		for sScanner.Scan() {
+			line := sScanner.Text()
+			// Format: SIZE  ENCODING  BASE64_PATH
 			parts := strings.Split(line, "  ")
 			if len(parts) >= 3 {
-				hash := strings.TrimSpace(parts[0])
+				sizeStr := strings.TrimSpace(parts[0])
 				b64Path := strings.TrimSpace(parts[2])
-				hashMap[b64Path] = hash
+				
+				size, err := strconv.ParseInt(sizeStr, 10, 64)
+				if err == nil {
+					sizeMap[b64Path] = size
+				}
 			}
 		}
-		fmt.Printf("Loaded %d hashes.\n", len(hashMap))
+		fmt.Printf("Loaded %d size records.\n", len(sizeMap))
 	}
 
-	// 2. Stream Sizes and Create Records
-	sf, err := os.Open(sizesPath)
+	// 2. Open Hashes File
+	hf, err := os.Open(hashesPath)
 	if err != nil {
-		fmt.Printf("Error opening sizes file: %v\n", err)
+		fmt.Printf("Error opening hashes file: %v\n", err)
 		os.Exit(1)
 	}
-	defer sf.Close()
+	defer hf.Close()
 
 	// Autodetect Root if not provided (or default "/")
 	if *rootPtr == "/" {
-		fmt.Println("Autodetecting root path...")
-		scanner := bufio.NewScanner(sf)
+		fmt.Println("Autodetecting root path from hashes file...")
+		scanner := bufio.NewScanner(hf)
 		var commonPrefix string
 		first := true
 		
@@ -586,9 +619,6 @@ func runImportLegacy(args []string) {
 			} else {
 				// Find common prefix
 				// Simple approach: shrink commonPrefix until it fits
-				// Ensure we don't break mid-directory name?
-				// filepath.Rel?
-				// Let's iterate.
 				for !strings.HasPrefix(path, commonPrefix) {
 					// Move up one dir
 					if commonPrefix == "" || commonPrefix == "/" || commonPrefix == "." {
@@ -610,7 +640,7 @@ func runImportLegacy(args []string) {
 		fmt.Printf("Detected root: %s\n", rootPath)
 		
 		// Rewind file
-		if _, err := sf.Seek(0, 0); err != nil {
+		if _, err := hf.Seek(0, 0); err != nil {
 			fmt.Printf("Error rewinding file: %v\n", err)
 			os.Exit(1)
 		}
@@ -624,7 +654,7 @@ func runImportLegacy(args []string) {
 	}
 	fmt.Printf("Created snapshot ID %d (Name: %s)\n", snap.ID, snapName)
 
-	scanner := bufio.NewScanner(sf)
+	scanner := bufio.NewScanner(hf)
 	batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
 	var processedCount int64
 	
@@ -637,13 +667,8 @@ func runImportLegacy(args []string) {
 			continue
 		}
 		
-		sizeStr := strings.TrimSpace(parts[0])
+		hashVal := strings.TrimSpace(parts[0])
 		b64Path := strings.TrimSpace(parts[2])
-		
-		size, err := strconv.ParseInt(sizeStr, 10, 64)
-		if err != nil {
-			continue
-		}
 		
 		decodedPathBytes, err := base64.StdEncoding.DecodeString(b64Path)
 		if err != nil {
@@ -651,10 +676,10 @@ func runImportLegacy(args []string) {
 		}
 		path := string(decodedPathBytes)
 		
-		// Lookup MD5
-		md5Hash := ""
-		if val, ok := hashMap[b64Path]; ok {
-			md5Hash = val
+		// Lookup Size
+		var size int64 = 0
+		if val, ok := sizeMap[b64Path]; ok {
+			size = val
 		}
 
 		record := &models.FileRecord{
@@ -664,7 +689,7 @@ func runImportLegacy(args []string) {
 			SizeBytes:  size,
 			ModTime:    time.Time{}, // Zero time
 			SHA1:       "",          // Empty SHA1 for legacy import
-			MD5:        md5Hash,     // MD5 from legacy
+			MD5:        hashVal,     // MD5 from legacy
 		}
 		
 		batch = append(batch, record)

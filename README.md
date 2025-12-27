@@ -22,32 +22,39 @@ This produces the `fluxion` binary.
 
 *   **`snapshot` (`s`)**: Scan a directory and create a snapshot of its contents.
     ```bash
-    ./fluxion snapshot /path/to/data
-    # or
-    ./fluxion s /path/to/data
+    ./fluxion snapshot [options] <directory>
     ```
+    *   `--db <path>`: Path to SQLite DB (default: `<dirname>.db` in current dir).
+    *   `--name <name>`: Custom name for the snapshot (default: `<dirname>_<date>`).
+    *   `--threads <n>`: Number of worker threads (default: NumCPU).
+    *   `--md5`: Compute MD5 hashes in addition to SHA1 (back-compat for dupe-finder).
+    *   `--new`: Force a new scan, ignoring previous snapshots.
+    *   `--resume`: Force resume of an interrupted scan.
+    *   `--fail-on-mount`: Fail if a mount point is encountered (default: false).
+    *   `--cross-mounts`: Traverse mount points (default: true).
 
 *   **`list` (`l`)**: List all snapshots in the database.
     ```bash
-    ./fluxion list --db filesystem.db
-    # or
-    ./fluxion l --db filesystem.db
+    ./fluxion list --db <db_path>
     ```
 
-*   **`diff` (`d`)**: Compare two snapshots to see what changed (additions, removals, modifications, moves, copies).
+*   **`diff` (`d`)**: Compare two snapshots to see what changed.
     ```bash
-    ./fluxion diff --db filesystem.db <old_id> <new_id>
+    ./fluxion diff --db <db_path> <old_id_or_name> <new_id_or_name>
     ```
 
 *   **`import` (`i`)**: Merge snapshots from another Fluxion database.
     ```bash
-    ./fluxion import --db main.db --source other.db
+    ./fluxion import --db <dest_db> --source <source_db>
     ```
 
-*   **`import-legacy`**: Import legacy flat-file snapshots.
+*   **`import-legacy`**: Import legacy flat-file snapshots from [dupe-finder](https://github.com/endotronic/dupe-finder).
     ```bash
-    ./fluxion import-legacy --sizes sizes.txt --hashes hashes.txt --db main.db
+    ./fluxion import-legacy [options] <hashes_file>
     ```
+    *   `--db <dest_db>`: Path to sqlite DB (required).
+    *   `--sizes <file>`: Optional path to sizes file. If omitted, attempts to infer from hashes filename (e.g. `_hashes.txt` -> `_sizes.txt`).
+    *   `--root <path>`: Root path override. If omitted, auto-detected from hashes file.
 
 ## Development
 
