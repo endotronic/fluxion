@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"fluxion/internal/consts"
 	"fluxion/internal/diff"
+	"fluxion/internal/dupes"
 	"fluxion/internal/models"
 	"fluxion/internal/scanner"
 	"fluxion/internal/store"
@@ -34,6 +36,7 @@ func main() {
 		fmt.Println("  diff (d)        Compare snapshots")
 		fmt.Println("  import (i)      Import from another DB")
 		fmt.Println("  import-legacy   Import legacy format")
+		fmt.Println("  dupes           Find duplicates within a snapshot")
 		os.Exit(1)
 	}
 
@@ -48,6 +51,8 @@ func main() {
 		runImportDB(os.Args[2:])
 	case "import-legacy":
 		runImportLegacy(os.Args[2:])
+	case "dupes":
+		runDupes(os.Args[2:])
 	default:
 		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
 		os.Exit(1)
@@ -871,6 +876,101 @@ func runImportDB(args []string) {
 	}
 	
 	fmt.Println("Import complete.")
+}
+// runDupes implements the duplicates command
+func runDupes(args []string) {
+	cmd := flag.NewFlagSet("dupes", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	minSizePtr := cmd.String("min-size", "1M", "Minimum size to report (e.g. 10M, 1G)")
+	cmd.Parse(args)
+
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required")
+		cmd.Usage()
+		os.Exit(1)
+	}
+
+	if cmd.NArg() < 1 {
+		fmt.Println("Usage: fluxion dupes --db <db> <snapshot_id_or_name> [--min-size <size>]")
+		os.Exit(1)
+	}
+
+	snapQuery := cmd.Arg(0)
+
+	// Parse Size
+	minSize, err := dupes.ParseSize(*minSizePtr)
+	if err != nil {
+		fmt.Printf("Error parsing min-size: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Open DB
+	dbStore, err := sqlite.NewSqliteStore(*dbPtr)
+	if err != nil {
+		fmt.Printf("Error opening DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer dbStore.Close()
+
+	// Find Snapshot
+	snap, err := dbStore.FindSnapshot(snapQuery)
+	if err != nil {
+		fmt.Printf("Error finding snapshot: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Analyzing snapshot '%s' (ID: %d)...\n", snap.Name, snap.ID)
+
+	// Load Files
+	count, _ := dbStore.GetFileCount(snap.ID)
+	bar := progressbar.Default(count, "Loading files")
+	files, err := dbStore.GetFilesForSnapshot(snap.ID, func(c int) {
+		bar.Set(c)
+	})
+	if err != nil {
+		fmt.Printf("Error getting files: %v\n", err)
+		os.Exit(1)
+	}
+	bar.Finish()
+	fmt.Println()
+
+	// Find Dupes
+	fmt.Printf("Finding duplicates (Min Size: %s)...\n", dupes.FormatSize(minSize))
+	groups, err := dupes.FindDuplicates(files, minSize, snap.RootPath)
+	if err != nil {
+		fmt.Printf("Error finding duplicates: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(groups) == 0 {
+		fmt.Println("No duplicates found matching criteria.")
+		return
+	}
+
+	// Sort groups by Size Descending
+	sort.Slice(groups, func(i, j int) bool {
+		return groups[i].Size > groups[j].Size
+	})
+
+	var totalWasted int64 = 0
+	
+	for _, g := range groups {
+		redundantCount := int64(len(g.Paths) - 1)
+		wasted := redundantCount * g.Size
+		totalWasted += wasted
+		
+		fmt.Printf("[%s] Size: %s | Count: %d | Wasted: %s\n", 
+			func() string { if g.IsDir { return "DIR" }; return "FILE" }(),
+			dupes.FormatSize(g.Size),
+			len(g.Paths),
+			dupes.FormatSize(wasted),
+		)
+		for _, p := range g.Paths {
+			fmt.Printf("  - %s\n", p)
+		}
+		fmt.Println()
+	}
+	
+	fmt.Printf("Total Wasted Space: %s\n", dupes.FormatSize(totalWasted))
 }
 
 func getUniqueSnapshotName(s store.Store, baseName string, mustFail bool) (string, error) {
