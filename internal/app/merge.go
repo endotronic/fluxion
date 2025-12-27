@@ -3,6 +3,8 @@ package app
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"fluxion/internal/consts"
@@ -58,11 +60,13 @@ func RunMerge(cfg MergeConfig) error {
 	}
 
 	// 2. Create New Snapshot
-	// We need a proper root path. Since we merge unrelated snapshots potentially,
-	// let's just pick the root path of the first one, or use a placeholder like "merged".
-	// The user is creating a synthetic snapshot.
-	// Let's use the first one's root path for now, or just "/".
-	rootPath := inputSnaps[0].RootPath
+	// Determine LCA of root paths
+	var rootPaths []string
+	for _, s := range inputSnaps {
+		rootPaths = append(rootPaths, s.RootPath)
+	}
+	rootPath := findLCA(rootPaths)
+	
 	hostname := cfg.Hostname
 	if hostname == "" {
 		hostname, _ = os.Hostname()
@@ -140,4 +144,40 @@ func RunMerge(cfg MergeConfig) error {
 	logrus.Infof("Successfully merged %d files into snapshot '%s'.", totalImported, finalName)
 
 	return nil
+}
+
+func findLCA(paths []string) string {
+	if len(paths) == 0 {
+		return "/"
+	}
+	
+	common := paths[0]
+	// If it doesn't end in separator and isn't root, ideally we treat it as directory.
+	// But snapshots root_paths are usually directories.
+	// We'll trust the string manipulation.
+	
+	for _, p := range paths[1:] {
+		// Shrink common until it is a prefix of p
+		// Note: We must respect path boundaries. "/data" is not a prefix of "/data2".
+		// It must be "/data" prefix of "/data/subdir" OR "/data" == "/data".
+		
+		for {
+			if common == p || strings.HasPrefix(p, common + string(os.PathSeparator)) || (common == string(os.PathSeparator) && strings.HasPrefix(p, common)) {
+				break
+			}
+			// Special case: if common is "/" and p doesn't match, well p must be relative? 
+			// But assumption is absolute paths.
+			if common == "/" || common == "" || common == "." {
+				common = "/"
+				break
+			}
+			
+			common = filepath.Dir(common)
+		}
+	}
+	
+	if common == "" {
+		return "/"
+	}
+	return common
 }

@@ -31,7 +31,7 @@ func setupTestDB(t *testing.T) (string, func()) {
 	}
 }
 
-func createDummySnapshot(t *testing.T, dbPath, name string, files []string) *models.Snapshot {
+func createDummySnapshot(t *testing.T, dbPath, names, root string, files []string) *models.Snapshot {
 	t.Helper()
 	s, err := sqlite.NewSqliteStore(dbPath)
 	if err != nil {
@@ -39,7 +39,11 @@ func createDummySnapshot(t *testing.T, dbPath, name string, files []string) *mod
 	}
 	defer s.Close()
 	
-	snap, err := s.CreateSnapshot("/tmp", name, "host1")
+	if root == "" {
+		root = "/tmp"
+	}
+	
+	snap, err := s.CreateSnapshot(root, names, "host1")
 	if err != nil {
 		t.Fatalf("failed to create snapshot: %v", err)
 	}
@@ -73,8 +77,8 @@ func TestRunMerge_Success(t *testing.T) {
 	defer cleanup()
 	
 	// Create source snapshots
-	createDummySnapshot(t, dbPath, "snap1", []string{"/a/file1", "/a/file2"})
-	createDummySnapshot(t, dbPath, "snap2", []string{"/b/file3"})
+	createDummySnapshot(t, dbPath, "snap1", "", []string{"/a/file1", "/a/file2"})
+	createDummySnapshot(t, dbPath, "snap2", "", []string{"/b/file3"})
 	
 	cfg := MergeConfig{
 		DBPath:    dbPath,
@@ -114,8 +118,8 @@ func TestRunMerge_Duplicates(t *testing.T) {
 	defer cleanup()
 	
 	// Overlapping files
-	createDummySnapshot(t, dbPath, "snap1", []string{"/common/file"})
-	createDummySnapshot(t, dbPath, "snap2", []string{"/common/file"})
+	createDummySnapshot(t, dbPath, "snap1", "", []string{"/common/file"})
+	createDummySnapshot(t, dbPath, "snap2", "", []string{"/common/file"})
 	
 	cfg := MergeConfig{
 		DBPath:    dbPath,
@@ -155,8 +159,8 @@ func TestRunMerge_Hostname(t *testing.T) {
 	dbPath, cleanup := setupTestDB(t)
 	defer cleanup()
 	
-	createDummySnapshot(t, dbPath, "snap1", []string{"/a/1"})
-	createDummySnapshot(t, dbPath, "snap2", []string{"/b/2"})
+	createDummySnapshot(t, dbPath, "snap1", "", []string{"/a/1"})
+	createDummySnapshot(t, dbPath, "snap2", "", []string{"/b/2"})
 	
 	expectedHost := "custom-server"
 	cfg := MergeConfig{
@@ -183,5 +187,44 @@ func TestRunMerge_Hostname(t *testing.T) {
 	
 	if merged.ComputerName != expectedHost {
 		t.Errorf("expected hostname %s, got %s", expectedHost, merged.ComputerName)
+	}
+}
+
+func TestRunMerge_LCA(t *testing.T) {
+	dbPath, cleanup := setupTestDB(t)
+	defer cleanup()
+	
+	// Create snapshots with different roots
+	// Snap 1: /home/user/docs/work
+	// Snap 2: /home/user/pictures
+	// LCA: /home/user
+	
+	createDummySnapshot(t, dbPath, "snap1", "/home/user/docs/work", []string{"/home/user/docs/work/file1"})
+	createDummySnapshot(t, dbPath, "snap2", "/home/user/pictures", []string{"/home/user/pictures/pic1"})
+	
+	cfg := MergeConfig{
+		DBPath:    dbPath,
+		Name:      "merged_lca",
+		Snapshots: []string{"snap1", "snap2"},
+	}
+	
+	if err := RunMerge(cfg); err != nil {
+		t.Fatalf("RunMerge failed: %v", err)
+	}
+	
+	s, err := sqlite.NewSqliteStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	defer s.Close()
+	
+	merged, err := s.FindSnapshot("merged_lca")
+	if err != nil {
+		t.Fatalf("failed to find merged snapshot: %v", err)
+	}
+	
+	expectedRoot := "/home/user"
+	if merged.RootPath != expectedRoot {
+		t.Errorf("expected root path '%s', got '%s'", expectedRoot, merged.RootPath)
 	}
 }
