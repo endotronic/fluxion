@@ -371,28 +371,10 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	go func() {
 		batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
 		// count := 0 // use processedCount
-		for res := range results {
-			if res.Error != nil {
-				// progressbar handles stderr
-				continue
+		flush := func() {
+			if len(batch) == 0 {
+				return
 			}
-			batch = append(batch, res.File)
-			if len(batch) >= consts.DBBatchSize {
-				if err := dbStore.BatchAddFiles(batch); err != nil {
-					logrus.Errorf("Error writing batch: %v", err)
-				}
-				
-				var sum int64
-				for _, f := range batch {
-					sum += f.SizeBytes
-				}
-				processedBytes.Add(sum)
-				processedCount.Add(int64(len(batch)))
-				batch = batch[:0]
-			}
-		}
-		// final batch
-		if len(batch) > 0 {
 			if err := dbStore.BatchAddFiles(batch); err != nil {
 				logrus.Errorf("Error writing batch: %v", err)
 			}
@@ -402,8 +384,32 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			}
 			processedBytes.Add(sum)
 			processedCount.Add(int64(len(batch)))
+			batch = batch[:0]
 		}
-		done <- true
+
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case res, ok := <-results:
+				if !ok {
+					// Channel closed, flush remaining and exit
+					flush()
+					done <- true
+					return
+				}
+				if res.Error != nil {
+					continue
+				}
+				batch = append(batch, res.File)
+				if len(batch) >= consts.DBBatchSize {
+					flush()
+				}
+			case <-ticker.C:
+				flush()
+			}
+		}
 	}()
 
 	start := time.Now()
