@@ -323,6 +323,7 @@ func runSnapshot(args []string) {
 	)
 
 	// UI Loop
+	totalBuffer := float64(scanConfig.NumWorkers*consts.ScannerChannelBufferMultiplier)
 	uiDone := make(chan bool)
 	go func() {
 		defer close(uiDone)
@@ -340,17 +341,9 @@ func runSnapshot(args []string) {
 				current := processedBytes.Load()
 				if walking {
 					found := foundCount.Load()
-					desc := fmt.Sprintf("Scanning (Found %d)...", found)
-					
-					// Add buffer stats
-					capRes := cap(results)
-					if capRes > 0 {
-						saturation := float64(len(results)) / float64(capRes)
-						delta := foundCount.Load() - processedCount.Load()
-						sat2 := float64(delta) / float64(capRes)
-						desc = fmt.Sprintf("Scanning (Found %d) [%.0f%% Saturated %.0f%% ]...", found, saturation*100, sat2*100)
-					}
-					
+					delta := foundCount.Load() - processedCount.Load()
+					saturation := float64(delta) / totalBuffer
+					desc := fmt.Sprintf("Scanning (Found %d) [%.0f%% Saturated]...", found, saturation*100)
 					bar.Describe(desc)
 				} else {
 					desc := fmt.Sprintf("Found (%d). Hashing (%d done)...", foundCount.Load(), processedCount.Load())
