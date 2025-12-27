@@ -29,7 +29,7 @@ This produces the `fluxion` binary.
     *   `--threads <n>`: Number of worker threads (default: NumCPU).
     *   `--md5`: Compute MD5 hashes in addition to SHA1 (back-compat for dupe-finder).
     *   `--new`: Force a new scan, ignoring previous snapshots.
-    *   `--resume`: Force resume of an interrupted scan.
+    *   `--resume <name|id>`: Resume an interrupted scan.
     *   `--fail-on-mount`: Fail if a mount point is encountered (default: false).
     *   `--cross-mounts`: Traverse mount points (default: true).
 
@@ -43,6 +43,13 @@ This produces the `fluxion` binary.
     ./fluxion diff --db <db_path> <old_id_or_name> <new_id_or_name>
     ```
 
+*   **`merge` (`m`)**: Merge multiple snapshots into a single new snapshot.
+    ```bash
+    ./fluxion merge --name <new_name> [options] <snap1> <snap2> ...
+    ```
+    *   `--db <path>`: Path to SQLite DB.
+    *   `--hostname <name>`: Override computer name for the new snapshot.
+
 *   **`import` (`i`)**: Merge snapshots from another Fluxion database.
     ```bash
     ./fluxion import --db <dest_db> --source <source_db>
@@ -55,6 +62,11 @@ This produces the `fluxion` binary.
     *   `--db <dest_db>`: Path to sqlite DB (required).
     *   `--sizes <file>`: Optional path to sizes file. If omitted, attempts to infer from hashes filename (e.g. `_hashes.txt` -> `_sizes.txt`).
     *   `--root <path>`: Root path override. If omitted, auto-detected from hashes file.
+
+*   **`version`**: Print the current version.
+    ```bash
+    ./fluxion version
+    ```
 
 ## Development
 
