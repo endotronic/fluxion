@@ -405,6 +405,11 @@ func runSnapshot(args []string) {
 func runDiff(args []string) {
 	cmd := flag.NewFlagSet("diff", flag.ExitOnError)
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	
+	var updateMode bool
+	cmd.BoolVar(&updateMode, "update", false, "Report only files from Source (A) missing or modified in Target (B)")
+	cmd.BoolVar(&updateMode, "u", false, "Report only files from Source (A) missing or modified in Target (B) (shorthand)")
+
 	cmd.Parse(args)
 
 	if *dbPtr == "" {
@@ -534,6 +539,19 @@ func runDiff(args []string) {
 	}
 
 	for _, res := range results {
+		// Update Mode Filtering
+		if updateMode {
+			// Ignore Added (Not in A)
+			if res.Status == diff.StatusAdded {
+				continue
+			}
+			// Ignore Move/Copy (Content exists in B)
+			if res.Status == diff.StatusMove || res.Status == diff.StatusCopy {
+				continue
+			}
+			// Show: StatusRemoved (Missing in B), StatusModified (Changed in B)
+		}
+		
 		symbol := "?"
 		path := res.Path
 		switch res.Status {
