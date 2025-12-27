@@ -63,6 +63,11 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 		return
 	}
 
+	// Device Cache for Foreign Mounts (Path -> DevID)
+	// We only store paths that are NOT on rootDev to save memory.
+	// If a parent path is not in this map, we assume it is on rootDev.
+	deviceMap := make(map[string]uint64)
+
 	// Start walker
 	err = filepath.WalkDir(cfg.RootPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -77,7 +82,12 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 				// Warn and continue?
 				fmt.Printf("Warning: failed to get device for %s: %v\n", path, err)
 			} else if dev != rootDev {
-				// Different device
+				// Different device (Foreign)
+				
+				// 1. Cache this device ID
+				deviceMap[path] = dev
+				
+				// 2. Policy Check
 				if !cfg.CrossMounts {
 					if cfg.FailOnMount {
 						return fmt.Errorf("filesystem boundary detected at %s", path)
@@ -85,8 +95,25 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 					fmt.Printf("Skipping filesystem boundary: %s\n", path)
 					return filepath.SkipDir
 				}
-				// Default: warn but continue
-				fmt.Printf("Warning: crossing filesystem boundary at %s\n", path)
+				
+				// 3. Warning Logic (Optimized)
+				// We want to warn only if we just crossed a boundary.
+				// i.e., Parent Device != Current Device.
+				
+				parentPath := filepath.Dir(path)
+				
+				// Lookup parent in foreign cache
+				parentDev, ok := deviceMap[parentPath]
+				if !ok {
+					// Parent not in foreign cache.
+					// Assume parent is on rootDev (since we visited it and didn't cache it).
+					// NOTE: This handles the case where parent is RootPath naturally.
+					parentDev = rootDev
+				}
+				
+				if parentDev != dev {
+					fmt.Printf("Warning: crossing filesystem boundary at %s\n", path)
+				}
 			}
 		}
 
