@@ -283,6 +283,7 @@ func runSnapshot(args []string) {
 	var foundCount atomic.Int64
 	var foundBytes atomic.Int64
 	var processedBytes atomic.Int64
+	var processedCount atomic.Int64
 	
 	walkDone := make(chan bool)
 	done := make(chan bool)
@@ -334,7 +335,7 @@ func runSnapshot(args []string) {
 			case <-walkDone:
 				walking = false
 				// Switch to determinate
-				total := foundCount.Load()
+				total := foundBytes.Load()
 				bar.ChangeMax64(total)
 			case <-ticker.C:
 				current := processedBytes.Load()
@@ -352,7 +353,8 @@ func runSnapshot(args []string) {
 					
 					bar.Describe(desc)
 				} else {
-					bar.Describe("Hashing...")
+					desc := fmt.Sprintf("Found (%d). Hashing (%d done)...", foundCount.Load(), processedCount.Load())
+					bar.Describe(desc)
 				}
 				bar.Set64(current)
 			case <-done:
@@ -382,6 +384,7 @@ func runSnapshot(args []string) {
 					sum += f.SizeBytes
 				}
 				processedBytes.Add(sum)
+				processedCount.Add(int64(len(batch)))
 				batch = batch[:0]
 			}
 		}
@@ -395,6 +398,7 @@ func runSnapshot(args []string) {
 				sum += f.SizeBytes
 			}
 			processedBytes.Add(sum)
+			processedCount.Add(int64(len(batch)))
 		}
 		done <- true
 	}()
