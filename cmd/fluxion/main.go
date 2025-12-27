@@ -91,6 +91,8 @@ func runSnapshot(args []string) {
 	crossMountsPtr := cmd.Bool("cross-mounts", true, "Traverse mount points")
 	failOnMountPtr := cmd.Bool("fail-on-mount", false, "Fail if mount point encountered")
 	md5Ptr := cmd.Bool("md5", false, "Compute MD5 checksums")
+	skipEstPtr := cmd.Bool("skip-estimation", false, "Skip filesystem usage estimation")
+	estimateOnlyPtr := cmd.Bool("estimate", false, "Estimate scan size only (don't scan)")
 	
 	cmd.Parse(args)
 
@@ -119,6 +121,8 @@ func runSnapshot(args []string) {
 		CrossMounts:  *crossMountsPtr,
 		FailOnMount:  *failOnMountPtr,
 		ComputeMD5:   *md5Ptr,
+		SkipEstimation: *skipEstPtr,
+		EstimateOnly: *estimateOnlyPtr,
 	}
 
 	if err := app.RunSnapshot(cfg); err != nil {

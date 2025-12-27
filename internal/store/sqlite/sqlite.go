@@ -267,3 +267,16 @@ func (s *SqliteStore) GetFileList(snapshotID int64, onProgress func(int)) ([]*mo
 	}
 	return result, nil
 }
+
+func (s *SqliteStore) GetSnapshotBytes(snapshotID int64) (int64, error) {
+	var totalBytes *int64
+	// COALESCE returns 0 if SUM is NULL (empty snapshot)
+	row := s.db.QueryRow("SELECT SUM(size_bytes) FROM files WHERE snapshot_id = ?", snapshotID)
+	if err := row.Scan(&totalBytes); err != nil {
+		return 0, fmt.Errorf("failed to get snapshot bytes: %w", err)
+	}
+	if totalBytes == nil {
+		return 0, nil
+	}
+	return *totalBytes, nil
+}

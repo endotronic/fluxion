@@ -31,6 +31,8 @@ type SnapshotConfig struct {
 	CrossMounts  bool
 	FailOnMount  bool
 	ComputeMD5   bool
+	SkipEstimation bool
+	EstimateOnly bool
 }
 
 func RunSnapshot(cfg SnapshotConfig) error {
@@ -229,10 +231,84 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		},
 	}
 
+	// Estimate size
+	// Estimate size
+	var estimatedTotal int64 = -1
+	var used uint64
+	var errEst error
+	var subMounts []string
+
+	if !cfg.SkipEstimation || cfg.EstimateOnly {
+		if cfg.CrossMounts {
+			used, _, subMounts, errEst = util.GetRecursiveFSUsage(targetDir)
+		} else {
+			used, _, errEst = util.GetFSUsage(targetDir)
+		}
+
+		if errEst == nil && used > 0 {
+			estimatedTotal = int64(used)
+			mountMsg := ""
+			if len(subMounts) > 0 {
+				mountMsg = fmt.Sprintf(" (including %d sub-mounts: %v)", len(subMounts), subMounts)
+			}
+			if !cfg.EstimateOnly {
+				logrus.Infof("Estimated scan size based on FS usage: %s%s", util.FormatBytes(estimatedTotal), mountMsg)
+			}
+		} else if cfg.EstimateOnly {
+			return fmt.Errorf("estimation failed: %v", errEst)
+		}
+	}
+
+	if cfg.EstimateOnly {
+		fmt.Printf("Estimating scan size for: %s\n", targetDir)
+		if cfg.CrossMounts {
+			fmt.Println("Cross-mounts: ENABLED (recursive check)")
+		} else {
+			fmt.Println("Cross-mounts: DISABLED (single filesystem)")
+		}
+		
+		var alreadyScanned int64
+		if mode == "resume" {
+			var err error
+			alreadyScanned, err = dbStore.GetSnapshotBytes(snapshotID)
+			if err != nil {
+				logrus.Warnf("Failed to get already scanned bytes: %v", err)
+			}
+		}
+
+		remaining := estimatedTotal - alreadyScanned
+		if remaining < 0 {
+			remaining = 0
+		}
+
+		// We don't have total capacity here easily from GetFSUsage helper return (it returns used, totalCapacity).
+		// Note: util.GetFSUsage returns (used, totalCapacity). 
+		// My earlier edit to RunSnapshot only captured `used`.
+		// I need to adjust the call above to capture `totalCapacity` if I want to show it.
+		// For now, let's just show the estimated scan size (Used space).
+		
+		fmt.Println("----------------------------------------------------------------")
+		fmt.Printf("Total Estimate:   %s\n", util.FormatBytes(estimatedTotal))
+		if mode == "resume" {
+			fmt.Printf("Already Scanned:  %s\n", util.FormatBytes(alreadyScanned))
+			fmt.Printf("Remaining:        %s\n", util.FormatBytes(remaining))
+		}
+		fmt.Println("----------------------------------------------------------------")
+
+		if len(subMounts) > 0 {
+			fmt.Printf("Found %d sub-mount paths included in this estimate:\n", len(subMounts))
+			for _, m := range subMounts {
+				fmt.Printf("  - %s\n", m)
+			}
+		}
+		
+		return nil
+	}
+
 	// Prepare Bar
 	// We want 2 modes: Indeterminate (while walking), then Determinate (when walk done)
 	bar := progressbar.NewOptions64(
-		-1,
+		estimatedTotal,
 		progressbar.OptionSetDescription("Scanning..."),
 		progressbar.OptionSetWriter(os.Stderr),
 		progressbar.OptionShowBytes(true),
