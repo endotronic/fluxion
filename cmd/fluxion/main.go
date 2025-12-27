@@ -45,6 +45,8 @@ func main() {
 		runSnapshot(os.Args[2:])
 	case "list", "l":
 		runList(os.Args[2:])
+	case "delete":
+		runDelete(os.Args[2:])
 	case "diff", "d":
 		runDiff(os.Args[2:])
 	case "import", "i":
@@ -550,6 +552,81 @@ func runDiff(args []string) {
 		}
 		fmt.Printf("%s %s\n", symbol, path)
 	}
+}
+
+func runDelete(args []string) {
+	cmd := flag.NewFlagSet("delete", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	var yes bool
+	cmd.BoolVar(&yes, "yes", false, "Skip confirmation prompt")
+	cmd.BoolVar(&yes, "y", false, "Skip confirmation prompt (shorthand)")
+	
+	cmd.Parse(args)
+	
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required")
+		cmd.Usage()
+		os.Exit(1)
+	}
+	
+	if cmd.NArg() < 1 {
+		fmt.Println("Usage: fluxion delete --db <db> <snapshot_id_or_name> [-y]")
+		os.Exit(1)
+	}
+	
+	snapQuery := cmd.Arg(0)
+	
+	dbStore, err := sqlite.NewSqliteStore(*dbPtr)
+	if err != nil {
+		fmt.Printf("Error opening DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer dbStore.Close()
+	
+	snap, err := dbStore.FindSnapshot(snapQuery)
+	if err != nil {
+		fmt.Printf("Error finding snapshot: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// Check if already deleted
+	if snap.Status == models.StatusDeleted {
+		fmt.Printf("Snapshot '%s' (ID: %d) is already deleted.\n", snap.Name, snap.ID)
+		return
+	}
+	
+	// Get stats
+	count, _ := dbStore.GetFileCount(snap.ID)
+	
+	if !yes {
+		fmt.Printf("About to delete snapshot:\n")
+		fmt.Printf("  ID:   %d\n", snap.ID)
+		fmt.Printf("  Name: %s\n", snap.Name)
+		fmt.Printf("  Path: %s\n", snap.RootPath)
+		fmt.Printf("  Date: %s\n", snap.StartedAt.Format(time.RFC822))
+		fmt.Printf("  Files: %d\n", count)
+		fmt.Printf("\nThis will permanently remove the %d file records associated with this snapshot.\n", count)
+		fmt.Printf("The snapshot entry itself will remain as a tombstone.\n")
+		fmt.Printf("Are you sure? [y/N]: ")
+		
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			response := strings.ToLower(strings.TrimSpace(scanner.Text()))
+			if response != "y" && response != "yes" {
+				fmt.Println("Cancelled.")
+				os.Exit(0)
+			}
+		}
+	}
+	
+	fmt.Printf("Deleting snapshot '%s' (ID: %d)...\n", snap.Name, snap.ID)
+	err = dbStore.DeleteSnapshot(snap.ID)
+	if err != nil {
+		fmt.Printf("Error deleting snapshot: %v\n", err)
+		os.Exit(1)
+	}
+	
+	fmt.Println("Success.")
 }
 
 func runImportLegacy(args []string) {

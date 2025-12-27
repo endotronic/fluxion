@@ -205,6 +205,29 @@ func (s *SqliteStore) CompleteSnapshot(id int64) error {
 	return err
 }
 
+func (s *SqliteStore) DeleteSnapshot(id int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	
+	// Delete file records
+	_, err = tx.Exec(`DELETE FROM files WHERE snapshot_id = ?`, id)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to delete files: %w", err)
+	}
+	
+	// Update snapshot status (Soft delete / Tombstone)
+	_, err = tx.Exec(`UPDATE snapshots SET status = ? WHERE id = ?`, models.StatusDeleted, id)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to update snapshot status: %w", err)
+	}
+	
+	return tx.Commit()
+}
+
 func (s *SqliteStore) AddFile(f *models.FileRecord) error {
 	_, err := s.db.Exec(`INSERT INTO files (snapshot_id, path, filename, size_bytes, mod_time, sha1, md5) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		f.SnapshotID, f.Path, f.Filename, f.SizeBytes, f.ModTime, f.SHA1, f.MD5)

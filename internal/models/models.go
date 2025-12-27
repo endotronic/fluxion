@@ -10,6 +10,7 @@ const (
 	StatusInProgress SnapshotStatus = "in_progress"
 	StatusCompleted  SnapshotStatus = "completed"
 	StatusFailed     SnapshotStatus = "failed"
+	StatusDeleted    SnapshotStatus = "deleted"
 )
 
 type Snapshot struct {
