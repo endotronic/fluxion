@@ -21,6 +21,7 @@ import (
 	"fluxion/internal/scanner"
 	"fluxion/internal/store"
 	"fluxion/internal/store/sqlite"
+	"fluxion/internal/table"
 )
 
 func main() {
@@ -70,15 +71,30 @@ func runList(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("ID\tName\tStatus\tStarted At\t\t\tFinished At\t\t\tRoot Path")
-	fmt.Println("--\t----\t------\t----------\t\t\t-----------\t\t\t---------")
+	if len(snaps) == 0 {
+		fmt.Println("No snapshots found.")
+		return
+	}
+
+	tbl := table.New([]string{"ID", "Name", "Status", "Started At", "Finished At", "Root Path"})
+
 	for _, s := range snaps {
 		finished := "N/A"
 		if s.FinishedAt != nil {
 			finished = s.FinishedAt.Format(time.RFC3339)
 		}
-		fmt.Printf("%d\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Name, s.Status, s.StartedAt.Format(time.RFC3339), finished, s.RootPath)
+		
+		tbl.AddRow([]string{
+			fmt.Sprintf("%d", s.ID),
+			s.Name,
+			string(s.Status),
+			s.StartedAt.Format(time.RFC3339),
+			finished,
+			s.RootPath,
+		})
 	}
+	
+	tbl.Print(os.Stdout)
 }
 
 func runSnapshot(args []string) {
