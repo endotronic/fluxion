@@ -486,7 +486,6 @@ func runDiff(args []string) {
 
 func runImportLegacy(args []string) {
 	cmd := flag.NewFlagSet("import-legacy", flag.ExitOnError)
-	// filePtr := cmd.String("file", "", "Path to legacy snapshot file (required)") // Deprecated
 	hashesPtr := cmd.String("hashes", "", "Path to hashes file (e.g. _hashes.txt)")
 	sizesPtr := cmd.String("sizes", "", "Path to sizes file (e.g. _sizes.txt)")
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
@@ -694,22 +693,8 @@ func runImportDB(args []string) {
 		}
 		
 		// Copy metadata (StartedAt, FinishedAt, Status)
-		// CreateSnapshot sets StartedAt=Now, Status=InProgress.
-		// We want to preserve original metadata?
-		// The `CreateSnapshot` API doesn't allow setting timestamps.
-		// Detailed copy might require SQL access or Store API expansion.
-		// For now, valid import is enough. We can update Status/FinishedAt manually or via API if available.
-		// Store API has `CompleteSnapshot`.
-		// But we want to preserve exact timestamps?
-		// `sqlite.go` doesn't expose strict metadata setter.
-		// User requirement "Merge DB files" -> Implies full fidelity?
-		// Let's assume standard creation is acceptable for now, or we should extend Store?
-		// Extending store is safer. `CloneSnapshot`?
-		// For now, let's proceed with creating new snapshot (new ID, new timestamps basically representing *import time*? Or original?)
-		// If merging backup, original timestamps are crucial.
-		// NOTE: Current Store API is limited. I will stick to basic copy for now and note limitation, OR I modify Store.
-		// Modifying Store is better.
-		// But let's verify what `CreateSnapshot` does.
+		// Note: CreateSnapshot sets StartedAt=Now, Status=InProgress.
+		// Future improvement: Copy exact timestamps if store API allows.
 		
 		// Retrieve files from Source
 		// We use progress bar for files

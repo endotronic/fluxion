@@ -66,9 +66,6 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 	// Start walker
 	err = filepath.WalkDir(cfg.RootPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			// Report error but continue walking other files if possible?
-			// For WalkDir, returning error stops walk.
-			// Let's log it to results and skip.
 			results <- ScanResult{Error: err}
 			return nil // Don't stop walk for individual file permission errors
 		}
@@ -96,8 +93,6 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 		if !d.IsDir() {
 			// Skip non-regular files (symlinks, devices, pipes, sockets)
 			if !d.Type().IsRegular() {
-				// Optional: Log skipped files? Or just silent ignore as requested.
-				// "ignore anything that could cause loops/cycles, blocking, etc."
 				return nil
 			}
 
@@ -163,7 +158,6 @@ func hashFile(path string, computeMD5 bool) (string, string, error) {
 	}
 	defer f.Close()
 
-	// Use a small buffer if needed, but io.Copy handles it.
 	// SHA1 as requested
 	hSha1 := sha1.New()
 	var writers io.Writer = hSha1

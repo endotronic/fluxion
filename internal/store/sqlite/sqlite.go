@@ -111,9 +111,6 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 	query = strings.TrimSpace(query)
 	
 	// Try parsing as int
-	// We can use a heuristic or just try query both.
-	// But let's try strict ID first.
-	// Actually, "123" could be a name. But name matches are strings.
 	// If query matches an ID perfectly, we return that. If not, we try name.
 	
 	row := s.db.QueryRow(`SELECT id, name, root_path, started_at, finished_at, status FROM snapshots WHERE id = ?`, query)
