@@ -26,7 +26,7 @@ type SnapshotConfig struct {
 	Name         string
 	Threads      int
 	ForceNew     bool
-	ForceResume  bool
+	ResumeFrom   string
 	Hostname     string
 	CrossMounts  bool
 	FailOnMount  bool
@@ -56,23 +56,52 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	}
 	defer dbStore.Close()
 
-	// Check last snapshot
-	lastSnap, err := dbStore.GetLastSnapshot(targetDir)
-	if err != nil {
-		return fmt.Errorf("error checking snapshots: %w", err)
-	}
 
 	var snapshotID int64
+
 	var resumeMap map[string]models.FileRecord
 	mode := "new"
+	var lastSnap *models.Snapshot
+
+	if cfg.ResumeFrom != "" {
+		// Explicit Resume
+		lastSnap, err = dbStore.FindSnapshot(cfg.ResumeFrom)
+		if err != nil {
+			return fmt.Errorf("could not find snapshot '%s' to resume: %w", cfg.ResumeFrom, err)
+		}
+		
+		if lastSnap.Status == models.StatusFailed {
+			return fmt.Errorf("cannot resume failed snapshot '%s'", lastSnap.Name)
+		}
+		
+		if lastSnap.Status == models.StatusCompleted {
+			logrus.Warnf("Snapshot '%s' is already completed.", lastSnap.Name)
+			fmt.Print("Do you want to re-scan and add to it? (y/N): ")
+			reader := bufio.NewReader(os.Stdin)
+			text, _ := reader.ReadString('\n')
+			text = strings.TrimSpace(strings.ToLower(text))
+			if text != "y" && text != "yes" {
+				return nil
+			}
+		}
+		// InProgress or User confirmed
+	} else {
+		// Auto-detect last snapshot
+		lastSnap, err = dbStore.GetLastSnapshot(targetDir)
+		if err != nil {
+			return fmt.Errorf("error checking snapshots: %w", err)
+		}
+	}
 
 	if lastSnap != nil {
-		if lastSnap.Status == models.StatusInProgress {
-			// Interrupted
-			doResume := false
-			if cfg.ForceResume {
-				doResume = true
-			} else if cfg.ForceNew {
+		doResume := false
+		
+		// 1. Explicit Resume?
+		if cfg.ResumeFrom != "" {
+			doResume = true
+		} else if lastSnap.Status == models.StatusInProgress {
+			// 2. Implicit Resume (In Progress)
+			if cfg.ForceNew {
 				doResume = false
 			} else {
 				// Prompt
@@ -84,51 +113,48 @@ func RunSnapshot(cfg SnapshotConfig) error {
 					doResume = true
 				}
 			}
+		}
 
-			if doResume {
-				mode = "resume"
-				snapshotID = lastSnap.ID
-				logrus.Info("Resuming snapshot...")
-				// Get total files for progress bar
-				totalFiles, err := dbStore.GetFileCount(snapshotID)
-				if err != nil {
-					logrus.Warnf("Failed to get file count: %v", err)
-					totalFiles = -1
-				}
-
-				bar := progressbar.Default(totalFiles, "Loading existing")
-				
-				if totalFiles > 0 {
-					logrus.Infof("Loading %d existing files...", totalFiles)
-				} else {
-					logrus.Info("Loading existing map...")
-				}
-				
-				resumeMap, err = dbStore.GetFilesForSnapshot(snapshotID, func(count int) {
-					if bar != nil {
-						bar.Set(count)
-					}
-				})
-				if err != nil {
-					return fmt.Errorf("error loading resume data: %w", err)
-				}
-				if bar != nil {
-					bar.Finish()
-					fmt.Println()
-				}
-				logrus.Infof("Already processed %d files. Skipping them.", len(resumeMap))
-			} else {
-				// Start new (abandon old)
-				// We don't delete the old one, just start new.
+		if doResume {
+			mode = "resume"
+			snapshotID = lastSnap.ID
+			logrus.Info("Resuming snapshot...")
+			
+			// Get total files for progress bar
+			totalFiles, err := dbStore.GetFileCount(snapshotID)
+			if err != nil {
+				logrus.Warnf("Failed to get file count: %v", err)
+				totalFiles = -1
 			}
+
+			bar := progressbar.Default(totalFiles, "Loading existing")
+			
+			if totalFiles > 0 {
+				logrus.Infof("Loading %d existing files...", totalFiles)
+			} else {
+				logrus.Info("Loading existing map...")
+			}
+			
+			resumeMap, err = dbStore.GetFilesForSnapshot(snapshotID, func(count int) {
+				if bar != nil {
+					bar.Set(count)
+				}
+			})
+			if err != nil {
+				return fmt.Errorf("error loading resume data: %w", err)
+			}
+			if bar != nil {
+				bar.Finish()
+				fmt.Println()
+			}
+			logrus.Infof("Already processed %d files. Skipping them.", len(resumeMap))
 		} else {
-			// Last snapshot completed. Start a fresh scan.
-			if !cfg.ForceNew {
+			// Start new (abandon old)
+			if !cfg.ForceNew && lastSnap.Status == models.StatusCompleted {
 				logrus.Infof("Found previous completed snapshot from %v. Starting new scan.", lastSnap.FinishedAt)
 			}
 		}
 	}
-
 	// Determine Base Name and Uniqueness Strategy
 	baseName := cfg.Name
 	explicitName := true

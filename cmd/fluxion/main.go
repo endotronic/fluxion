@@ -85,7 +85,7 @@ func runSnapshot(args []string) {
 	namePtr := cmd.String("name", "", "Name for the snapshot (optional, defaults to <dirname>_<date>)")
 	threadsPtr := cmd.Int("threads", runtime.NumCPU(), "Number of threads")
 	forceNewPtr := cmd.Bool("new", false, "Force new scan (ignore previous)")
-	forceResumePtr := cmd.Bool("resume", false, "Force resume (if possible)")
+	resumePtr := cmd.String("resume", "", "Name or ID of snapshot to resume (explicit)")
 	hostnamePtr := cmd.String("hostname", "", "Computer name (defaults to os.Hostname())")
 	
 	crossMountsPtr := cmd.Bool("cross-mounts", true, "Traverse mount points")
@@ -114,7 +114,7 @@ func runSnapshot(args []string) {
 		Name:         *namePtr,
 		Threads:      *threadsPtr,
 		ForceNew:     *forceNewPtr,
-		ForceResume:  *forceResumePtr,
+		ResumeFrom:   *resumePtr,
 		Hostname:     *hostnamePtr,
 		CrossMounts:  *crossMountsPtr,
 		FailOnMount:  *failOnMountPtr,
