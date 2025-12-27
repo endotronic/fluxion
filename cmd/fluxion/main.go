@@ -9,6 +9,7 @@ import (
 
 	"fluxion/internal/app"
 	"fluxion/internal/consts"
+	"fluxion/internal/util"
 
 	"github.com/sirupsen/logrus"
 )
@@ -109,9 +110,21 @@ func runSnapshot(args []string) {
 		cmd.Usage()
 		os.Exit(1)
 	}
+	
+	// Resolve potential mount point source
+	resolvedPath, err := util.ResolveMountPoint(targetArg)
+	if err != nil {
+		fmt.Printf("Error resolving target '%s': %v\n", targetArg, err)
+		os.Exit(1)
+	}
+	
+	absTarget, _ := filepath.Abs(targetArg)
+	if resolvedPath != targetArg && resolvedPath != absTarget {
+		logrus.Infof("Resolved mount source '%s' to path '%s'", targetArg, resolvedPath)
+	}
 
 	cfg := app.SnapshotConfig{
-		TargetDir:    targetArg,
+		TargetDir:    resolvedPath,
 		DBPath:       *dbPtr,
 		Name:         *namePtr,
 		Threads:      *threadsPtr,

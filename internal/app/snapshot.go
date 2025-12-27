@@ -193,7 +193,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		}
 	}
 
-	if mode == "new" {
+	if mode == "new" && !cfg.EstimateOnly {
 		snap, err := dbStore.CreateSnapshot(targetDir, finalName, hostname)
 		if err != nil {
 			return fmt.Errorf("error creating snapshot: %w", err)
