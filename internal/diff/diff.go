@@ -11,13 +11,13 @@ import (
 type Status string
 
 const (
-	StatusUnchanged Status = "Unchanged"
-	StatusAdded     Status = "Added"
-	StatusRemoved   Status = "Removed"
-	StatusModified  Status = "Modified"
-	StatusMixed     Status = "Mixed" // Only for directories containing varying children
-	StatusMove      Status = "Move"
-	StatusCopy      Status = "Copy"
+	StatusUnchanged   Status = "Unchanged"
+	StatusAdded       Status = "Added"
+	StatusRemoved     Status = "Removed"
+	StatusModified    Status = "Modified"
+	StatusMixed       Status = "Mixed" // Only for directories containing varying children
+	StatusMove        Status = "Move"
+	StatusCopy        Status = "Copy"
 	StatusMovedSource Status = "MovedSource" // Internal: Source of a move, should be hidden
 )
 
@@ -32,10 +32,10 @@ type Node struct {
 	// Metadata for comparison (Generic, set based on strategy)
 	HashA string
 	HashB string
-	
+
 	// Merkle Hash (computed for dirs) -> reusing HashA/HashB for dirs?
 	// Yes, HashA for Dir is its Merkle Hash in A.
-	
+
 	// For Move/Copy
 	SourcePath string
 }
@@ -45,6 +45,7 @@ type DiffResult struct {
 	Path       string
 	Status     Status
 	SourcePath string
+	FileCount  int64
 }
 
 // CompareSnapshots computes the diff between two sets of files using a specific hash strategy.
@@ -53,7 +54,7 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 		Name:     "",
 		Path:     "",
 		Children: make(map[string]*Node),
-		Status:   StatusUnchanged, 
+		Status:   StatusUnchanged,
 	}
 
 	total := len(filesA) + len(filesB)
@@ -96,16 +97,16 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 	// 7. Collapse and Collect
 	var results []DiffResult
 	collectResults(root, &results)
-	
+
 	// 8. Reconstruct Absolute Paths
 	finalResults := make([]DiffResult, len(results))
 	for i, res := range results {
 		// Clean paths (remove leading slash if present from Node path construction)
 		relPath := strings.TrimPrefix(res.Path, "/")
-		
+
 		var absPath string
 		var absSource string
-		
+
 		switch res.Status {
 		case StatusAdded, StatusModified, StatusMove, StatusCopy:
 			absPath = filepath.Join(rootB, relPath)
@@ -120,7 +121,7 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 		default:
 			absPath = filepath.Join(rootB, relPath)
 		}
-		
+
 		if res.SourcePath != "" {
 			relSource := strings.TrimPrefix(res.SourcePath, "/")
 			absSource = filepath.Join(rootA, relSource)
@@ -128,11 +129,12 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 				absSource += string(filepath.Separator)
 			}
 		}
-		
+
 		finalResults[i] = DiffResult{
-			Path: absPath,
-			Status: res.Status,
+			Path:       absPath,
+			Status:     res.Status,
 			SourcePath: absSource,
+			FileCount:  res.FileCount,
 		}
 	}
 
@@ -160,9 +162,9 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool, has
 		if !exists {
 			child = &Node{
 				Name:     part,
-				Path:     "", 
+				Path:     "",
 				Children: make(map[string]*Node),
-				Status:   StatusUnchanged, 
+				Status:   StatusUnchanged,
 			}
 			if current.Path == "" {
 				child.Path = "/" + part
@@ -180,7 +182,7 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool, has
 
 	// At leaf
 	current.IsFile = true
-	
+
 	// Extract correct hash
 	hash := ""
 	if hashType == "sha1" {
@@ -195,7 +197,7 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool, has
 		current.Status = StatusRemoved
 	} else {
 		current.HashB = hash
-		
+
 		if current.HashA != "" {
 			// Existed in A
 			if current.HashA == current.HashB {
@@ -216,7 +218,7 @@ func propagateStatus(node *Node) Status {
 	if node.IsFile {
 		return node.Status
 	}
-	
+
 	// If this node was explicitly detected as Move/Copy (has SourcePath), preserve that status
 	// instead of recalculating from children.
 	if node.SourcePath != "" {
@@ -233,7 +235,7 @@ func propagateStatus(node *Node) Status {
 		// So a "Directory" node only exists if it has files (current or past).
 		// If it has no children in the Tree, it shouldn't really happen unless we inserted explicit Dir records (which we don't).
 		// Wait, if all children are Removed, the Dir is Removed? Yes.
-		return StatusUnchanged 
+		return StatusUnchanged
 	}
 
 	// Check children
@@ -270,7 +272,6 @@ func propagateStatus(node *Node) Status {
 	return node.Status
 }
 
-
 // computeMerkleHashes computes Merkle hash of directory content
 // Now uses generic HashA/HashB fields.
 func computeMerkleHashes(node *Node) {
@@ -285,23 +286,23 @@ func computeMerkleHashes(node *Node) {
 
 	var hashesA []string
 	var hashesB []string
-	
+
 	for _, child := range node.Children {
 		computeMerkleHashes(child)
-		
+
 		if child.HashA != "" {
-			hashesA = append(hashesA, child.Name+":"+child.HashA) 
+			hashesA = append(hashesA, child.Name+":"+child.HashA)
 		}
 		if child.HashB != "" {
 			hashesB = append(hashesB, child.Name+":"+child.HashB)
 		}
 	}
-	
+
 	if len(hashesA) > 0 {
 		sort.Strings(hashesA)
 		node.HashA = strings.Join(hashesA, ",")
 	}
-	
+
 	if len(hashesB) > 0 {
 		sort.Strings(hashesB)
 		node.HashB = strings.Join(hashesB, ",")
@@ -310,51 +311,51 @@ func computeMerkleHashes(node *Node) {
 
 func detectMovesCopies(root *Node) {
 	// 1. Index Removed and Existing nodes
-	removedMap := make(map[string][]string) // Hash -> [Paths]
+	removedMap := make(map[string][]string)  // Hash -> [Paths]
 	existingMap := make(map[string][]string) // Hash -> [Paths] (Only from A)
 
 	var index func(*Node)
 	index = func(n *Node) {
 		if n.HashA == "" {
-			return 
+			return
 		}
-		
+
 		// Helper to index a hash
 		add := func(m map[string][]string, hash, path string) {
 			if hash != "" {
 				m[hash] = append(m[hash], path)
 			}
 		}
-		
+
 		// If removed (or Modified: Treat old content as removed), add to removedMap
 		if n.Status == StatusRemoved {
 			add(removedMap, n.HashA, n.Path)
 		} else if n.Status == StatusModified {
 			add(removedMap, n.HashA, n.Path)
 		}
-		
+
 		// If existed in A (Removed OR Modified OR Unchanged OR Mixed), add to ExistingMap
 		if n.Status != StatusAdded {
 			add(existingMap, n.HashA, n.Path)
 		}
-		
+
 		for _, child := range n.Children {
 			index(child)
 		}
 	}
 	index(root)
-	
+
 	// 2. Scan for Added/Modified nodes and match
 	var match func(*Node)
 	match = func(n *Node) {
-		if (n.Status == StatusAdded || n.Status == StatusModified) {
+		if n.Status == StatusAdded || n.Status == StatusModified {
 			// Use HashB
 			hash := n.HashB
 			if hash == "" {
 				// Cannot match if no hash
 				return
 			}
-			
+
 			// Check Removed (Move) first
 			if paths, ok := removedMap[hash]; ok && len(paths) > 0 {
 				// Match found!
@@ -366,13 +367,13 @@ func detectMovesCopies(root *Node) {
 					}
 				}
 				n.SourcePath = src
-				
+
 				// Mark Source as MovedSource
 				srcNode := findNode(root, paths[0])
 				if srcNode != nil && srcNode.Status == StatusRemoved {
 					srcNode.Status = StatusMovedSource
 				}
-				
+
 				// Consume
 				removedMap[hash] = paths[1:]
 			} else if paths, ok := existingMap[hash]; ok && len(paths) > 0 {
@@ -387,7 +388,7 @@ func detectMovesCopies(root *Node) {
 				n.SourcePath = src
 			}
 		}
-		
+
 		// Deterministic iteration for children
 		var children []*Node
 		for _, child := range n.Children {
@@ -411,10 +412,16 @@ func findNode(root *Node, path string) *Node {
 
 	current := root
 	for _, part := range parts {
-		if part == "" { continue }
-		if current.Children == nil { return nil }
+		if part == "" {
+			continue
+		}
+		if current.Children == nil {
+			return nil
+		}
 		child, ok := current.Children[part]
-		if !ok { return nil }
+		if !ok {
+			return nil
+		}
 		current = child
 	}
 	return current
@@ -425,7 +432,7 @@ func collectResults(node *Node, results *[]DiffResult) {
 	// Skip root virtual node (unless root itself changed? e.g. everything removed?)
 	// Root has no name/path usually in this implementation ("").
 	// But its children are top level.
-	
+
 	if node.Name == "" { // Root
 		for _, child := range node.Children {
 			collectResults(child, results)
@@ -443,13 +450,19 @@ func collectResults(node *Node, results *[]DiffResult) {
 		// Collapse: Report this node and stop recursion.
 		// e.g. "Added /dir/" implies all children added.
 		path := node.Path
+		files := int64(0)
+
 		if !node.IsFile {
 			path += "/"
+			// Count recursive files
+			files = countSubtreeFiles(node)
 		}
+
 		*results = append(*results, DiffResult{
 			Path:       path,
 			Status:     node.Status,
 			SourcePath: node.SourcePath,
+			FileCount:  files,
 		})
 		return
 	}
@@ -460,4 +473,15 @@ func collectResults(node *Node, results *[]DiffResult) {
 			collectResults(child, results)
 		}
 	}
+}
+
+func countSubtreeFiles(node *Node) int64 {
+	if node.IsFile {
+		return 1
+	}
+	var sum int64 = 0
+	for _, child := range node.Children {
+		sum += countSubtreeFiles(child)
+	}
+	return sum
 }
