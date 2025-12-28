@@ -44,6 +44,8 @@ This produces the `fluxion` binary.
     ```
     *   `--update` (`-u`): Show only files missing or modified in the second snapshot.
     *   `--exclude` (`-e`): Exclude directory from diff (relative to root or absolute). Can be used (multiple times).
+    *   `--no-copies`: Do not detect file copies.
+    *   `--no-moves`: Do not detect file moves. Use both to treat moves/copies as pure additions/removals.
 
 *   **`merge` (`m`)**: Merge multiple snapshots into a single new snapshot.
     ```bash
@@ -64,6 +66,12 @@ This produces the `fluxion` binary.
     *   `--db <dest_db>`: Path to sqlite DB (required).
     *   `--sizes <file>`: Optional path to sizes file. If omitted, attempts to infer from hashes filename (e.g. `_hashes.txt` -> `_sizes.txt`).
     *   `--root <path>`: Root path override. If omitted, auto-detected from hashes file.
+
+*   **`size`**: Report the total size of files in a snapshot.
+    ```bash
+    ./fluxion size --db <db_path> <snapshot_id_or_name>
+    ```
+    *   `--total-bytes`: Show raw byte count instead of human-readable format.
 
 *   **`version`**: Print the current version.
     ```bash

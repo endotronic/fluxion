@@ -36,7 +36,7 @@ func main() {
 	}
 
 	switch os.Args[1] {
-	case "snapshot", "s":
+	case "snapshot", "snap", "scan", "s":
 		runSnapshot(os.Args[2:])
 	case "list", "l":
 		runList(os.Args[2:])
@@ -54,6 +54,8 @@ func main() {
 		runMerge(os.Args[2:])
 	case "version", "v":
 		runVersion()
+	case "size":
+		runSize(os.Args[2:])
 	default:
 		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -72,6 +74,7 @@ func printUsage() {
 	fmt.Println("  import-legacy   Import legacy format")
 	fmt.Println("  dupes (z)       Find duplicates within a snapshot")
 	fmt.Println("  merge (m)       Merge multiple snapshots into one")
+	fmt.Println("  size            Report size of a snapshot")
 	fmt.Println("  version (v)     Print version")
 }
 
@@ -398,6 +401,36 @@ func runMerge(args []string) {
 	}
 
 	if err := app.RunMerge(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runSize(args []string) {
+	cmd := flag.NewFlagSet("size", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	totalBytesPtr := cmd.Bool("total-bytes", false, "Show total bytes without formatting")
+
+	cmd.Parse(args)
+
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required")
+		cmd.Usage()
+		os.Exit(1)
+	}
+
+	if cmd.NArg() < 1 {
+		fmt.Println("Usage: fluxion size --db <db> <snapshot_id_or_name> [--total-bytes]")
+		os.Exit(1)
+	}
+
+	cfg := app.SizeConfig{
+		DBPath:     *dbPtr,
+		SnapQuery:  cmd.Arg(0),
+		TotalBytes: *totalBytesPtr,
+	}
+
+	if err := app.RunSize(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
