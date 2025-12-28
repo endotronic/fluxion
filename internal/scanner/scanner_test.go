@@ -23,7 +23,7 @@ func TestRunScan(t *testing.T) {
 	// Create test structure
 	// root/file1.txt (content: "hello")
 	// root/sub/file2.txt (content: "world")
-	
+
 	file1Path := filepath.Join(tmpDir, "file1.txt")
 	err = ioutil.WriteFile(file1Path, []byte("hello"), 0644)
 	if err != nil {
@@ -41,7 +41,7 @@ func TestRunScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to write file2: %v", err)
 	}
-	
+
 	// Create a Symlink (should be skipped)
 	symlinkPath := filepath.Join(tmpDir, "symlink.txt")
 	err = os.Symlink(file1Path, symlinkPath)
@@ -56,9 +56,9 @@ func TestRunScan(t *testing.T) {
 	// Config
 	resultsFn := make(chan ScanResult)
 	cfg := ScannerConfig{
-		RootPath:   tmpDir,
-		SnapshotID: 1,
-		NumWorkers: 2,
+		RootPath:    tmpDir,
+		SnapshotID:  1,
+		NumWorkers:  2,
 		OnFileFound: func(path string, size int64) {},
 	}
 
@@ -87,7 +87,7 @@ func TestRunScan(t *testing.T) {
 	// Verify File 1 (file1.txt comes before sub/file2.txt alphabetically?)
 	// path/file1.txt vs path/sub/file2.txt
 	// file1.txt < sub/...
-	
+
 	// Note: Readdir order isn't guaranteed, but we sorted 'files'.
 	// Verify content
 	found1 := false
@@ -180,5 +180,68 @@ func TestRunScan_MD5(t *testing.T) {
 		if f.MD5 != md51 {
 			t.Errorf("MD5 mismatch. Want %s, got %s", md51, f.MD5)
 		}
+	}
+}
+func TestRunScan_Resume(t *testing.T) {
+	// Setup Temp Dir
+	tmpDir, err := ioutil.TempDir("", "scanner_resume_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	file1Path := filepath.Join(tmpDir, "file1.txt")
+	err = ioutil.WriteFile(file1Path, []byte("hello"), 0644)
+	if err != nil {
+		t.Fatalf("Failed to write file1: %v", err)
+	}
+
+	// Create Resume Map with file1 already processed
+	resumeMap := make(map[string]models.FileRecord)
+	resumeMap[file1Path] = models.FileRecord{
+		Path:      file1Path,
+		SHA1:      "precomputed_sha1",
+		SizeBytes: 5,
+	}
+
+	// Config
+	resultsFn := make(chan ScanResult)
+	cfg := ScannerConfig{
+		RootPath:   tmpDir,
+		SnapshotID: 3,
+		NumWorkers: 1,
+		ResumeMap:  resumeMap,
+	}
+
+	// Run Scan
+	go RunScan(cfg, resultsFn)
+
+	// Collect Results
+	var files []*models.FileRecord
+	var fromResumeCount int
+	for res := range resultsFn {
+		if res.Error != nil {
+			t.Errorf("Scan error: %v", res.Error)
+			continue
+		}
+		if res.FromResume {
+			fromResumeCount++
+		}
+		files = append(files, res.File)
+	}
+
+	if len(files) != 1 {
+		t.Errorf("Expected 1 file, got %d", len(files))
+	} else {
+		f := files[0]
+		// Should match resume map data, NOT re-hashed data (though checking hash equality is tricky if logic differs)
+		// But FromResume should be true
+		if f.SHA1 != "precomputed_sha1" {
+			t.Errorf("SHA1 mismatch. Want from resume 'precomputed_sha1', got %s", f.SHA1)
+		}
+	}
+
+	if fromResumeCount != 1 {
+		t.Errorf("Expected 1 result from resume, got %d", fromResumeCount)
 	}
 }
