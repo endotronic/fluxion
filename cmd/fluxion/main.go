@@ -217,6 +217,12 @@ func runDiff(args []string) {
 	cmd.Var(&excludes, "exclude", "Exclude directory from diff (relative or absolute)")
 	cmd.Var(&excludes, "e", "Exclude directory from diff (shorthand)")
 
+	var noCopies bool
+	cmd.BoolVar(&noCopies, "no-copies", false, "Do not detect copies")
+
+	var noMoves bool
+	cmd.BoolVar(&noMoves, "no-moves", false, "Do not detect moves")
+
 	cmd.Parse(args)
 
 	if *dbPtr == "" {
@@ -237,6 +243,8 @@ func runDiff(args []string) {
 		NewQuery:   tail[1],
 		UpdateMode: updateMode,
 		Excludes:   excludes,
+		NoCopies:   noCopies,
+		NoMoves:    noMoves,
 	}
 
 	if err := app.RunDiff(cfg); err != nil {

@@ -49,7 +49,7 @@ type DiffResult struct {
 }
 
 // CompareSnapshots computes the diff between two sets of files using a specific hash strategy.
-func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB string, hashType string, onProgress func(current, total int)) ([]DiffResult, error) {
+func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB string, hashType string, noCopies, noMoves bool, onProgress func(current, total int)) ([]DiffResult, error) {
 	root := &Node{
 		Name:     "",
 		Path:     "",
@@ -89,7 +89,7 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 	propagateStatus(root)
 
 	// 5. Detect Moves/Copies
-	detectMovesCopies(root)
+	detectMovesCopies(root, noCopies, noMoves)
 
 	// 6. Propagate Status (Pass 2)
 	propagateStatus(root)
@@ -309,7 +309,10 @@ func computeMerkleHashes(node *Node) {
 	}
 }
 
-func detectMovesCopies(root *Node) {
+func detectMovesCopies(root *Node, noCopies, noMoves bool) {
+	if noCopies && noMoves {
+		return
+	}
 	// 1. Index Removed and Existing nodes
 	removedMap := make(map[string][]string)  // Hash -> [Paths]
 	existingMap := make(map[string][]string) // Hash -> [Paths] (Only from A)
@@ -356,36 +359,45 @@ func detectMovesCopies(root *Node) {
 				return
 			}
 
+			matched := false
+
 			// Check Removed (Move) first
-			if paths, ok := removedMap[hash]; ok && len(paths) > 0 {
-				// Match found!
-				src := paths[0]
-				n.Status = StatusMove
-				if !n.IsFile {
-					if !strings.HasSuffix(src, "/") {
-						src += "/"
+			if !noMoves {
+				if paths, ok := removedMap[hash]; ok && len(paths) > 0 {
+					// Match found!
+					src := paths[0]
+					n.Status = StatusMove
+					if !n.IsFile {
+						if !strings.HasSuffix(src, "/") {
+							src += "/"
+						}
 					}
-				}
-				n.SourcePath = src
+					n.SourcePath = src
 
-				// Mark Source as MovedSource
-				srcNode := findNode(root, paths[0])
-				if srcNode != nil && srcNode.Status == StatusRemoved {
-					srcNode.Status = StatusMovedSource
-				}
-
-				// Consume
-				removedMap[hash] = paths[1:]
-			} else if paths, ok := existingMap[hash]; ok && len(paths) > 0 {
-				// Copy
-				src := paths[0]
-				n.Status = StatusCopy
-				if !n.IsFile {
-					if !strings.HasSuffix(src, "/") {
-						src += "/"
+					// Mark Source as MovedSource
+					srcNode := findNode(root, paths[0])
+					if srcNode != nil && srcNode.Status == StatusRemoved {
+						srcNode.Status = StatusMovedSource
 					}
+
+					// Consume
+					removedMap[hash] = paths[1:]
+					matched = true
 				}
-				n.SourcePath = src
+			}
+
+			if !matched && !noCopies {
+				if paths, ok := existingMap[hash]; ok && len(paths) > 0 {
+					// Copy
+					src := paths[0]
+					n.Status = StatusCopy
+					if !n.IsFile {
+						if !strings.HasSuffix(src, "/") {
+							src += "/"
+						}
+					}
+					n.SourcePath = src
+				}
 			}
 		}
 

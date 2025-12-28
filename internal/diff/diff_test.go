@@ -7,12 +7,15 @@ import (
 
 func TestCompareSnapshots(t *testing.T) {
 	tests := []struct {
-		name     string
-		filesA   map[string]models.FileRecord
-		filesB   map[string]models.FileRecord
-		rootA    string
-		rootB    string
+		name   string
+		filesA map[string]models.FileRecord
+		filesB map[string]models.FileRecord
+		rootA  string
+		rootB  string
+
 		strategy string // "sha1" or "md5", defaults to "sha1"
+		noCopies bool
+		noMoves  bool
 		want     []DiffResult
 	}{
 		{
@@ -312,6 +315,56 @@ func TestCompareSnapshots(t *testing.T) {
 				{Path: "/mnt/B/file1", Status: StatusModified},
 			},
 		},
+		{
+			name: "No Moves Option",
+			filesA: map[string]models.FileRecord{
+				"/root/file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/file2": {SHA1: "hash1"},
+			},
+			noMoves: true,
+			// If No Moves, it should fall back to Copy because it exists in A.
+			// Wait, file1 is Removed in B. file2 is Added in B.
+			// If we skip Move, file2 logic sees hash1 is in existingMap (from file1).
+			// So it becomes Copy.
+			// And file1 remains Removed.
+			want: []DiffResult{
+				{Path: "/root/file1", Status: StatusRemoved},
+				{Path: "/root/file2", Status: StatusCopy, SourcePath: "/root/file1"},
+			},
+		},
+		{
+			name: "No Moves Option (Explicitly)",
+			filesA: map[string]models.FileRecord{
+				"/root/file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/file2": {SHA1: "hash1"},
+			},
+			noMoves:  true,
+			noCopies: true, // Also disable Copies to force Add/Remove
+			want: []DiffResult{
+				{Path: "/root/file1", Status: StatusRemoved},
+				{Path: "/root/file2", Status: StatusAdded},
+			},
+		},
+		{
+			name: "No Copies Option",
+			filesA: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/file1":  {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common": {SHA1: "common"},
+				"/root/file1":  {SHA1: "hash1"},
+				"/root/file2":  {SHA1: "hash1"}, // Would be copy
+			},
+			noCopies: true,
+			want: []DiffResult{
+				{Path: "/root/file2", Status: StatusAdded},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -346,7 +399,7 @@ func TestCompareSnapshots(t *testing.T) {
 				strategy = "sha1"
 			}
 
-			got, err := CompareSnapshots(tt.filesA, tt.filesB, rootA, rootB, strategy, nil)
+			got, err := CompareSnapshots(tt.filesA, tt.filesB, rootA, rootB, strategy, tt.noCopies, tt.noMoves, nil)
 			if err != nil {
 				t.Errorf("CompareSnapshots() error = %v", err)
 				return

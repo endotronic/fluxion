@@ -11,6 +11,7 @@ import (
 	"fluxion/internal/store/sqlite"
 
 	"github.com/schollz/progressbar/v3"
+	"github.com/sirupsen/logrus"
 )
 
 type DiffConfig struct {
@@ -19,6 +20,8 @@ type DiffConfig struct {
 	NewQuery   string
 	UpdateMode bool
 	Excludes   []string
+	NoCopies   bool
+	NoMoves    bool
 }
 
 func RunDiff(cfg DiffConfig) error {
@@ -79,16 +82,16 @@ func RunDiff(cfg DiffConfig) error {
 	} else if commonMD5 {
 		strategy = "md5"
 	} else {
-		fmt.Printf("Error: Incompatible hash types.\n")
-		fmt.Printf("Snapshot A Hashes: %v\n", snapA.Hashes)
-		fmt.Printf("Snapshot B Hashes: %v\n", snapB.Hashes)
+		logrus.Errorf("Error: Incompatible hash types.\n")
+		logrus.Errorf("Snapshot A Hashes: %v\n", snapA.Hashes)
+		logrus.Errorf("Snapshot B Hashes: %v\n", snapB.Hashes)
 		return fmt.Errorf("snapshots must share at least one common hash algorithm")
 	}
 
-	fmt.Printf("Comparing using strategy: %s\n", strings.ToUpper(strategy))
+	logrus.Infof("Comparing using strategy: %s", strings.ToUpper(strategy))
 
 	// 2. Load Maps with Progress
-	fmt.Printf("Loading Snapshot %d...\n", oldID)
+	logrus.Infof("Loading Snapshot %d...", oldID)
 	countA, _ := dbStore.GetFileCount(oldID)
 	barA := progressbar.Default(countA)
 	filesA, err := dbStore.GetFilesForSnapshot(oldID, func(c int) { barA.Set(c) })
@@ -96,18 +99,18 @@ func RunDiff(cfg DiffConfig) error {
 		return err
 	}
 
-	fmt.Printf("\nLoading Snapshot %d...\n", newID)
+	logrus.Infof("Loading Snapshot %d...", newID)
 	countB, _ := dbStore.GetFileCount(newID)
 	barB := progressbar.Default(countB)
 	filesB, err := dbStore.GetFilesForSnapshot(newID, func(c int) { barB.Set(c) })
 	if err != nil {
 		return err
 	}
-	fmt.Println()
+	logrus.Println()
 
 	// 3. Compare with Progress
 	// Total ops = len(A) + len(B)
-	fmt.Println("Computing Diff...")
+	logrus.Info("Computing Diff...")
 
 	// Prepare relative maps and apply exclusions
 	relFilesA := make(map[string]models.FileRecord, len(filesA))
@@ -147,13 +150,13 @@ func RunDiff(cfg DiffConfig) error {
 
 	barDiff := progressbar.Default(int64(len(filesA) + len(filesB)))
 
-	results, err := diff.CompareSnapshots(relFilesA, relFilesB, snapA.RootPath, snapB.RootPath, strategy, func(curr, total int) {
+	results, err := diff.CompareSnapshots(relFilesA, relFilesB, snapA.RootPath, snapB.RootPath, strategy, cfg.NoCopies, cfg.NoMoves, func(curr, total int) {
 		barDiff.Set(curr)
 	})
 	if err != nil {
 		return fmt.Errorf("error during diff: %w", err)
 	}
-	fmt.Println()
+	logrus.Println()
 
 	// 4. Print Results
 	if len(results) == 0 {
