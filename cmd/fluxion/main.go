@@ -28,7 +28,7 @@ func main() {
 	// It handles argument parsing using the `flag` package and delegates logical execution
 	// to the `internal/app` package. Each subcommand has a corresponding `Run<Command>` function
 	// in `internal/app` that accepts a configuration struct.
-	
+
 	// Parse subcommand
 	if len(os.Args) < 2 {
 		printUsage()
@@ -88,13 +88,13 @@ func runSnapshot(args []string) {
 	forceNewPtr := cmd.Bool("new", false, "Force new scan (ignore previous)")
 	resumePtr := cmd.String("resume", "", "Name or ID of snapshot to resume (explicit)")
 	hostnamePtr := cmd.String("hostname", "", "Computer name (defaults to os.Hostname())")
-	
+
 	crossMountsPtr := cmd.Bool("cross-mounts", true, "Traverse mount points")
 	failOnMountPtr := cmd.Bool("fail-on-mount", false, "Fail if mount point encountered")
 	md5Ptr := cmd.Bool("md5", false, "Compute MD5 checksums")
 	skipEstPtr := cmd.Bool("skip-estimation", false, "Skip filesystem usage estimation")
 	estimateOnlyPtr := cmd.Bool("estimate", false, "Estimate scan size only (don't scan)")
-	
+
 	cmd.Parse(args)
 
 	// Check for positional argument if flag is empty
@@ -110,32 +110,32 @@ func runSnapshot(args []string) {
 		cmd.Usage()
 		os.Exit(1)
 	}
-	
+
 	// Resolve potential mount point source
 	resolvedPath, err := util.ResolveMountPoint(targetArg)
 	if err != nil {
 		fmt.Printf("Error resolving target '%s': %v\n", targetArg, err)
 		os.Exit(1)
 	}
-	
+
 	absTarget, _ := filepath.Abs(targetArg)
 	if resolvedPath != targetArg && resolvedPath != absTarget {
 		logrus.Infof("Resolved mount source '%s' to path '%s'", targetArg, resolvedPath)
 	}
 
 	cfg := app.SnapshotConfig{
-		TargetDir:    resolvedPath,
-		DBPath:       *dbPtr,
-		Name:         *namePtr,
-		Threads:      *threadsPtr,
-		ForceNew:     *forceNewPtr,
-		ResumeFrom:   *resumePtr,
-		Hostname:     *hostnamePtr,
-		CrossMounts:  *crossMountsPtr,
-		FailOnMount:  *failOnMountPtr,
-		ComputeMD5:   *md5Ptr,
+		TargetDir:      resolvedPath,
+		DBPath:         *dbPtr,
+		Name:           *namePtr,
+		Threads:        *threadsPtr,
+		ForceNew:       *forceNewPtr,
+		ResumeFrom:     *resumePtr,
+		Hostname:       *hostnamePtr,
+		CrossMounts:    *crossMountsPtr,
+		FailOnMount:    *failOnMountPtr,
+		ComputeMD5:     *md5Ptr,
 		SkipEstimation: *skipEstPtr,
-		EstimateOnly: *estimateOnlyPtr,
+		EstimateOnly:   *estimateOnlyPtr,
 	}
 
 	if err := app.RunSnapshot(cfg); err != nil {
@@ -147,7 +147,7 @@ func runSnapshot(args []string) {
 func runList(args []string) {
 	cmd := flag.NewFlagSet("list", flag.ExitOnError)
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (optional, defaults to <current_dir>.db if found)")
-	
+
 	cmd.Parse(args)
 
 	dbPath := *dbPtr
@@ -180,20 +180,20 @@ func runDelete(args []string) {
 	var yes bool
 	cmd.BoolVar(&yes, "yes", false, "Skip confirmation prompt")
 	cmd.BoolVar(&yes, "y", false, "Skip confirmation prompt (shorthand)")
-	
+
 	cmd.Parse(args)
-	
+
 	if *dbPtr == "" {
 		fmt.Println("Error: --db is required")
 		cmd.Usage()
 		os.Exit(1)
 	}
-	
+
 	if cmd.NArg() < 1 {
 		fmt.Println("Usage: fluxion delete --db <db> <snapshot_id_or_name> [-y]")
 		os.Exit(1)
 	}
-	
+
 	cfg := app.DeleteConfig{
 		DBPath:    *dbPtr,
 		SnapQuery: cmd.Arg(0),
@@ -220,7 +220,7 @@ func runDiff(args []string) {
 		cmd.Usage()
 		os.Exit(1)
 	}
-	
+
 	tail := cmd.Args()
 	if len(tail) != 2 {
 		fmt.Println("Usage: fluxion diff --db <db> <old_snapshot_id> <new_snapshot_id>")
@@ -246,7 +246,7 @@ func runImportLegacy(args []string) {
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
 	namePtr := cmd.String("name", "", "Name for the snapshot (optional, defaults to filename)")
 	rootPtr := cmd.String("root", "/", "Root path for the snapshot (defaults to /)")
-	
+
 	cmd.Parse(args)
 
 	if *dbPtr == "" {
@@ -254,12 +254,12 @@ func runImportLegacy(args []string) {
 		cmd.Usage()
 		os.Exit(1)
 	}
-	
+
 	hashesPath := ""
 	if cmd.NArg() > 0 {
 		hashesPath = cmd.Arg(0)
 	}
-	
+
 	if hashesPath == "" {
 		fmt.Println("Error: hashes file path is required as positional argument.")
 		cmd.Usage()
@@ -284,7 +284,7 @@ func runImportDB(args []string) {
 	cmd := flag.NewFlagSet("import", flag.ExitOnError)
 	destDBPtr := cmd.String("db", "", "Path to destination sqlite DB (required)")
 	sourceDBPtr := cmd.String("source", "", "Path to source sqlite DB (required)")
-	
+
 	cmd.Parse(args)
 
 	if *destDBPtr == "" || *sourceDBPtr == "" {
@@ -307,8 +307,8 @@ func runImportDB(args []string) {
 func runDupes(args []string) {
 	cmd := flag.NewFlagSet("dupes", flag.ExitOnError)
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
-	minSizePtr := cmd.Int64("min-size", 1024*1024, "Minimum size in bytes (default 1MB)")
-	
+	minSizePtr := cmd.String("min-size", "1MB", "Minimum size (e.g., 10M, 1G) (default 1MB)")
+
 	cmd.Parse(args)
 
 	if *dbPtr == "" {
@@ -322,10 +322,16 @@ func runDupes(args []string) {
 		os.Exit(1)
 	}
 
+	minSize, err := util.ParseSize(*minSizePtr)
+	if err != nil {
+		fmt.Printf("Error parsing min-size: %v\n", err)
+		os.Exit(1)
+	}
+
 	cfg := app.DupesConfig{
 		DBPath:    *dbPtr,
 		SnapQuery: cmd.Arg(0),
-		MinSize:   *minSizePtr,
+		MinSize:   minSize,
 	}
 
 	if err := app.RunDupes(cfg); err != nil {
@@ -339,33 +345,33 @@ func runMerge(args []string) {
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
 	namePtr := cmd.String("name", "", "Name for the new merged snapshot (required)")
 	hostnamePtr := cmd.String("hostname", "", "Computer name for the snapshot (defaults to current hostname)")
-	
+
 	cmd.Parse(args)
-	
+
 	if *dbPtr == "" {
 		fmt.Println("Error: --db is required")
 		cmd.Usage()
 		os.Exit(1)
 	}
-	
+
 	if *namePtr == "" {
 		fmt.Println("Error: --name is required for the new snapshot")
 		cmd.Usage()
 		os.Exit(1)
 	}
-	
+
 	if cmd.NArg() < 2 {
 		fmt.Println("Usage: fluxion merge --db <db> --name <new_name> [--hostname <name>] <snap1> <snap2> ...")
 		os.Exit(1)
 	}
-	
+
 	cfg := app.MergeConfig{
 		DBPath:    *dbPtr,
 		Name:      *namePtr,
 		Hostname:  *hostnamePtr,
 		Snapshots: cmd.Args(),
 	}
-	
+
 	if err := app.RunMerge(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
