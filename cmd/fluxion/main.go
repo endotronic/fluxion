@@ -213,6 +213,10 @@ func runDiff(args []string) {
 	cmd.BoolVar(&updateMode, "update", false, "Report only files from Source (A) missing or modified in Target (B)")
 	cmd.BoolVar(&updateMode, "u", false, "Report only files from Source (A) missing or modified in Target (B) (shorthand)")
 
+	var excludes arrayFlags
+	cmd.Var(&excludes, "exclude", "Exclude directory from diff (relative or absolute)")
+	cmd.Var(&excludes, "e", "Exclude directory from diff (shorthand)")
+
 	cmd.Parse(args)
 
 	if *dbPtr == "" {
@@ -232,12 +236,25 @@ func runDiff(args []string) {
 		OldQuery:   tail[0],
 		NewQuery:   tail[1],
 		UpdateMode: updateMode,
+		Excludes:   excludes,
 	}
 
 	if err := app.RunDiff(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// arrayFlags to support multiple --exclude options
+type arrayFlags []string
+
+func (i *arrayFlags) String() string {
+	return fmt.Sprint(*i)
+}
+
+func (i *arrayFlags) Set(value string) error {
+	*i = append(*i, value)
+	return nil
 }
 
 func runImportLegacy(args []string) {

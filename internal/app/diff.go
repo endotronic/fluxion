@@ -18,6 +18,7 @@ type DiffConfig struct {
 	OldQuery   string
 	NewQuery   string
 	UpdateMode bool
+	Excludes   []string
 }
 
 func RunDiff(cfg DiffConfig) error {
@@ -108,11 +109,19 @@ func RunDiff(cfg DiffConfig) error {
 	// Total ops = len(A) + len(B)
 	fmt.Println("Computing Diff...")
 
-	// Prepare relative maps
+	// Prepare relative maps and apply exclusions
 	relFilesA := make(map[string]models.FileRecord, len(filesA))
 	for k, v := range filesA {
+		if isExcluded(k, snapA.RootPath, cfg.Excludes) {
+			continue
+		}
+
 		rel, err := filepath.Rel(snapA.RootPath, k)
 		if err == nil {
+			// Also check relative path against exclusion just in case
+			if isExcluded(rel, "", cfg.Excludes) {
+				continue
+			}
 			relFilesA[rel] = v
 		} else {
 			relFilesA[k] = v // Fallback
@@ -121,8 +130,15 @@ func RunDiff(cfg DiffConfig) error {
 
 	relFilesB := make(map[string]models.FileRecord, len(filesB))
 	for k, v := range filesB {
+		if isExcluded(k, snapB.RootPath, cfg.Excludes) {
+			continue
+		}
+
 		rel, err := filepath.Rel(snapB.RootPath, k)
 		if err == nil {
+			if isExcluded(rel, "", cfg.Excludes) {
+				continue
+			}
 			relFilesB[rel] = v
 		} else {
 			relFilesB[k] = v // Fallback
@@ -183,4 +199,41 @@ func RunDiff(cfg DiffConfig) error {
 		fmt.Printf("%s %s\n", symbol, path)
 	}
 	return nil
+}
+
+func isExcluded(path, root string, excludes []string) bool {
+	if len(excludes) == 0 {
+		return false
+	}
+	// Normalize path
+	path = filepath.Clean(path)
+
+	for _, excl := range excludes {
+		// 1. If exclude matches absolute path prefix (if path is absolute)
+		if filepath.IsAbs(excl) {
+			if strings.HasPrefix(path, excl) {
+				return true
+			}
+		} else {
+			// 2. Relative exclude
+			// If we have a root, we can check if path is under root/excl
+			if root != "" {
+				absExcl := filepath.Join(root, excl)
+				if strings.HasPrefix(path, absExcl) {
+					return true
+				}
+			}
+
+			// 3. Or check if path itself starts with exclude (relative match)
+			// This matches "node_modules" against "node_modules/foo"
+			if strings.HasPrefix(path, excl) {
+				return true
+			}
+
+			// 4. Also check for path component match? (e.g. "foo/node_modules/bar")
+			// Requirement says: "If relative, it is applied to each snapshot from the snapshot's root path."
+			// So "node_modules" means "$ROOT/node_modules". It does NOT mean "anywhere/node_modules".
+		}
+	}
+	return false
 }

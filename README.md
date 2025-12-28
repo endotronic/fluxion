@@ -42,6 +42,8 @@ This produces the `fluxion` binary.
     ```bash
     ./fluxion diff --db <db_path> <old_id_or_name> <new_id_or_name>
     ```
+    *   `--update` (`-u`): Show only files missing or modified in the second snapshot.
+    *   `--exclude` (`-e`): Exclude directory from diff (relative to root or absolute). Can be used (multiple times).
 
 *   **`merge` (`m`)**: Merge multiple snapshots into a single new snapshot.
     ```bash

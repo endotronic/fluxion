@@ -63,6 +63,42 @@ if [[ "$DIFF_MOVE" != *"No differences found"* ]]; then
     exit 1
 fi
 
+# Test Exclude Option
+echo "Testing Exclude Option..."
+# Restore directory to original location
+rm -rf "$TEST_DIR"
+mv "${TEST_DIR}_moved" "$TEST_DIR"
+
+# Modify a file in a subdirectory
+mkdir -p "$TEST_DIR/exclude_me"
+echo "I should be ignored" > "$TEST_DIR/exclude_me/ignored.txt"
+echo "I should be seen" > "$TEST_DIR/safe_dir.txt"
+
+./fluxion s --db "$DB_FILE" --name "ExcludeTest" "$TEST_DIR"
+
+# Diff against "WithDupes" (which doesn't have these new files)
+# Without exclude, we should see both added
+DIFF_FULL=$(./fluxion d --db "$DB_FILE" "WithDupes" "ExcludeTest")
+# Check for exclude_me dir or file
+if [[ "$DIFF_FULL" != *"$TEST_DIR/exclude_me"* ]]; then
+    echo "Error: Diff failed to find file without exclude."
+    exit 1
+fi
+
+# With exclude, exclude_me should be gone, but safe_dir.txt should remain
+DIFF_EXCL=$(./fluxion d --db "$DB_FILE" --exclude "exclude_me" "WithDupes" "ExcludeTest")
+
+if [[ "$DIFF_EXCL" == *"$TEST_DIR/exclude_me"* ]]; then
+    echo "Error: Exclude failed! Found ignored file/dir."
+    exit 1
+fi
+
+if [[ "$DIFF_EXCL" != *"[+] "*"$TEST_DIR/safe_dir.txt"* ]]; then
+    echo "Error: Exclude was too aggressive! Missing safe file."
+    exit 1
+fi
+
 # Cleanup
 rm -rf "$TEST_DIR" "${TEST_DIR}_moved" "$DB_FILE"
+echo
 echo "Verification passed!"
