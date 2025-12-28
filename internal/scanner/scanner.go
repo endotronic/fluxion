@@ -35,8 +35,9 @@ type ScannerConfig struct {
 }
 
 type ScanResult struct {
-	File  *models.FileRecord
-	Error error
+	File       *models.FileRecord
+	Error      error
+	FromResume bool
 }
 
 func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
@@ -83,10 +84,10 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 				fmt.Printf("Warning: failed to get device for %s: %v\n", path, err)
 			} else if dev != rootDev {
 				// Different device (Foreign)
-				
+
 				// 1. Cache this device ID
 				deviceMap[path] = dev
-				
+
 				// 2. Policy Check
 				if !cfg.CrossMounts {
 					if cfg.FailOnMount {
@@ -95,13 +96,13 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 					fmt.Printf("Skipping filesystem boundary: %s\n", path)
 					return filepath.SkipDir
 				}
-				
+
 				// 3. Warning Logic (Optimized)
 				// We want to warn only if we just crossed a boundary.
 				// i.e., Parent Device != Current Device.
-				
+
 				parentPath := filepath.Dir(path)
-				
+
 				// Lookup parent in foreign cache
 				parentDev, ok := deviceMap[parentPath]
 				if !ok {
@@ -110,7 +111,7 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 					// NOTE: This handles the case where parent is RootPath naturally.
 					parentDev = rootDev
 				}
-				
+
 				if parentDev != dev {
 					fmt.Printf("Warning: crossing filesystem boundary at %s\n", path)
 				}
@@ -141,11 +142,13 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 
 func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
 	var record *models.FileRecord
-	
+	fromResume := false
+
 	// Check resume map
 	if cfg.ResumeMap != nil {
-		if rec, ok := cfg.ResumeMap[path]; ok {
+		if rec, ok := cfg.ResumeMap[path]; ok && rec.SHA1 != "" && (rec.MD5 != "" || !cfg.ComputeMD5) {
 			record = &rec
+			fromResume = true
 		}
 	}
 
@@ -178,7 +181,7 @@ func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
 		cfg.OnFileFound(record.Path, record.SizeBytes)
 	}
 
-	results <- ScanResult{File: record}
+	results <- ScanResult{File: record, FromResume: fromResume}
 }
 
 func hashFile(path string, computeMD5 bool) (string, string, error) {
@@ -191,9 +194,9 @@ func hashFile(path string, computeMD5 bool) (string, string, error) {
 	// SHA1 as requested
 	hSha1 := sha1.New()
 	var writers io.Writer = hSha1
-	
+
 	var md5Res interface{ Sum([]byte) []byte }
-	
+
 	if computeMD5 {
 		md5Hasher := md5.New()
 		md5Res = md5Hasher
