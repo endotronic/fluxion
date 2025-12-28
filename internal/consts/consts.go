@@ -2,7 +2,7 @@ package consts
 
 const (
 	// Version is the current application version
-	Version = "0.8.0"
+	Version = "0.8.1"
 
 	// ScannerChannelBufferMultiplier determines the buffer size of the paths channel
 	// relative to the number of workers.

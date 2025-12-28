@@ -122,17 +122,6 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 			if !d.Type().IsRegular() {
 				return nil
 			}
-
-			// Check resume map
-			if cfg.ResumeMap != nil {
-				if rec, ok := cfg.ResumeMap[path]; ok {
-					// Already processed, but we still want to count it for the progress bar
-					if cfg.OnFileFound != nil {
-						cfg.OnFileFound(path, rec.SizeBytes)
-					}
-					return nil
-				}
-			}
 			paths <- path
 		}
 		return nil
@@ -151,31 +140,42 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 }
 
 func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
-	info, err := os.Stat(path)
-	if err != nil {
-		results <- ScanResult{Error: err}
-		return
+	var record *models.FileRecord
+	
+	// Check resume map
+	if cfg.ResumeMap != nil {
+		if rec, ok := cfg.ResumeMap[path]; ok {
+			record = &rec
+		}
 	}
 
-	// Hash the file
-	sha1Hash, md5Hash, err := hashFile(path, cfg.ComputeMD5)
-	if err != nil {
-		results <- ScanResult{Error: err}
-		return
-	}
+	if record == nil {
+		info, err := os.Stat(path)
+		if err != nil {
+			results <- ScanResult{Error: err}
+			return
+		}
 
-	record := &models.FileRecord{
-		SnapshotID: cfg.SnapshotID,
-		Path:       path,
-		Filename:   filepath.Base(path),
-		SizeBytes:  info.Size(),
-		ModTime:    info.ModTime(),
-		SHA1:       sha1Hash,
-		MD5:        md5Hash,
+		// Hash the file
+		sha1Hash, md5Hash, err := hashFile(path, cfg.ComputeMD5)
+		if err != nil {
+			results <- ScanResult{Error: err}
+			return
+		}
+
+		record = &models.FileRecord{
+			SnapshotID: cfg.SnapshotID,
+			Path:       path,
+			Filename:   filepath.Base(path),
+			SizeBytes:  info.Size(),
+			ModTime:    info.ModTime(),
+			SHA1:       sha1Hash,
+			MD5:        md5Hash,
+		}
 	}
 
 	if cfg.OnFileFound != nil {
-		cfg.OnFileFound(path, info.Size())
+		cfg.OnFileFound(record.Path, record.SizeBytes)
 	}
 
 	results <- ScanResult{File: record}

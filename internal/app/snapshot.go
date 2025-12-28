@@ -402,6 +402,14 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				if res.Error != nil {
 					continue
 				}
+				if resumeMap != nil {
+					if _, ok := resumeMap[res.File.Path]; ok {
+						processedBytes.Add(res.File.SizeBytes)
+						processedCount.Add(1)
+						continue
+					}
+				}
+
 				batch = append(batch, res.File)
 				if len(batch) >= consts.DBBatchSize {
 					flush()
