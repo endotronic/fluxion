@@ -1,6 +1,10 @@
 # Fluxion
 
-**Fluxion** is a filesystem snapshot and verification tool designed to help you track, verify, and clean up your data as it changes over time.
+**Fluxion** is a filesystem snapshot and verification tool designed to help you track, verify, and clean up your data as it changes over time. Take snapshots of the metadata of your filesystem (files, content hashes, sizes, dates) and compare them to see what has changed between snapshots - how files moved, were added, or removed. Examine snapshots for file and directory duplicates shown to you at the highest levels of duplication. These tools can give you the confidence of a second opinion if your backups contain everything and when you are truly safe to delete backups.
+
+## Status
+
+This project is new and in active development. The roadmap is available in [ROADMAP.md](ROADMAP.md). It may be a bit cumbersome to use until the 1.0 release I have planned. The "snapshot" and "diff" commands are pretty solid, though, and have already proven very useful to me.
 
 ## Motivation
 
