@@ -45,12 +45,12 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 		snapName = strings.TrimSuffix(snapName, "_hashes.txt")
 		snapName = strings.TrimSuffix(snapName, ".txt")
 	}
-	
+
 	// Logic for Legacy Inference:
 	// We attempt to intelligently guess the 'sizes' file path if it's not provided,
 	// by assuming a standard naming convention (replacing "hashes" with "sizes").
 	// We also attempt to auto-detect the root path by finding the common prefix of files.
-	
+
 	// Infer Sizes File if not provided
 	sizesPath := cfg.SizesPath
 	if sizesPath == "" {
@@ -65,7 +65,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 			}
 		}
 	}
-	
+
 	if sizesPath == "" {
 		logrus.Warn("Sizes file not provided and could not be inferred. Importing with 0 sizes.")
 	}
@@ -86,7 +86,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 			return fmt.Errorf("error opening sizes file: %w", err)
 		}
 		defer sf.Close()
-		
+
 		sScanner := bufio.NewScanner(sf)
 		for sScanner.Scan() {
 			line := sScanner.Text()
@@ -95,7 +95,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 			if len(parts) >= 3 {
 				sizeStr := strings.TrimSpace(parts[0])
 				b64Path := strings.TrimSpace(parts[2])
-				
+
 				size, err := strconv.ParseInt(sizeStr, 10, 64)
 				if err == nil {
 					sizeMap[b64Path] = size
@@ -118,18 +118,22 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 		scanner := bufio.NewScanner(hf)
 		var commonPrefix string
 		first := true
-		
+
 		count := 0
 		for scanner.Scan() {
 			line := scanner.Text()
 			parts := strings.Split(line, "  ")
-			if len(parts) < 3 { continue }
-			
+			if len(parts) < 3 {
+				continue
+			}
+
 			b64Path := strings.TrimSpace(parts[2])
 			decodedBytes, err := base64.StdEncoding.DecodeString(b64Path)
-			if err != nil { continue }
+			if err != nil {
+				continue
+			}
 			path := string(decodedBytes)
-			
+
 			if first {
 				commonPrefix = filepath.Dir(path) // Start with dir of first file
 				first = false
@@ -146,16 +150,20 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 				}
 			}
 			count++
-			if count % 10000 == 0 {
-			    // Optimization: if commonPrefix is already root, stop?
-			    if commonPrefix == "/" { break }
+			if count%10000 == 0 {
+				// Optimization: if commonPrefix is already root, stop?
+				if commonPrefix == "/" {
+					break
+				}
 			}
 		}
-		
-		if commonPrefix == "" { commonPrefix = "/" }
+
+		if commonPrefix == "" {
+			commonPrefix = "/"
+		}
 		rootPath = commonPrefix
 		logrus.Infof("Detected root: %s", rootPath)
-		
+
 		// Rewind file
 		if _, err := hf.Seek(0, 0); err != nil {
 			return fmt.Errorf("error rewinding file: %w", err)
@@ -179,25 +187,25 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 	scanner := bufio.NewScanner(hf)
 	batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
 	var processedCount int64
-	
+
 	bar := progressbar.Default(-1, "Importing lines")
-	
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Split(line, "  ") // double space separator
 		if len(parts) < 3 {
 			continue
 		}
-		
+
 		hashVal := strings.TrimSpace(parts[0])
 		b64Path := strings.TrimSpace(parts[2])
-		
+
 		decodedPathBytes, err := base64.StdEncoding.DecodeString(b64Path)
 		if err != nil {
 			continue
 		}
 		path := string(decodedPathBytes)
-		
+
 		// Lookup Size
 		var size int64 = 0
 		if val, ok := sizeMap[b64Path]; ok {
@@ -213,7 +221,7 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 			SHA1:       "",          // Empty SHA1 for legacy import
 			MD5:        hashVal,     // MD5 from legacy
 		}
-		
+
 		batch = append(batch, record)
 		if len(batch) >= consts.DBBatchSize {
 			if err := dbStore.BatchAddFiles(batch); err != nil {
@@ -232,14 +240,14 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 		processedCount += int64(len(batch))
 		bar.Add(len(batch))
 	}
-	
+
 	bar.Finish()
 	fmt.Println()
 
 	if err := scanner.Err(); err != nil {
 		logrus.Errorf("Error reading file: %v", err)
 	}
-	
+
 	// Get ModTime of the Hashes file to use as finish time
 	var finishTime time.Time
 	if fi, err := hf.Stat(); err == nil {
@@ -249,14 +257,16 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 	if err := dbStore.CompleteSnapshot(snap.ID, finishTime); err != nil {
 		logrus.Errorf("Error completing snapshot: %v", err)
 	}
-	
+
 	logrus.Infof("Imported %d files.", processedCount)
 	return nil
 }
 
 type ImportDBConfig struct {
-	SourceDBPath string
-	DestDBPath   string
+	SourceDBPath  string
+	DestDBPath    string
+	SnapshotQuery string
+	ImportAll     bool
 }
 
 func RunImportDB(cfg ImportDBConfig) error {
@@ -294,9 +304,34 @@ func RunImportDB(cfg ImportDBConfig) error {
 		return nil
 	}
 
-	logrus.Infof("Found %d snapshots in source. Importing...", len(snaps))
+	if cfg.ImportAll {
+		logrus.Infof("Found %d snapshots in source. Importing...", len(snaps))
+	}
 
+	foundAny := false
 	for _, s := range snaps {
+		// Filter logic
+		if !cfg.ImportAll {
+			// Check if matches query
+			match := false
+			if cfg.SnapshotQuery != "" {
+				if s.Name == cfg.SnapshotQuery {
+					match = true
+				} else {
+					// Check ID
+					id, err := strconv.Atoi(cfg.SnapshotQuery)
+					if err == nil && int64(id) == s.ID {
+						match = true
+					}
+				}
+			}
+
+			if !match {
+				continue
+			}
+		}
+
+		foundAny = true
 		logrus.Infof("Importing snapshot '%s' (ID: %d)...", s.Name, s.ID)
 
 		// Resolve unique name
@@ -305,7 +340,7 @@ func RunImportDB(cfg ImportDBConfig) error {
 			logrus.Errorf("Error resolving name for '%s': %v", s.Name, err)
 			continue
 		}
-		
+
 		// Create new snapshot in Dest
 		h, _ := os.Hostname()
 		newSnap, err := destStore.CreateSnapshot(s.RootPath, finalName, h)
@@ -313,11 +348,11 @@ func RunImportDB(cfg ImportDBConfig) error {
 			logrus.Errorf("Error creating snapshot in dest: %v", err)
 			continue
 		}
-		
+
 		// Retrieve files from Source
 		count, _ := sourceStore.GetFileCount(s.ID)
 		bar := progressbar.Default(count, fmt.Sprintf("Copying %s", s.Name))
-		
+
 		files, err := sourceStore.GetFilesForSnapshot(s.ID, func(c int) {
 			// GetFiles callback provides loaded count, not incremental
 			// progressbar Set(c) handles absolute
@@ -332,7 +367,7 @@ func RunImportDB(cfg ImportDBConfig) error {
 
 		// Insert into Dest
 		batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
-		
+
 		// We iterate map. Order doesn't matter.
 		for _, f := range files {
 			// Create new record bound to new snapshot
@@ -346,7 +381,7 @@ func RunImportDB(cfg ImportDBConfig) error {
 				MD5:        f.MD5,
 			}
 			batch = append(batch, newRec)
-			
+
 			if len(batch) >= consts.DBBatchSize {
 				if err := destStore.BatchAddFiles(batch); err != nil {
 					logrus.Errorf("Error writing batch: %v", err)
@@ -354,18 +389,22 @@ func RunImportDB(cfg ImportDBConfig) error {
 				batch = batch[:0]
 			}
 		}
-		
+
 		if len(batch) > 0 {
 			if err := destStore.BatchAddFiles(batch); err != nil {
 				logrus.Errorf("Error writing batch: %v", err)
 			}
 		}
-		
+
 		if err := destStore.CompleteSnapshot(newSnap.ID, time.Time{}); err != nil {
 			logrus.Errorf("Error completing snapshot: %v", err)
 		}
 		logrus.Infof("Successfully imported '%s' as '%s'.", s.Name, finalName)
 	}
-	
+
+	if !cfg.ImportAll && !foundAny {
+		return fmt.Errorf("snapshot '%s' not found in source DB", cfg.SnapshotQuery)
+	}
+
 	return nil
 }

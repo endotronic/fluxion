@@ -312,6 +312,7 @@ func runImportDB(args []string) {
 	cmd := flag.NewFlagSet("import", flag.ExitOnError)
 	destDBPtr := cmd.String("db", "", "Path to destination sqlite DB (required)")
 	sourceDBPtr := cmd.String("source", "", "Path to source sqlite DB (required)")
+	allPtr := cmd.Bool("all", false, "Import all snapshots from source DB")
 
 	cmd.Parse(args)
 
@@ -321,9 +322,22 @@ func runImportDB(args []string) {
 		os.Exit(1)
 	}
 
+	if !*allPtr && cmd.NArg() < 1 {
+		fmt.Println("Error: Must specify snapshot ID/name to import, or use --all")
+		cmd.Usage()
+		os.Exit(1)
+	}
+
+	snapQuery := ""
+	if !*allPtr {
+		snapQuery = cmd.Arg(0)
+	}
+
 	cfg := app.ImportDBConfig{
-		SourceDBPath: *sourceDBPtr,
-		DestDBPath:   *destDBPtr,
+		SourceDBPath:  *sourceDBPtr,
+		DestDBPath:    *destDBPtr,
+		ImportAll:     *allPtr,
+		SnapshotQuery: snapQuery,
 	}
 
 	if err := app.RunImportDB(cfg); err != nil {
