@@ -226,49 +226,86 @@ func propagateStatus(node *Node) Status {
 	}
 
 	if len(node.Children) == 0 {
-		// Empty directory?
-		// If it existed in A but not B? -> Removed.
-		// If B but not A? -> Added.
-		// But our Insert logic only creates nodes for Files.
-		// So purely empty directories might not be tracked explicitly unless we track Dirs in DB too.
-		// (The tool currently only tracks Files).
-		// So a "Directory" node only exists if it has files (current or past).
-		// If it has no children in the Tree, it shouldn't really happen unless we inserted explicit Dir records (which we don't).
-		// Wait, if all children are Removed, the Dir is Removed? Yes.
 		return StatusUnchanged
 	}
 
 	// Check children
-	var firstStatus Status
-	initialized := false
-	isMixed := false
+	allUnchanged := true
+	allMovedSource := true
+	allRemovedOrMovedSource := true
+	allAddedLike := true // Added, Copy, Move
+
+	hasUnchangedOrMixed := false
+	hasAdded := false
 
 	for _, child := range node.Children {
 		s := propagateStatus(child)
-		if !initialized {
-			firstStatus = s
-			initialized = true
+
+		if s != StatusUnchanged {
+			allUnchanged = false
 		} else {
-			if s != firstStatus {
-				isMixed = true
-			}
+			hasUnchangedOrMixed = true
+		}
+
+		if s != StatusMovedSource {
+			allMovedSource = false
+		}
+
+		if s != StatusRemoved && s != StatusMovedSource {
+			allRemovedOrMovedSource = false
+		}
+
+		if s != StatusAdded && s != StatusCopy && s != StatusMove {
+			allAddedLike = false
+		}
+
+		if s == StatusAdded {
+			hasAdded = true
+		}
+
+		if s == StatusMixed {
+			hasUnchangedOrMixed = true
+			allUnchanged = false
+			allMovedSource = false
+			allRemovedOrMovedSource = false
+			allAddedLike = false
 		}
 	}
 
-	if isMixed {
+	if allUnchanged {
+		node.Status = StatusUnchanged
+		return StatusUnchanged
+	}
+
+	if allMovedSource {
+		node.Status = StatusMovedSource
+		return StatusMovedSource
+	}
+
+	if allRemovedOrMovedSource {
+		node.Status = StatusRemoved
+		return StatusRemoved
+	}
+
+	if allAddedLike {
+		// If mixed with pure additions, rollup.
+		if hasAdded {
+			node.Status = StatusAdded
+			return StatusAdded
+		}
+		// Otherwise (pure copies/moves), keep mixed to show details
 		node.Status = StatusMixed
-	} else {
-		// If all children are MovedSource, this node is also MovedSource (suppressed)
-		if firstStatus == StatusMovedSource {
-			node.Status = StatusMovedSource
-		} else if firstStatus == StatusMove || firstStatus == StatusCopy {
-			// Cannot inherit Move/Copy implicitly. Must be Mixed to show specific moved/copied children.
-			node.Status = StatusMixed
-		} else {
-			node.Status = firstStatus
-		}
+		return StatusMixed
 	}
 
+	// If the folder contains only changed files (no Unchanged or Mixed),
+	// we can roll it up as Modified.
+	if !hasUnchangedOrMixed {
+		node.Status = StatusModified
+		return StatusModified
+	}
+
+	node.Status = StatusMixed
 	return node.Status
 }
 

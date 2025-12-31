@@ -172,11 +172,13 @@ func TestCompareSnapshots(t *testing.T) {
 			name: "Move vs Copy Preference",
 			// Ideally a Move is consumed first.
 			filesA: map[string]models.FileRecord{
-				"/root/file1": {SHA1: "hash1"},
+				"/root/common": {SHA1: "common"},
+				"/root/file1":  {SHA1: "hash1"},
 			},
 			filesB: map[string]models.FileRecord{
-				"/root/file2": {SHA1: "hash1"}, // Move
-				"/root/file3": {SHA1: "hash1"}, // Copy
+				"/root/common": {SHA1: "common"},
+				"/root/file2":  {SHA1: "hash1"}, // Move
+				"/root/file3":  {SHA1: "hash1"}, // Copy
 			},
 			want: []DiffResult{
 				{Path: "/root/file2", Status: StatusMove, SourcePath: "/root/file1"},
@@ -318,10 +320,12 @@ func TestCompareSnapshots(t *testing.T) {
 		{
 			name: "No Moves Option",
 			filesA: map[string]models.FileRecord{
-				"/root/file1": {SHA1: "hash1"},
+				"/root/common": {SHA1: "common"},
+				"/root/file1":  {SHA1: "hash1"},
 			},
 			filesB: map[string]models.FileRecord{
-				"/root/file2": {SHA1: "hash1"},
+				"/root/common": {SHA1: "common"},
+				"/root/file2":  {SHA1: "hash1"},
 			},
 			noMoves: true,
 			// If No Moves, it should fall back to Copy because it exists in A.
@@ -337,10 +341,12 @@ func TestCompareSnapshots(t *testing.T) {
 		{
 			name: "No Moves Option (Explicitly)",
 			filesA: map[string]models.FileRecord{
-				"/root/file1": {SHA1: "hash1"},
+				"/root/common": {SHA1: "common"},
+				"/root/file1":  {SHA1: "hash1"},
 			},
 			filesB: map[string]models.FileRecord{
-				"/root/file2": {SHA1: "hash1"},
+				"/root/common": {SHA1: "common"},
+				"/root/file2":  {SHA1: "hash1"},
 			},
 			noMoves:  true,
 			noCopies: true, // Also disable Copies to force Add/Remove
@@ -363,6 +369,33 @@ func TestCompareSnapshots(t *testing.T) {
 			noCopies: true,
 			want: []DiffResult{
 				{Path: "/root/file2", Status: StatusAdded},
+			},
+		},
+		{
+			name: "Rollup Modified (Mod + Add)",
+			filesA: map[string]models.FileRecord{
+				"/root/file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/file1": {SHA1: "hash2"}, // Modified
+				"/root/file2": {SHA1: "hash3"}, // Added
+			},
+			want: []DiffResult{
+				{Path: "/root/", Status: StatusModified},
+			},
+		},
+		{
+			name: "Rollup Added (Add + Copy)",
+			filesA: map[string]models.FileRecord{
+				"/other/file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/other/file1": {SHA1: "hash1"},
+				"/root/file1":  {SHA1: "hash1"}, // Copy
+				"/root/file2":  {SHA1: "hash2"}, // Added
+			},
+			want: []DiffResult{
+				{Path: "/root/", Status: StatusAdded},
 			},
 		},
 	}

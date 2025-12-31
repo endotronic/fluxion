@@ -4,4 +4,5 @@
 # DBs and Test Data
 *.db
 testdata*
+test_data*
 tmp_verify_data
