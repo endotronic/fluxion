@@ -133,6 +133,9 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 		default:
 			absPath = filepath.Join(rootB, relPath)
 			rootUsed = rootB
+			if strings.HasSuffix(res.Path, "/") {
+				absPath += string(filepath.Separator)
+			}
 		}
 
 		var absSource string
@@ -431,6 +434,10 @@ func propagateStatus(node *Node) Status {
 				return StatusCopy
 			}
 		}
+		// If canRollup, and we haven't returned yet, it means me have mixed changes (e.g. Added + Removed)
+		// but no Unchanged items preventing rollup. Summary: Modified.
+		node.Status = StatusModified
+		return StatusModified
 	}
 
 	node.Status = StatusMixed

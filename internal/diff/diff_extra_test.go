@@ -2,6 +2,7 @@ package diff
 
 import (
 	"fluxion/internal/models"
+	"sort"
 	"testing"
 )
 
@@ -60,5 +61,129 @@ func TestCompareSnapshots_ShowUnchanged(t *testing.T) {
 
 	if !foundMixed {
 		t.Error("Expected to find StatusMixed result for /root/")
+	}
+}
+
+// TestReproduction_Rollup_And_ShowUnchanged aims to reproduce user reports:
+// 1. Rollup broken (Modified dir with no unchanged files should rollup)
+// 2. Show Unchanged missing items (Modified dir with some unchanged files should show context)
+func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
+	tests := []struct {
+		name          string
+		filesA        map[string]models.FileRecord
+		filesB        map[string]models.FileRecord
+		showUnchanged bool
+		want          []DiffResult
+	}{
+		{
+			// Invariant 2: If no items match, it should rollup.
+			// Directory "rollup/" contains file1 (modified). No other files.
+			// Should result in ONE StatusModified entry for "rollup/".
+			name: "Invariant_2_Rollup_Pure_Modified",
+			filesA: map[string]models.FileRecord{
+				"/rollup/file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/rollup/file1": {SHA1: "hash2"}, // Modified
+			},
+			showUnchanged: false,
+			want: []DiffResult{
+				{
+					Path:          "/rollup/",
+					Status:        StatusModified,
+					ModifiedCount: 1,
+					RelPath:       "rollup/",
+				},
+			},
+		},
+		{
+			// Invariant 1: If there is a change, report containing directory context.
+			// Directory "mixed/" contains file1 (unchanged) and file2 (modified).
+			// showUnchanged = true.
+			// Should result in:
+			// - mixed/ (StatusMixed, Unchanged counts)
+			// - mixed/file2 (StatusModified)
+			// file1 is NOT listed individually, but counted.
+			name: "Invariant_1_ShowUnchanged_Mixed_Context",
+			filesA: map[string]models.FileRecord{
+				"/mixed/file1": {SHA1: "static"},
+				"/mixed/file2": {SHA1: "hashA"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/mixed/file1": {SHA1: "static"}, // Unchanged
+				"/mixed/file2": {SHA1: "hashB"},  // Modified
+			},
+			showUnchanged: true,
+			want: []DiffResult{
+				{
+					Path:               "/mixed/",
+					Status:             StatusMixed,
+					RelPath:            "mixed/",
+					UnchangedFileCount: 1, // file1
+					UnchangedDirCount:  0,
+				},
+				{
+					Path:          "/mixed/file2",
+					Status:        StatusModified,
+					RelPath:       "mixed/file2",
+					ModifiedCount: 1,
+				},
+			},
+		},
+		{
+			// Invariant 2 (Extended): If no files match (Empty Intersection), rollup.
+			// Directory "swap/" has "a" removed and "b" added.
+			// Should result in ONE StatusModified entry for "swap/".
+			// Failure Mode: Might be returned as Mixed (swap/a, swap/b).
+			name: "Invariant_2_Rollup_Add_Remove_Only",
+			filesA: map[string]models.FileRecord{
+				"/swap/a": {SHA1: "hashA"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/swap/b": {SHA1: "hashB"},
+			},
+			showUnchanged: false,
+			want: []DiffResult{
+				{
+					Path:         "/swap/",
+					Status:       StatusModified, // SHOULD rolled up
+					RelPath:      "swap/",
+					RemovedCount: 1,
+					AddedCount:   1,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := CompareSnapshots(tt.filesA, tt.filesB, "/", "/", "sha1", false, false, tt.showUnchanged, nil)
+			if err != nil {
+				t.Fatalf("CompareSnapshots error: %v", err)
+			}
+
+			// Sort expectation dynamically (RelPath Descending)
+			sortedWant := make([]DiffResult, len(tt.want))
+			copy(sortedWant, tt.want)
+			sort.Slice(sortedWant, func(i, j int) bool {
+				return sortedWant[i].RelPath > sortedWant[j].RelPath
+			})
+
+			if len(got) != len(sortedWant) {
+				t.Errorf("Length mismatch. Got %d, Want %d\nGot: %+v\nWant: %+v", len(got), len(sortedWant), got, sortedWant)
+				return
+			}
+
+			for i := range got {
+				w := sortedWant[i]
+				g := got[i]
+
+				if g.Path != w.Path || g.Status != w.Status ||
+					g.ModifiedCount != w.ModifiedCount ||
+					(tt.showUnchanged && g.UnchangedFileCount != w.UnchangedFileCount) {
+					t.Errorf("Mismatch at index %d:\nGot:  %+v\nWant: %+v", i, g, w)
+				}
+			}
+		})
 	}
 }
