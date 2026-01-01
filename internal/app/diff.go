@@ -179,7 +179,6 @@ func RunDiff(cfg DiffConfig) error {
 		}
 
 		symbol := "?"
-		path := res.Path
 		switch res.Status {
 		case diff.StatusAdded:
 			symbol = "[+]"
@@ -189,17 +188,75 @@ func RunDiff(cfg DiffConfig) error {
 			symbol = "[M]"
 		case diff.StatusMove:
 			symbol = "[>]"
-			path = fmt.Sprintf("%s -> %s", res.SourcePath, res.Path)
 		case diff.StatusCopy:
 			symbol = "[C]"
-			path = fmt.Sprintf("%s -> %s", res.SourcePath, res.Path)
+		}
+		// Construct display path
+		var displayPath string
+
+		fmtRoot := func(r string) string {
+			if r != "" && !strings.HasSuffix(r, string(filepath.Separator)) {
+				return r + string(filepath.Separator)
+			}
+			return r
 		}
 
-		if res.FileCount > 0 {
-			path = fmt.Sprintf("%s (and %d files)", path, res.FileCount)
+		if res.Status == diff.StatusMove || res.Status == diff.StatusCopy {
+			// [C] [/root/A/ -> /root/B/] relativeA/foo -> relativeB/foo
+			displayPath = fmt.Sprintf("[%s -> %s] %s -> %s", fmtRoot(res.SourceRoot), fmtRoot(res.Root), res.SourceRelPath, res.RelPath)
+		} else {
+			// [*] [/path/to/root/] relative/path
+			displayPath = fmt.Sprintf("[%s] %s", fmtRoot(res.Root), res.RelPath)
 		}
 
-		fmt.Printf("%s %s\n", symbol, path)
+		if strings.HasSuffix(res.Path, string(filepath.Separator)) && !strings.HasSuffix(displayPath, string(filepath.Separator)) {
+			// For consistency if needed, but RelPath usually doesn't have trailing slash from TrimPrefix.
+			// But let's respect the original Path intention if it was a directory.
+			// Actually TrimPrefix might strip it if it was "/foo/".
+			// Let's rely on DiffResult.Path trailing slash check if strictness needed.
+			// But for display, standard RelPath is fine.
+			// Add trailing slash for directories for clarity?
+			// User example: [/path/to/root/] relative/path
+			// If it's a dir, maybe relative/path/ ?
+			// The user didn't explicitly ask for trailing slash in relative part, but implied directories.
+		}
+
+		// Add trailing slash to display if it represents a directory (based on Status or original path)
+		// Original logic didn't explicitly add it to display string, but 'res.Path' had it.
+		// res.RelPath comes from TrimPrefix(res.Path, "/").
+		// If res.Path was "/foo/", RelPath is "foo/".
+		// Wait, TrimPrefix("/foo/", "/") -> "foo/". So it preserves trailing slash if present in internal Node path.
+		// Internal Node Path for dir is "/foo" usually?
+		// insertNode: child.Path = current.Path + "/" + part.
+		// If it's a leaf, we are done.
+		// If we talk about "foo/file1", node is "file1".
+		// If we talk about "foo/", node is "foo".
+		// Let's verify insertNode limits.
+		// Actually, internal paths usually start with /.
+
+		// Construct summary
+		var parts []string
+		if res.AddedCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d added", res.AddedCount))
+		}
+		if res.RemovedCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d removed", res.RemovedCount))
+		}
+		if res.ModifiedCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d modified", res.ModifiedCount))
+		}
+		if res.CopyCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d copied", res.CopyCount))
+		}
+		if res.MoveCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d moved", res.MoveCount))
+		}
+
+		if len(parts) > 0 {
+			displayPath = fmt.Sprintf("%s (%s)", displayPath, strings.Join(parts, ", "))
+		}
+
+		fmt.Printf("%s %s\n", symbol, displayPath)
 	}
 	return nil
 }

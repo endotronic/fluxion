@@ -42,10 +42,18 @@ type Node struct {
 
 // DiffResult represents a collapsed diff entry for display
 type DiffResult struct {
-	Path       string
-	Status     Status
-	SourcePath string
-	FileCount  int64
+	Path          string // Absolute (Legacy/Sort Key)
+	Root          string
+	RelPath       string
+	Status        Status
+	SourcePath    string // Absolute
+	SourceRoot    string
+	SourceRelPath string
+	AddedCount    int64
+	RemovedCount  int64
+	ModifiedCount int64
+	CopyCount     int64
+	MoveCount     int64
 }
 
 // CompareSnapshots computes the diff between two sets of files using a specific hash strategy.
@@ -105,36 +113,52 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 		relPath := strings.TrimPrefix(res.Path, "/")
 
 		var absPath string
-		var absSource string
+		var rootUsed string
 
 		switch res.Status {
-		case StatusAdded, StatusModified, StatusMove, StatusCopy:
+		case StatusAdded, StatusMove, StatusCopy:
 			absPath = filepath.Join(rootB, relPath)
+			rootUsed = rootB
 			if strings.HasSuffix(res.Path, "/") {
 				absPath += string(filepath.Separator)
 			}
-		case StatusRemoved:
+		case StatusModified, StatusRemoved:
 			absPath = filepath.Join(rootA, relPath)
+			rootUsed = rootA
 			if strings.HasSuffix(res.Path, "/") {
 				absPath += string(filepath.Separator)
 			}
 		default:
 			absPath = filepath.Join(rootB, relPath)
+			rootUsed = rootB
 		}
 
+		var absSource string
+		var sourceRootUsed string
+		var sourceRel string
+
 		if res.SourcePath != "" {
-			relSource := strings.TrimPrefix(res.SourcePath, "/")
-			absSource = filepath.Join(rootA, relSource)
+			sourceRel = strings.TrimPrefix(res.SourcePath, "/")
+			absSource = filepath.Join(rootA, sourceRel)
+			sourceRootUsed = rootA
 			if strings.HasSuffix(res.SourcePath, "/") {
 				absSource += string(filepath.Separator)
 			}
 		}
 
 		finalResults[i] = DiffResult{
-			Path:       absPath,
-			Status:     res.Status,
-			SourcePath: absSource,
-			FileCount:  res.FileCount,
+			Path:          absPath,
+			Root:          rootUsed,
+			RelPath:       relPath,
+			Status:        res.Status,
+			SourcePath:    absSource,
+			SourceRoot:    sourceRootUsed,
+			SourceRelPath: sourceRel,
+			AddedCount:    res.AddedCount,
+			RemovedCount:  res.RemovedCount,
+			ModifiedCount: res.ModifiedCount,
+			CopyCount:     res.CopyCount,
+			MoveCount:     res.MoveCount,
 		}
 	}
 
@@ -214,6 +238,8 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool, has
 
 // propagateStatus updates directory statuses based on children.
 // Returns the status of the node.
+// propagateStatus updates directory statuses based on children.
+// Returns the status of the node.
 func propagateStatus(node *Node) Status {
 	if node.IsFile {
 		return node.Status
@@ -236,7 +262,21 @@ func propagateStatus(node *Node) Status {
 	allAddedLike := true // Added, Copy, Move
 
 	hasUnchangedOrMixed := false
+	hasMove := false
+	hasCopy := false
 	hasAdded := false
+	hasModified := false
+
+	// Track first sources for potential rollup
+	var firstMoveSource string
+	var firstCopySource string
+
+	changeCount := 0
+
+	// Helper to count changes
+	isChange := func(s Status) bool {
+		return s == StatusAdded || s == StatusRemoved || s == StatusModified || s == StatusCopy || s == StatusMove
+	}
 
 	for _, child := range node.Children {
 		s := propagateStatus(child)
@@ -255,12 +295,27 @@ func propagateStatus(node *Node) Status {
 			allRemovedOrMovedSource = false
 		}
 
-		if s != StatusAdded && s != StatusCopy && s != StatusMove {
+		if s != StatusAdded && s != StatusCopy && s != StatusMove && s != StatusMovedSource {
 			allAddedLike = false
 		}
 
 		if s == StatusAdded {
 			hasAdded = true
+		}
+		if s == StatusModified {
+			hasModified = true
+		}
+		if s == StatusMove {
+			hasMove = true
+			if firstMoveSource == "" {
+				firstMoveSource = child.SourcePath
+			}
+		}
+		if s == StatusCopy {
+			hasCopy = true
+			if firstCopySource == "" {
+				firstCopySource = child.SourcePath
+			}
 		}
 
 		if s == StatusMixed {
@@ -269,6 +324,10 @@ func propagateStatus(node *Node) Status {
 			allMovedSource = false
 			allRemovedOrMovedSource = false
 			allAddedLike = false
+		}
+
+		if isChange(s) {
+			changeCount++
 		}
 	}
 
@@ -287,22 +346,86 @@ func propagateStatus(node *Node) Status {
 		return StatusRemoved
 	}
 
-	if allAddedLike {
-		// If mixed with pure additions, rollup.
-		if hasAdded {
+	// New Rule: If directory is new (HashA empty) and contains only Added-like things (Added, Move, Copy).
+	if node.HashA == "" && allAddedLike {
+		// 1. Pure additions -> Always added
+		if !hasMove && !hasCopy {
 			node.Status = StatusAdded
 			return StatusAdded
 		}
-		// Otherwise (pure copies/moves), keep mixed to show details
-		node.Status = StatusMixed
-		return StatusMixed
+		// 2. Mixed/Multiple changes -> Rollup to Added
+		if changeCount > 1 {
+			node.Status = StatusAdded
+			return StatusAdded
+		}
+		// 3. Single Move/Copy -> Fall through to show detail (StatusMixed)
 	}
 
-	// If the folder contains only changed files (no Unchanged or Mixed),
-	// we can roll it up as Modified.
-	if !hasUnchangedOrMixed {
-		node.Status = StatusModified
-		return StatusModified
+	// Determine if we should attempt a rollup
+	canRollup := allAddedLike || !hasUnchangedOrMixed || changeCount > 2
+
+	// Refined Prioritization for canRollup:
+	if canRollup {
+		if hasModified {
+			node.Status = StatusModified
+			return StatusModified
+		}
+		if allAddedLike {
+			// Rule: If we have mixed types of "AddedLike" operations (e.g. Move + Copy),
+			// we should rollup as Modified (Mixed operations on a new/moved set),
+			// rather than picking one winner and confusing the user.
+			typesFound := 0
+			if hasMove {
+				typesFound++
+			}
+			if hasCopy {
+				typesFound++
+			}
+			if hasAdded {
+				typesFound++
+			}
+
+			if typesFound > 1 {
+				node.Status = StatusModified
+				return StatusModified
+			}
+
+			// Otherwise, pure type (or single dominating type)
+			// Preference: Move > Added > Copy
+			if hasMove {
+				if changeCount == 1 {
+					node.Status = StatusMixed
+					return StatusMixed
+				}
+				node.Status = StatusMove
+				if firstMoveSource != "" {
+					node.SourcePath = firstMoveSource
+				} else {
+					node.SourcePath = "" // Ensure SourcePath is cleared if not a single source
+				}
+				return StatusMove
+			}
+			// Added > Copy (per Rollup_Added test)
+			if hasAdded {
+				node.Status = StatusAdded
+				node.SourcePath = "" // Added items don't have a SourcePath
+				return StatusAdded
+			}
+			// Copy last
+			if hasCopy {
+				if changeCount == 1 {
+					node.Status = StatusMixed
+					return StatusMixed
+				}
+				node.Status = StatusCopy
+				if firstCopySource != "" {
+					node.SourcePath = firstCopySource
+				} else {
+					node.SourcePath = "" // Ensure SourcePath is cleared if not a single source
+				}
+				return StatusCopy
+			}
+		}
 	}
 
 	node.Status = StatusMixed
@@ -346,13 +469,15 @@ func computeMerkleHashes(node *Node) {
 	}
 }
 
+// detectMovesCopies
 func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 	if noCopies && noMoves {
 		return
 	}
-	// 1. Index Removed and Existing nodes
-	removedMap := make(map[string][]string)  // Hash -> [Paths]
-	existingMap := make(map[string][]string) // Hash -> [Paths] (Only from A)
+	// 1. Index Removed, Modified, and Existing nodes
+	removedMap := make(map[string][]string)  // Hash -> [Paths] (For Moves)
+	modifiedMap := make(map[string][]string) // Hash -> [Paths] (For Swap Moves / Copies)
+	existingMap := make(map[string][]string) // Hash -> [Paths] (For Copies)
 
 	var index func(*Node)
 	index = func(n *Node) {
@@ -367,14 +492,15 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 			}
 		}
 
-		// If removed (or Modified: Treat old content as removed), add to removedMap
+		// Only Removed nodes are primary sources for Moves (overwrite/rename)
 		if n.Status == StatusRemoved {
 			add(removedMap, n.HashA, n.Path)
 		} else if n.Status == StatusModified {
-			add(removedMap, n.HashA, n.Path)
+			add(modifiedMap, n.HashA, n.Path)
 		}
 
-		// If existed in A (Removed OR Modified OR Unchanged OR Mixed), add to ExistingMap
+		// Any existing node (Removed, Modified, Unchanged) can be source for Copy
+		// (Modified is explicitly tracked in modifiedMap too, but keeping it in existingMap logic for broad copy support)
 		if n.Status != StatusAdded {
 			add(existingMap, n.HashA, n.Path)
 		}
@@ -398,10 +524,10 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 
 			matched := false
 
-			// Check Removed (Move) first
+			// Check Removed (Move) first - Strongest Match
 			if !noMoves {
 				if paths, ok := removedMap[hash]; ok && len(paths) > 0 {
-					// Match found!
+					// Move from Removed
 					src := paths[0]
 					n.Status = StatusMove
 					if !n.IsFile {
@@ -420,12 +546,29 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 					// Consume
 					removedMap[hash] = paths[1:]
 					matched = true
+				} else if n.Status == StatusModified {
+					// Special Case: File Swap / Rewrite
+					// If target is Modified, and source is Modified, treat as Move (Swap)
+					if paths, ok := modifiedMap[hash]; ok && len(paths) > 0 {
+						src := paths[0]
+						n.Status = StatusMove
+						if !n.IsFile {
+							if !strings.HasSuffix(src, "/") {
+								src += "/"
+							}
+						}
+						n.SourcePath = src
+						matched = true
+						// Don't consume modifiedMap? Or should we?
+						// Swaps are 1:1, so yes consume.
+						modifiedMap[hash] = paths[1:]
+					}
 				}
 			}
 
 			if !matched && !noCopies {
-				if paths, ok := existingMap[hash]; ok && len(paths) > 0 {
-					// Copy
+				// Prioritize modifiedMap for copies if Added (Rollup case)
+				if paths, ok := modifiedMap[hash]; ok && len(paths) > 0 {
 					src := paths[0]
 					n.Status = StatusCopy
 					if !n.IsFile {
@@ -434,6 +577,18 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 						}
 					}
 					n.SourcePath = src
+					matched = true
+				} else if paths, ok := existingMap[hash]; ok && len(paths) > 0 {
+					// Copy from broad match
+					src := paths[0]
+					n.Status = StatusCopy
+					if !n.IsFile {
+						if !strings.HasSuffix(src, "/") {
+							src += "/"
+						}
+					}
+					n.SourcePath = src
+					matched = true
 				}
 			}
 		}
@@ -477,6 +632,7 @@ func findNode(root *Node, path string) *Node {
 }
 
 // collectResults traverses logic to collapse nodes
+// collectResults traverses logic to collapse nodes
 func collectResults(node *Node, results *[]DiffResult) {
 	// Skip root virtual node (unless root itself changed? e.g. everything removed?)
 	// Root has no name/path usually in this implementation ("").
@@ -499,19 +655,45 @@ func collectResults(node *Node, results *[]DiffResult) {
 		// Collapse: Report this node and stop recursion.
 		// e.g. "Added /dir/" implies all children added.
 		path := node.Path
-		files := int64(0)
+
+		var added, removed, modified, copied, moved int64
 
 		if !node.IsFile {
 			path += "/"
-			// Count recursive files
-			files = countSubtreeFiles(node)
+			// Count recursive files stats
+			stats := accumulateStats(node)
+			added = stats.AddedCount
+			removed = stats.RemovedCount
+			modified = stats.ModifiedCount
+			copied = stats.CopyCount
+			moved = stats.MoveCount
+		} else {
+			// Leaf node specific counts (for single file)
+			// Though typically single files shouldn't have "N files" text anyway.
+			// But purely for struct correctness:
+			switch node.Status {
+			case StatusAdded:
+				added = 1
+			case StatusRemoved:
+				removed = 1
+			case StatusModified:
+				modified = 1
+			case StatusCopy:
+				copied = 1
+			case StatusMove:
+				moved = 1
+			}
 		}
 
 		*results = append(*results, DiffResult{
-			Path:       path,
-			Status:     node.Status,
-			SourcePath: node.SourcePath,
-			FileCount:  files,
+			Path:          path,
+			Status:        node.Status,
+			SourcePath:    node.SourcePath,
+			AddedCount:    added,
+			RemovedCount:  removed,
+			ModifiedCount: modified,
+			CopyCount:     copied,
+			MoveCount:     moved,
 		})
 		return
 	}
@@ -524,13 +706,34 @@ func collectResults(node *Node, results *[]DiffResult) {
 	}
 }
 
-func countSubtreeFiles(node *Node) int64 {
+func accumulateStats(node *Node) DiffResult {
 	if node.IsFile {
-		return 1
+		// Return count for this file
+		res := DiffResult{}
+		switch node.Status {
+		case StatusAdded:
+			res.AddedCount = 1
+		case StatusRemoved:
+			res.RemovedCount = 1
+		case StatusModified:
+			res.ModifiedCount = 1
+		case StatusCopy:
+			res.CopyCount = 1
+		case StatusMove:
+			res.MoveCount = 1
+		}
+		return res
 	}
-	var sum int64 = 0
+
+	var total DiffResult
 	for _, child := range node.Children {
-		sum += countSubtreeFiles(child)
+		// Recursive
+		s := accumulateStats(child)
+		total.AddedCount += s.AddedCount
+		total.RemovedCount += s.RemovedCount
+		total.ModifiedCount += s.ModifiedCount
+		total.CopyCount += s.CopyCount
+		total.MoveCount += s.MoveCount
 	}
-	return sum
+	return total
 }

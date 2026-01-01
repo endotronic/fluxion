@@ -30,7 +30,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file2":  {SHA1: "hash2"},
 			},
 			want: []DiffResult{
-				{Path: "/root/file2", Status: StatusAdded},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusAdded, AddedCount: 1},
 			},
 		},
 		{
@@ -45,7 +45,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file1":  {SHA1: "hash1"},
 			},
 			want: []DiffResult{
-				{Path: "/root/file2", Status: StatusRemoved},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusRemoved, RemovedCount: 1},
 			},
 		},
 		{
@@ -59,7 +59,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file1":  {SHA1: "hash2"},
 			},
 			want: []DiffResult{
-				{Path: "/root/file1", Status: StatusModified},
+				{Path: "/root/file1", Root: "/", RelPath: "root/file1", Status: StatusModified, ModifiedCount: 1},
 			},
 		},
 		{
@@ -73,7 +73,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/dir/file2": {SHA1: "hash2"}, // Same dir
 			},
 			want: []DiffResult{
-				{Path: "/root/dir/", Status: StatusAdded},
+				{Path: "/root/dir/", Root: "/", RelPath: "root/dir/", Status: StatusAdded, AddedCount: 2},
 			},
 		},
 		{
@@ -87,7 +87,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/common": {SHA1: "common"},
 			},
 			want: []DiffResult{
-				{Path: "/root/dir/", Status: StatusRemoved},
+				{Path: "/root/dir/", Root: "/", RelPath: "root/dir/", Status: StatusRemoved, RemovedCount: 2},
 			},
 		},
 		{
@@ -103,7 +103,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/old/noise": {SHA1: "noise"}, // Stayed (so /root/old isn't fully removed)
 			},
 			want: []DiffResult{
-				{Path: "/root/new/file1", Status: StatusMove, SourcePath: "/root/old/file1"},
+				{Path: "/root/new/file1", Root: "/", RelPath: "root/new/file1", Status: StatusMove, SourcePath: "/root/old/file1", SourceRoot: "/", SourceRelPath: "root/old/file1", MoveCount: 1},
 			},
 		},
 		{
@@ -119,7 +119,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/new/file2": {SHA1: "hash2"},
 			},
 			want: []DiffResult{
-				{Path: "/root/new/", Status: StatusMove, SourcePath: "/root/old/"},
+				{Path: "/root/new/", Root: "/", RelPath: "root/new/", Status: StatusMove, SourcePath: "/root/old/", SourceRoot: "/", SourceRelPath: "root/old/", MoveCount: 2},
 			},
 		},
 		{
@@ -134,7 +134,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file2":  {SHA1: "hash1"}, // Copied
 			},
 			want: []DiffResult{
-				{Path: "/root/file2", Status: StatusCopy, SourcePath: "/root/file1"},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusCopy, SourcePath: "/root/file1", SourceRoot: "/", SourceRelPath: "root/file1", CopyCount: 1},
 			},
 		},
 		{
@@ -149,7 +149,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/d2/f1":  {SHA1: "hash1"},
 			},
 			want: []DiffResult{
-				{Path: "/root/d2/", Status: StatusCopy, SourcePath: "/root/d1/"},
+				{Path: "/root/d2/", Root: "/", RelPath: "root/d2/", Status: StatusCopy, SourcePath: "/root/d1/", SourceRoot: "/", SourceRelPath: "root/d1/", CopyCount: 1},
 			},
 		},
 		{
@@ -164,8 +164,23 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file2":  {SHA1: "hash3"}, // Added
 			},
 			want: []DiffResult{
-				{Path: "/root/file1", Status: StatusModified},
-				{Path: "/root/file2", Status: StatusAdded},
+				{Path: "/root/file1", Root: "/", RelPath: "root/file1", Status: StatusModified, ModifiedCount: 1},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusAdded, AddedCount: 1},
+			},
+		},
+		{
+			name: "Mixed Operation (Mod + Add) Collapsed",
+			filesA: map[string]models.FileRecord{
+				"/root/common":       {SHA1: "common"},
+				"/root/parent/file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common":       {SHA1: "common"},
+				"/root/parent/file1": {SHA1: "hash2"}, // Modified
+				"/root/parent/file2": {SHA1: "hash3"}, // Added
+			},
+			want: []DiffResult{
+				{Path: "/root/parent/", Root: "/", RelPath: "root/parent/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1},
 			},
 		},
 		{
@@ -181,8 +196,26 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file3":  {SHA1: "hash1"}, // Copy
 			},
 			want: []DiffResult{
-				{Path: "/root/file2", Status: StatusMove, SourcePath: "/root/file1"},
-				{Path: "/root/file3", Status: StatusCopy, SourcePath: "/root/file1"},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusMove, SourcePath: "/root/file1", SourceRoot: "/", SourceRelPath: "root/file1", MoveCount: 1},
+				{Path: "/root/file3", Root: "/", RelPath: "root/file3", Status: StatusCopy, SourcePath: "/root/file1", SourceRoot: "/", SourceRelPath: "root/file1", CopyCount: 1},
+			},
+		},
+		{
+			name: "Move vs Copy Preference (Nested)",
+			filesA: map[string]models.FileRecord{
+				"/root/common":       {SHA1: "common"},
+				"/root/parent/file1": {SHA1: "hash1"},
+				"/root/parent/file2": {SHA1: "hash2"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common":       {SHA1: "common"},
+				"/root/parent/file1": {SHA1: "hash1"}, // Same
+				"/root/parent/file3": {SHA1: "hash2"}, // Move
+				"/root/parent/file4": {SHA1: "hash2"}, // Copy
+			},
+			want: []DiffResult{
+				{Path: "/root/parent/file3", Root: "/", RelPath: "root/parent/file3", Status: StatusMove, SourcePath: "/root/parent/file2", SourceRoot: "/", SourceRelPath: "root/parent/file2", MoveCount: 1},
+				{Path: "/root/parent/file4", Root: "/", RelPath: "root/parent/file4", Status: StatusCopy, SourcePath: "/root/parent/file2", SourceRoot: "/", SourceRelPath: "root/parent/file2", CopyCount: 1},
 			},
 		},
 		{
@@ -190,13 +223,15 @@ func TestCompareSnapshots(t *testing.T) {
 			filesA: map[string]models.FileRecord{
 				"/root/common":        {SHA1: "common"},
 				"/root/src/sub/file1": {SHA1: "hash1"},
+				"/root/src/sub/file2": {SHA1: "hash2"},
 			},
 			filesB: map[string]models.FileRecord{
 				"/root/common":        {SHA1: "common"},
 				"/root/dst/sub/file1": {SHA1: "hash1"},
+				"/root/dst/sub/file2": {SHA1: "hash2"},
 			},
 			want: []DiffResult{
-				{Path: "/root/dst/", Status: StatusMove, SourcePath: "/root/src/"},
+				{Path: "/root/dst/", Root: "/", RelPath: "root/dst/", Status: StatusMove, SourcePath: "/root/src/", SourceRoot: "/", SourceRelPath: "root/src/", MoveCount: 2},
 			},
 		},
 		{
@@ -213,8 +248,8 @@ func TestCompareSnapshots(t *testing.T) {
 			},
 			// Expecting specific moves if logic allows swap detection
 			want: []DiffResult{
-				{Path: "/root/fileA", Status: StatusMove, SourcePath: "/root/fileB"},
-				{Path: "/root/fileB", Status: StatusMove, SourcePath: "/root/fileA"},
+				{Path: "/root/fileA", Root: "/", RelPath: "root/fileA", Status: StatusMove, SourcePath: "/root/fileB", SourceRoot: "/", SourceRelPath: "root/fileB", MoveCount: 1},
+				{Path: "/root/fileB", Root: "/", RelPath: "root/fileB", Status: StatusMove, SourcePath: "/root/fileA", SourceRoot: "/", SourceRelPath: "root/fileA", MoveCount: 1},
 			},
 		},
 		{
@@ -230,7 +265,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/dst/file1": {SHA1: "hash1"}, // Moved
 			},
 			want: []DiffResult{
-				{Path: "/root/dst/file1", Status: StatusMove, SourcePath: "/root/src/file1"},
+				{Path: "/root/dst/file1", Root: "/", RelPath: "root/dst/file1", Status: StatusMove, SourcePath: "/root/src/file1", SourceRoot: "/", SourceRelPath: "root/src/file1", MoveCount: 1},
 			},
 		},
 		{
@@ -244,7 +279,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/subdir/file1": {SHA1: "hash1"}, // Moved
 			},
 			want: []DiffResult{
-				{Path: "/root/subdir/file1", Status: StatusMove, SourcePath: "/root/file1"},
+				{Path: "/root/subdir/file1", Root: "/", RelPath: "root/subdir/file1", Status: StatusMove, SourcePath: "/root/file1", SourceRoot: "/", SourceRelPath: "root/file1", MoveCount: 1},
 			},
 		},
 		{
@@ -274,7 +309,7 @@ func TestCompareSnapshots(t *testing.T) {
 			},
 			strategy: "md5",
 			want: []DiffResult{
-				{Path: "/root/file1", Status: StatusModified},
+				{Path: "/root/file1", Root: "/", RelPath: "root/file1", Status: StatusModified, ModifiedCount: 1},
 			},
 		},
 		{
@@ -288,7 +323,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file1":  {MD5: "m1"}, // Only MD5 (e.g. forced MD5 scan only?)
 			},
 			want: []DiffResult{
-				{Path: "/root/file1", Status: StatusModified},
+				{Path: "/root/file1", Root: "/", RelPath: "root/file1", Status: StatusModified, ModifiedCount: 1},
 			},
 		},
 		{
@@ -314,7 +349,21 @@ func TestCompareSnapshots(t *testing.T) {
 			rootA: "/mnt/A",
 			rootB: "/mnt/B",
 			want: []DiffResult{
-				{Path: "/mnt/B/file1", Status: StatusModified},
+				{Path: "/mnt/A/file1", Root: "/mnt/A", RelPath: "file1", Status: StatusModified, ModifiedCount: 1},
+			},
+		},
+		{
+			name: "Relocated Root Move",
+			filesA: map[string]models.FileRecord{
+				"file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"file2": {SHA1: "hash1"},
+			},
+			rootA: "/mnt/A",
+			rootB: "/mnt/B",
+			want: []DiffResult{
+				{Path: "/mnt/B/file2", Root: "/mnt/B", RelPath: "file2", Status: StatusMove, SourcePath: "/mnt/A/file1", SourceRoot: "/mnt/A", SourceRelPath: "file1", MoveCount: 1},
 			},
 		},
 		{
@@ -328,14 +377,9 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file2":  {SHA1: "hash1"},
 			},
 			noMoves: true,
-			// If No Moves, it should fall back to Copy because it exists in A.
-			// Wait, file1 is Removed in B. file2 is Added in B.
-			// If we skip Move, file2 logic sees hash1 is in existingMap (from file1).
-			// So it becomes Copy.
-			// And file1 remains Removed.
 			want: []DiffResult{
-				{Path: "/root/file1", Status: StatusRemoved},
-				{Path: "/root/file2", Status: StatusCopy, SourcePath: "/root/file1"},
+				{Path: "/root/file1", Root: "/", RelPath: "root/file1", Status: StatusRemoved, RemovedCount: 1},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusCopy, SourcePath: "/root/file1", SourceRoot: "/", SourceRelPath: "root/file1", CopyCount: 1},
 			},
 		},
 		{
@@ -351,8 +395,8 @@ func TestCompareSnapshots(t *testing.T) {
 			noMoves:  true,
 			noCopies: true, // Also disable Copies to force Add/Remove
 			want: []DiffResult{
-				{Path: "/root/file1", Status: StatusRemoved},
-				{Path: "/root/file2", Status: StatusAdded},
+				{Path: "/root/file1", Root: "/", RelPath: "root/file1", Status: StatusRemoved, RemovedCount: 1},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusAdded, AddedCount: 1},
 			},
 		},
 		{
@@ -368,7 +412,7 @@ func TestCompareSnapshots(t *testing.T) {
 			},
 			noCopies: true,
 			want: []DiffResult{
-				{Path: "/root/file2", Status: StatusAdded},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusAdded, AddedCount: 1},
 			},
 		},
 		{
@@ -381,7 +425,23 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file2": {SHA1: "hash3"}, // Added
 			},
 			want: []DiffResult{
-				{Path: "/root/", Status: StatusModified},
+				{Path: "/root/", Root: "/", RelPath: "root/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1},
+			},
+		},
+		{
+			name: "Rollup Modified (Mod + Add + Copy)",
+			filesA: map[string]models.FileRecord{
+				"/root/file1": {SHA1: "hash1"},
+				"/root/file2": {SHA1: "hash2"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/file1": {SHA1: "hash1"}, // Same
+				"/root/file2": {SHA1: "hash3"}, // Modified
+				"/root/file3": {SHA1: "hash2"}, // Copy
+				"/root/file4": {SHA1: "hash4"}, // Added
+			},
+			want: []DiffResult{
+				{Path: "/root/", Root: "/", RelPath: "root/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1, CopyCount: 1},
 			},
 		},
 		{
@@ -395,7 +455,58 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file2":  {SHA1: "hash2"}, // Added
 			},
 			want: []DiffResult{
-				{Path: "/root/", Status: StatusAdded},
+				{Path: "/root/", Root: "/", RelPath: "root/", Status: StatusAdded, CopyCount: 1, AddedCount: 1},
+			},
+		},
+		{
+			name: "Rollup Modified (Mod + Add + Copy + Removed)",
+			filesA: map[string]models.FileRecord{
+				"/root/file1": {SHA1: "hash1"},
+				"/root/file2": {SHA1: "hash2"},
+				"/root/file3": {SHA1: "hash3"}, // Removed
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/file1": {SHA1: "hash1"}, // Same
+				"/root/file2": {SHA1: "hash4"}, // Modified
+				"/root/file4": {SHA1: "hash2"}, // Copy
+				"/root/file5": {SHA1: "hash5"}, // Added
+			},
+			want: []DiffResult{
+				{Path: "/root/", Root: "/", RelPath: "root/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1, CopyCount: 1, RemovedCount: 1},
+			},
+		},
+		{
+			name: "Rollup Modified (Move + Copy)",
+			filesA: map[string]models.FileRecord{
+				"/root/common":       {SHA1: "common"},
+				"/root/parent/file1": {SHA1: "hash1"},
+			},
+			filesB: map[string]models.FileRecord{
+				"/root/common":       {SHA1: "common"},
+				"/root/parent/file2": {SHA1: "hash1"}, // Move
+				"/root/parent/file3": {SHA1: "hash1"}, // Copy
+			},
+			want: []DiffResult{
+				{Path: "/root/parent/", Root: "/", RelPath: "root/parent/", Status: StatusModified, MoveCount: 1, CopyCount: 1},
+			},
+		},
+		{
+			name: "Rollup Modified Different Root (Mod + Add + Copy + Removed)",
+			filesA: map[string]models.FileRecord{
+				"foo/file1": {SHA1: "hash1"},
+				"foo/file2": {SHA1: "hash2"},
+				"foo/file3": {SHA1: "hash3"}, // Removed
+			},
+			filesB: map[string]models.FileRecord{
+				"foo/file1": {SHA1: "hash1"}, // Same
+				"foo/file2": {SHA1: "hash4"}, // Modified
+				"foo/file4": {SHA1: "hash2"}, // Copy
+				"foo/file5": {SHA1: "hash5"}, // Added
+			},
+			rootA: "/mnt/A",
+			rootB: "/mnt/B",
+			want: []DiffResult{
+				{Path: "/mnt/A/foo/", Root: "/mnt/A", RelPath: "foo/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1, CopyCount: 1, RemovedCount: 1},
 			},
 		},
 	}
@@ -452,7 +563,12 @@ func TestCompareSnapshots(t *testing.T) {
 				// Normalize SourcePaths for directory matches (ensure trailing slash consistency if needed)
 				// My implementaton might add trailing slash to dirs.
 				// Let's rely on strict check for now and fix impl if needed.
-				if got[i].Path != tt.want[i].Path || got[i].Status != tt.want[i].Status || got[i].SourcePath != tt.want[i].SourcePath {
+				if got[i].Path != tt.want[i].Path || got[i].Status != tt.want[i].Status || got[i].SourcePath != tt.want[i].SourcePath ||
+					got[i].Root != tt.want[i].Root || got[i].RelPath != tt.want[i].RelPath ||
+					got[i].SourceRoot != tt.want[i].SourceRoot || got[i].SourceRelPath != tt.want[i].SourceRelPath ||
+					got[i].AddedCount != tt.want[i].AddedCount || got[i].RemovedCount != tt.want[i].RemovedCount ||
+					got[i].ModifiedCount != tt.want[i].ModifiedCount || got[i].CopyCount != tt.want[i].CopyCount ||
+					got[i].MoveCount != tt.want[i].MoveCount {
 					t.Errorf("CompareSnapshots() mismatch at index %d.\nGot:  %+v\nWant: %+v", i, got[i], tt.want[i])
 				}
 			}
