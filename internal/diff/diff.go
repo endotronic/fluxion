@@ -42,22 +42,24 @@ type Node struct {
 
 // DiffResult represents a collapsed diff entry for display
 type DiffResult struct {
-	Path          string // Absolute (Legacy/Sort Key)
-	Root          string
-	RelPath       string
-	Status        Status
-	SourcePath    string // Absolute
-	SourceRoot    string
-	SourceRelPath string
-	AddedCount    int64
-	RemovedCount  int64
-	ModifiedCount int64
-	CopyCount     int64
-	MoveCount     int64
+	Path               string // Absolute (Legacy/Sort Key)
+	Root               string
+	RelPath            string
+	Status             Status
+	SourcePath         string // Absolute
+	SourceRoot         string
+	SourceRelPath      string
+	AddedCount         int64
+	RemovedCount       int64
+	ModifiedCount      int64
+	CopyCount          int64
+	MoveCount          int64
+	UnchangedFileCount int64
+	UnchangedDirCount  int64
 }
 
 // CompareSnapshots computes the diff between two sets of files using a specific hash strategy.
-func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB string, hashType string, noCopies, noMoves bool, onProgress func(current, total int)) ([]DiffResult, error) {
+func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB string, hashType string, noCopies, noMoves, showUnchanged bool, onProgress func(current, total int)) ([]DiffResult, error) {
 	root := &Node{
 		Name:     "",
 		Path:     "",
@@ -104,7 +106,7 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 
 	// 7. Collapse and Collect
 	var results []DiffResult
-	collectResults(root, &results)
+	collectResults(root, &results, showUnchanged)
 
 	// 8. Reconstruct Absolute Paths
 	finalResults := make([]DiffResult, len(results))
@@ -147,24 +149,27 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 		}
 
 		finalResults[i] = DiffResult{
-			Path:          absPath,
-			Root:          rootUsed,
-			RelPath:       relPath,
-			Status:        res.Status,
-			SourcePath:    absSource,
-			SourceRoot:    sourceRootUsed,
-			SourceRelPath: sourceRel,
-			AddedCount:    res.AddedCount,
-			RemovedCount:  res.RemovedCount,
-			ModifiedCount: res.ModifiedCount,
-			CopyCount:     res.CopyCount,
-			MoveCount:     res.MoveCount,
+			Path:               absPath,
+			Root:               rootUsed,
+			RelPath:            relPath,
+			Status:             res.Status,
+			SourcePath:         absSource,
+			SourceRoot:         sourceRootUsed,
+			SourceRelPath:      sourceRel,
+			AddedCount:         res.AddedCount,
+			RemovedCount:       res.RemovedCount,
+			ModifiedCount:      res.ModifiedCount,
+			CopyCount:          res.CopyCount,
+			MoveCount:          res.MoveCount,
+			UnchangedFileCount: res.UnchangedFileCount,
+			UnchangedDirCount:  res.UnchangedDirCount,
 		}
 	}
 
 	// Sort results
 	sort.Slice(finalResults, func(i, j int) bool {
-		return finalResults[i].Path < finalResults[j].Path
+		// Sort by Relative Path, Descending (Z-A)
+		return finalResults[i].RelPath > finalResults[j].RelPath
 	})
 
 	return finalResults, nil
@@ -633,14 +638,14 @@ func findNode(root *Node, path string) *Node {
 
 // collectResults traverses logic to collapse nodes
 // collectResults traverses logic to collapse nodes
-func collectResults(node *Node, results *[]DiffResult) {
+func collectResults(node *Node, results *[]DiffResult, showUnchanged bool) {
 	// Skip root virtual node (unless root itself changed? e.g. everything removed?)
 	// Root has no name/path usually in this implementation ("").
 	// But its children are top level.
 
 	if node.Name == "" { // Root
 		for _, child := range node.Children {
-			collectResults(child, results)
+			collectResults(child, results, showUnchanged)
 		}
 		return
 	}
@@ -657,6 +662,7 @@ func collectResults(node *Node, results *[]DiffResult) {
 		path := node.Path
 
 		var added, removed, modified, copied, moved int64
+		var unchangedFiles, unchangedDirs int64
 
 		if !node.IsFile {
 			path += "/"
@@ -667,10 +673,12 @@ func collectResults(node *Node, results *[]DiffResult) {
 			modified = stats.ModifiedCount
 			copied = stats.CopyCount
 			moved = stats.MoveCount
+			if showUnchanged {
+				unchangedFiles = stats.UnchangedFileCount
+				unchangedDirs = stats.UnchangedDirCount
+			}
 		} else {
 			// Leaf node specific counts (for single file)
-			// Though typically single files shouldn't have "N files" text anyway.
-			// But purely for struct correctness:
 			switch node.Status {
 			case StatusAdded:
 				added = 1
@@ -686,22 +694,48 @@ func collectResults(node *Node, results *[]DiffResult) {
 		}
 
 		*results = append(*results, DiffResult{
-			Path:          path,
-			Status:        node.Status,
-			SourcePath:    node.SourcePath,
-			AddedCount:    added,
-			RemovedCount:  removed,
-			ModifiedCount: modified,
-			CopyCount:     copied,
-			MoveCount:     moved,
+			Path:               path,
+			Status:             node.Status,
+			SourcePath:         node.SourcePath,
+			AddedCount:         added,
+			RemovedCount:       removed,
+			ModifiedCount:      modified,
+			CopyCount:          copied,
+			MoveCount:          moved,
+			UnchangedFileCount: unchangedFiles,
+			UnchangedDirCount:  unchangedDirs,
 		})
 		return
 	}
 
 	// If Mixed, recurse
 	if node.Status == StatusMixed {
+		if showUnchanged {
+			// Check if this mixed node has unchanged content
+			stats := accumulateStats(node)
+			if stats.UnchangedFileCount > 0 || stats.UnchangedDirCount > 0 {
+				path := node.Path
+				if !node.IsFile {
+					path += "/"
+				}
+				*results = append(*results, DiffResult{
+					Path:       path,
+					Status:     StatusMixed,
+					SourcePath: node.SourcePath,
+					// For Mixed nodes (context), we only report Unchanged counts.
+					// Recursive changes (Added/Removed/etc) are reported by children traversal.
+					AddedCount:         0,
+					RemovedCount:       0,
+					ModifiedCount:      0,
+					CopyCount:          0,
+					MoveCount:          0,
+					UnchangedFileCount: stats.UnchangedFileCount,
+					UnchangedDirCount:  stats.UnchangedDirCount,
+				})
+			}
+		}
 		for _, child := range node.Children {
-			collectResults(child, results)
+			collectResults(child, results, showUnchanged)
 		}
 	}
 }
@@ -721,11 +755,37 @@ func accumulateStats(node *Node) DiffResult {
 			res.CopyCount = 1
 		case StatusMove:
 			res.MoveCount = 1
+		case StatusUnchanged:
+			res.UnchangedFileCount = 1
 		}
 		return res
 	}
 
 	var total DiffResult
+	if node.Status == StatusUnchanged {
+		// If directory is Unchanged, count itself as 1 UnchangedDir?
+		// Or do we count only children?
+		// The requirement example: "3 directories, 8 files unchanged" for a parent context.
+		// If `node` is `docker/` (Mixed), and it has `svc1` (Removed), `src2` (Removed), and `backup/` (Unchanged Dir).
+		// We want to count `backup/` as 1 Unchanged Dir.
+		// If `backup/` has 100 files, do we count them?
+		// "3 directories, 8 files". Usually this means immediate children or recursive leaf files?
+		// Given other stats (AddedCount) are typically recursive files, we should probably be consistent.
+		// But "3 directories" implies structure count.
+		// Let's count recursive files.
+		// For directories, do we count them? AddedCount usually doesn't count added directories explicitly in existing logic (it returns 0 for IsFile=false unless we check Children).
+		// Wait, accumulateStats sums up children.
+		// If child is Directory and Added, accumulateStats(child) returns its file counts.
+		// It does NOT seem to count the directory itself in `AddedCount`.
+		// Let's verify:
+		// case StatusAdded: res.AddedCount = 1 (Only if IsFile).
+		// So existing logic counts FILES only.
+		// But the user request says "3 directories, 8 files unchanged".
+		// This implies we DO want directory counts.
+		// I'll add logic to count directories too.
+		total.UnchangedDirCount = 1
+	}
+
 	for _, child := range node.Children {
 		// Recursive
 		s := accumulateStats(child)
@@ -734,6 +794,8 @@ func accumulateStats(node *Node) DiffResult {
 		total.ModifiedCount += s.ModifiedCount
 		total.CopyCount += s.CopyCount
 		total.MoveCount += s.MoveCount
+		total.UnchangedFileCount += s.UnchangedFileCount
+		total.UnchangedDirCount += s.UnchangedDirCount
 	}
 	return total
 }

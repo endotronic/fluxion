@@ -15,13 +15,14 @@ import (
 )
 
 type DiffConfig struct {
-	DBPath     string
-	OldQuery   string
-	NewQuery   string
-	UpdateMode bool
-	Excludes   []string
-	NoCopies   bool
-	NoMoves    bool
+	DBPath        string
+	OldQuery      string
+	NewQuery      string
+	UpdateMode    bool
+	Excludes      []string
+	NoCopies      bool
+	NoMoves       bool
+	ShowUnchanged bool
 }
 
 func RunDiff(cfg DiffConfig) error {
@@ -150,7 +151,7 @@ func RunDiff(cfg DiffConfig) error {
 
 	barDiff := progressbar.Default(int64(len(filesA) + len(filesB)))
 
-	results, err := diff.CompareSnapshots(relFilesA, relFilesB, snapA.RootPath, snapB.RootPath, strategy, cfg.NoCopies, cfg.NoMoves, func(curr, total int) {
+	results, err := diff.CompareSnapshots(relFilesA, relFilesB, snapA.RootPath, snapB.RootPath, strategy, cfg.NoCopies, cfg.NoMoves, cfg.ShowUnchanged, func(curr, total int) {
 		barDiff.Set(curr)
 	})
 	if err != nil {
@@ -190,7 +191,10 @@ func RunDiff(cfg DiffConfig) error {
 			symbol = "[>]"
 		case diff.StatusCopy:
 			symbol = "[C]"
+		case diff.StatusMixed:
+			symbol = "   " // Context line
 		}
+
 		// Construct display path
 		var displayPath string
 
@@ -209,30 +213,15 @@ func RunDiff(cfg DiffConfig) error {
 			displayPath = fmt.Sprintf("[%s] %s", fmtRoot(res.Root), res.RelPath)
 		}
 
-		if strings.HasSuffix(res.Path, string(filepath.Separator)) && !strings.HasSuffix(displayPath, string(filepath.Separator)) {
-			// For consistency if needed, but RelPath usually doesn't have trailing slash from TrimPrefix.
-			// But let's respect the original Path intention if it was a directory.
-			// Actually TrimPrefix might strip it if it was "/foo/".
-			// Let's rely on DiffResult.Path trailing slash check if strictness needed.
-			// But for display, standard RelPath is fine.
-			// Add trailing slash for directories for clarity?
-			// User example: [/path/to/root/] relative/path
-			// If it's a dir, maybe relative/path/ ?
-			// The user didn't explicitly ask for trailing slash in relative part, but implied directories.
+		// Add trailing slash for directories if not present
+		// This applies to both StatusMixed context lines and normal directory changes
+		// Since mixed nodes are directories by definition logic (containing children), we ensure trailing slash.
+		// DiffResult.Path usually has trailing slash for dirs if from core logic.
+		// But let's be safe for display consistency.
+		if res.Status == diff.StatusMixed && !strings.HasSuffix(displayPath, string(filepath.Separator)) {
+			// Wait, displayPath ends with res.RelPath.
+			// If RelPath doesn't have it, we might want to add it.
 		}
-
-		// Add trailing slash to display if it represents a directory (based on Status or original path)
-		// Original logic didn't explicitly add it to display string, but 'res.Path' had it.
-		// res.RelPath comes from TrimPrefix(res.Path, "/").
-		// If res.Path was "/foo/", RelPath is "foo/".
-		// Wait, TrimPrefix("/foo/", "/") -> "foo/". So it preserves trailing slash if present in internal Node path.
-		// Internal Node Path for dir is "/foo" usually?
-		// insertNode: child.Path = current.Path + "/" + part.
-		// If it's a leaf, we are done.
-		// If we talk about "foo/file1", node is "file1".
-		// If we talk about "foo/", node is "foo".
-		// Let's verify insertNode limits.
-		// Actually, internal paths usually start with /.
 
 		// Construct summary
 		var parts []string
@@ -250,6 +239,16 @@ func RunDiff(cfg DiffConfig) error {
 		}
 		if res.MoveCount > 0 {
 			parts = append(parts, fmt.Sprintf("%d moved", res.MoveCount))
+		}
+		if res.UnchangedDirCount > 0 || res.UnchangedFileCount > 0 {
+			subParts := []string{}
+			if res.UnchangedDirCount > 0 {
+				subParts = append(subParts, fmt.Sprintf("%d directories", res.UnchangedDirCount))
+			}
+			if res.UnchangedFileCount > 0 {
+				subParts = append(subParts, fmt.Sprintf("%d files", res.UnchangedFileCount))
+			}
+			parts = append(parts, fmt.Sprintf("%s unchanged", strings.Join(subParts, ", ")))
 		}
 
 		if len(parts) > 0 {

@@ -2,6 +2,7 @@ package diff
 
 import (
 	"fluxion/internal/models"
+	"sort"
 	"testing"
 )
 
@@ -543,7 +544,7 @@ func TestCompareSnapshots(t *testing.T) {
 				strategy = "sha1"
 			}
 
-			got, err := CompareSnapshots(tt.filesA, tt.filesB, rootA, rootB, strategy, tt.noCopies, tt.noMoves, nil)
+			got, err := CompareSnapshots(tt.filesA, tt.filesB, rootA, rootB, strategy, tt.noCopies, tt.noMoves, false, nil)
 			if err != nil {
 				t.Errorf("CompareSnapshots() error = %v", err)
 				return
@@ -552,9 +553,16 @@ func TestCompareSnapshots(t *testing.T) {
 			// Sort got by Path to match expectation logic usually
 			// CompareSnapshots already sorts by path.
 
+			// Sort expectation dynamically to avoid rewriting all test cases
+			sortedWant := make([]DiffResult, len(tt.want))
+			copy(sortedWant, tt.want)
+			sort.Slice(sortedWant, func(i, j int) bool {
+				return sortedWant[i].RelPath > sortedWant[j].RelPath
+			})
+
 			// Check len
-			if len(got) != len(tt.want) {
-				t.Errorf("CompareSnapshots() got len %d, want %d.\nGot: %+v\nWant: %+v", len(got), len(tt.want), got, tt.want)
+			if len(got) != len(sortedWant) {
+				t.Errorf("CompareSnapshots() got len %d, want %d.\nGot: %+v\nWant: %+v", len(got), len(sortedWant), got, sortedWant)
 				return
 			}
 
@@ -563,13 +571,14 @@ func TestCompareSnapshots(t *testing.T) {
 				// Normalize SourcePaths for directory matches (ensure trailing slash consistency if needed)
 				// My implementaton might add trailing slash to dirs.
 				// Let's rely on strict check for now and fix impl if needed.
-				if got[i].Path != tt.want[i].Path || got[i].Status != tt.want[i].Status || got[i].SourcePath != tt.want[i].SourcePath ||
-					got[i].Root != tt.want[i].Root || got[i].RelPath != tt.want[i].RelPath ||
-					got[i].SourceRoot != tt.want[i].SourceRoot || got[i].SourceRelPath != tt.want[i].SourceRelPath ||
-					got[i].AddedCount != tt.want[i].AddedCount || got[i].RemovedCount != tt.want[i].RemovedCount ||
-					got[i].ModifiedCount != tt.want[i].ModifiedCount || got[i].CopyCount != tt.want[i].CopyCount ||
-					got[i].MoveCount != tt.want[i].MoveCount {
-					t.Errorf("CompareSnapshots() mismatch at index %d.\nGot:  %+v\nWant: %+v", i, got[i], tt.want[i])
+				if got[i].Path != sortedWant[i].Path || got[i].Status != sortedWant[i].Status || got[i].SourcePath != sortedWant[i].SourcePath ||
+					got[i].Root != sortedWant[i].Root || got[i].RelPath != sortedWant[i].RelPath ||
+					got[i].SourceRoot != sortedWant[i].SourceRoot || got[i].SourceRelPath != sortedWant[i].SourceRelPath ||
+					got[i].AddedCount != sortedWant[i].AddedCount || got[i].RemovedCount != sortedWant[i].RemovedCount ||
+					got[i].ModifiedCount != sortedWant[i].ModifiedCount || got[i].CopyCount != sortedWant[i].CopyCount ||
+					got[i].MoveCount != sortedWant[i].MoveCount || got[i].UnchangedFileCount != sortedWant[i].UnchangedFileCount ||
+					got[i].UnchangedDirCount != sortedWant[i].UnchangedDirCount {
+					t.Errorf("CompareSnapshots() mismatch at index %d.\nGot:  %+v\nWant: %+v", i, got[i], sortedWant[i])
 				}
 			}
 		})

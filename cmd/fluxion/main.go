@@ -226,6 +226,9 @@ func runDiff(args []string) {
 	var noMoves bool
 	cmd.BoolVar(&noMoves, "no-moves", false, "Do not detect moves")
 
+	var showUnchanged bool
+	cmd.BoolVar(&showUnchanged, "show-unchanged", false, "Show unchanged counts for parent directories of changes")
+
 	cmd.Parse(args)
 
 	if *dbPtr == "" {
@@ -241,13 +244,14 @@ func runDiff(args []string) {
 	}
 
 	cfg := app.DiffConfig{
-		DBPath:     *dbPtr,
-		OldQuery:   tail[0],
-		NewQuery:   tail[1],
-		UpdateMode: updateMode,
-		Excludes:   excludes,
-		NoCopies:   noCopies,
-		NoMoves:    noMoves,
+		DBPath:        *dbPtr,
+		OldQuery:      tail[0],
+		NewQuery:      tail[1],
+		UpdateMode:    updateMode,
+		Excludes:      excludes,
+		NoCopies:      noCopies,
+		NoMoves:       noMoves,
+		ShowUnchanged: showUnchanged,
 	}
 
 	if err := app.RunDiff(cfg); err != nil {
