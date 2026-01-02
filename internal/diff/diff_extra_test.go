@@ -35,8 +35,8 @@ func TestCompareSnapshots_ShowUnchanged(t *testing.T) {
 	for _, res := range got {
 		if res.Status == StatusMixed {
 			foundMixed = true
-			if res.Path != "/root" && res.Path != "/root/" {
-				t.Errorf("Expected mixed path based on context (/root or /root/), got %s", res.Path)
+			if res.Path != "/root" && res.Path != "/root/" && res.Path != "/" {
+				t.Errorf("Expected mixed path based on context (/root or /root/ or /), got %s", res.Path)
 			}
 			// Unchanged stats?
 			// common is unchanged dir. It contains 2 files.
@@ -76,9 +76,9 @@ func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
 		want          []DiffResult
 	}{
 		{
-			// Invariant 2: If no items match, it should rollup.
+			// Invariant 2: If no items match, it should rollup (IF High Volume).
 			// Directory "rollup/" contains file1 (modified). No other files.
-			// Should result in ONE StatusModified entry for "rollup/".
+			// New Logic: Low volume (1 change) -> Expanded.
 			name: "Invariant_2_Rollup_Pure_Modified",
 			filesA: map[string]models.FileRecord{
 				"/rollup/file1": {SHA1: "hash1"},
@@ -89,10 +89,10 @@ func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
 			showUnchanged: false,
 			want: []DiffResult{
 				{
-					Path:          "/rollup/",
+					Path:          "/rollup/file1",
 					Status:        StatusModified,
 					ModifiedCount: 1,
-					RelPath:       "rollup/",
+					RelPath:       "rollup/file1",
 				},
 			},
 		},
@@ -128,13 +128,19 @@ func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
 					RelPath:       "mixed/file2",
 					ModifiedCount: 1,
 				},
+				{
+					Path:               "/",
+					Root:               "/",
+					Status:             StatusMixed,
+					RelPath:            ".",
+					UnchangedFileCount: 1,
+				},
 			},
 		},
 		{
-			// Invariant 2 (Extended): If no files match (Empty Intersection), rollup.
+			// Invariant 2 (Extended): If no files match (Empty Intersection), rollup (IF High Volume).
 			// Directory "swap/" has "a" removed and "b" added.
-			// Should result in ONE StatusModified entry for "swap/".
-			// Failure Mode: Might be returned as Mixed (swap/a, swap/b).
+			// New Logic: 2 Changes <= 2. Expanded.
 			name: "Invariant_2_Rollup_Add_Remove_Only",
 			filesA: map[string]models.FileRecord{
 				"/swap/a": {SHA1: "hashA"},
@@ -145,11 +151,16 @@ func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
 			showUnchanged: false,
 			want: []DiffResult{
 				{
-					Path:         "/swap/",
-					Status:       StatusModified, // SHOULD rolled up
-					RelPath:      "swap/",
+					Path:         "/swap/a",
+					Status:       StatusRemoved,
+					RelPath:      "swap/a",
 					RemovedCount: 1,
-					AddedCount:   1,
+				},
+				{
+					Path:       "/swap/b",
+					Status:     StatusAdded,
+					RelPath:    "swap/b",
+					AddedCount: 1,
 				},
 			},
 		},
@@ -166,7 +177,12 @@ func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
 			sortedWant := make([]DiffResult, len(tt.want))
 			copy(sortedWant, tt.want)
 			sort.Slice(sortedWant, func(i, j int) bool {
-				return sortedWant[i].RelPath > sortedWant[j].RelPath
+				return sortedWant[i].RelPath < sortedWant[j].RelPath
+			})
+
+			// Sort got similarly to ensure order-independent verification
+			sort.Slice(got, func(i, j int) bool {
+				return got[i].RelPath < got[j].RelPath
 			})
 
 			if len(got) != len(sortedWant) {

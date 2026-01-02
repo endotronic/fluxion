@@ -136,9 +136,10 @@ func TestDiffSortOrder(t *testing.T) {
 		// Code says: StatusMove -> RelPath = B path.
 		"home/kevin/ztemp.sh",
 		"home/kevin/",
-		"home/mike/",
+		"home/mike/junk",
 		"home/",
 		"root/",
+		".",
 	}
 
 	// Note: 'home/kevin/work area/' is "w" (space). 'home/kevin/ztemp.sh' is "z".

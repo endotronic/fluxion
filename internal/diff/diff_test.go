@@ -180,7 +180,8 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/parent/file2": {SHA1: "hash3", SizeBytes: 100}, // Added
 			},
 			want: []DiffResult{
-				{Path: "/root/parent/", Root: "/", RelPath: "root/parent/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1},
+				{Path: "/root/parent/file1", Root: "/", RelPath: "root/parent/file1", Status: StatusModified, ModifiedCount: 1},
+				{Path: "/root/parent/file2", Root: "/", RelPath: "root/parent/file2", Status: StatusAdded, AddedCount: 1},
 			},
 		},
 		{
@@ -425,7 +426,8 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file2": {SHA1: "hash3", SizeBytes: 100}, // Added
 			},
 			want: []DiffResult{
-				{Path: "/root/", Root: "/", RelPath: "root/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1},
+				{Path: "/root/file1", Root: "/", RelPath: "root/file1", Status: StatusModified, ModifiedCount: 1},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusAdded, AddedCount: 1},
 			},
 		},
 		{
@@ -441,7 +443,9 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file4": {SHA1: "hash4", SizeBytes: 100}, // Added
 			},
 			want: []DiffResult{
-				{Path: "/root/", Root: "/", RelPath: "root/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1, CopyCount: 1},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusModified, ModifiedCount: 1},
+				{Path: "/root/file3", Root: "/", RelPath: "root/file3", Status: StatusCopy, SourcePath: "/root/file2", SourceRoot: "/", SourceRelPath: "root/file2", CopyCount: 1},
+				{Path: "/root/file4", Root: "/", RelPath: "root/file4", Status: StatusAdded, AddedCount: 1},
 			},
 		},
 		{
@@ -472,7 +476,10 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file5": {SHA1: "hash5", SizeBytes: 100}, // Added
 			},
 			want: []DiffResult{
-				{Path: "/root/", Root: "/", RelPath: "root/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1, CopyCount: 1, RemovedCount: 1},
+				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusModified, ModifiedCount: 1},
+				{Path: "/root/file3", Root: "/", RelPath: "root/file3", Status: StatusRemoved, RemovedCount: 1},
+				{Path: "/root/file4", Root: "/", RelPath: "root/file4", Status: StatusCopy, SourcePath: "/root/file2", SourceRoot: "/", SourceRelPath: "root/file2", CopyCount: 1},
+				{Path: "/root/file5", Root: "/", RelPath: "root/file5", Status: StatusAdded, AddedCount: 1},
 			},
 		},
 		{
@@ -506,7 +513,10 @@ func TestCompareSnapshots(t *testing.T) {
 			rootA: "/mnt/A",
 			rootB: "/mnt/B",
 			want: []DiffResult{
-				{Path: "/mnt/A/foo/", Root: "/mnt/A", RelPath: "foo/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1, CopyCount: 1, RemovedCount: 1},
+				{Path: "/mnt/A/foo/file2", Root: "/mnt/A", RelPath: "foo/file2", Status: StatusModified, ModifiedCount: 1},
+				{Path: "/mnt/A/foo/file3", Root: "/mnt/A", RelPath: "foo/file3", Status: StatusRemoved, RemovedCount: 1},
+				{Path: "/mnt/B/foo/file4", Root: "/mnt/B", RelPath: "foo/file4", Status: StatusCopy, SourcePath: "/mnt/A/foo/file2", SourceRoot: "/mnt/A", SourceRelPath: "foo/file2", CopyCount: 1},
+				{Path: "/mnt/B/foo/file5", Root: "/mnt/B", RelPath: "foo/file5", Status: StatusAdded, AddedCount: 1},
 			},
 		},
 	}

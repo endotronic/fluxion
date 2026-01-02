@@ -383,7 +383,7 @@ func propagateStatus(node *Node) (Status, bool) {
 	}
 
 	// Determine if we should attempt a rollup
-	canRollup := allAddedLike || !hasUnchangedContent || changeCount > 2
+	canRollup := !hasUnchangedContent && (allAddedLike || changeCount > 2)
 
 	// Refined Prioritization for canRollup:
 	if canRollup {
@@ -681,6 +681,25 @@ func collectResults(node *Node, results *[]DiffResult, showUnchanged bool) {
 
 		for _, name := range names {
 			collectResults(node.Children[name], results, showUnchanged)
+		}
+
+		if showUnchanged {
+			stats := accumulateStats(node)
+			if stats.UnchangedFileCount > 0 || stats.UnchangedDirCount > 0 {
+				path := "." // Root representation
+				*results = append(*results, DiffResult{
+					Path:               path,
+					Status:             StatusMixed,
+					SourcePath:         "",
+					AddedCount:         0,
+					RemovedCount:       0,
+					ModifiedCount:      0,
+					CopyCount:          0,
+					MoveCount:          0,
+					UnchangedFileCount: stats.UnchangedFileCount,
+					UnchangedDirCount:  stats.UnchangedDirCount,
+				})
+			}
 		}
 		return
 	}

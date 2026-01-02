@@ -77,6 +77,32 @@ func TestReproduction_Rollup_Blocking(t *testing.T) {
 				{Path: "/target/added3", Root: "/", RelPath: "target/added3", Status: StatusAdded, AddedCount: 1},
 			},
 		},
+		{
+			name: "Aggressive Rollup Check (Many Changes + Unchanged)",
+			// Scenario:
+			// /target/ has > 2 changes (Added/Modified/etc) which triggers the "High Volume" rollup rule.
+			// BUT it also has an Unchanged file.
+			// It should NOT rollup to StatusModified (collapsed), because that would hide the Unchanged file count context line.
+			filesA: map[string]models.FileRecord{
+				"/target/unchanged": {SHA1: "hash1", SizeBytes: 100},
+				"/target/mod1":      {SHA1: "old1", SizeBytes: 100},
+			},
+			filesB: map[string]models.FileRecord{
+				"/target/unchanged": {SHA1: "hash1", SizeBytes: 100},
+				"/target/mod1":      {SHA1: "new1", SizeBytes: 100}, // Modified
+				"/target/add1":      {SHA1: "add1", SizeBytes: 100}, // Added
+				"/target/add2":      {SHA1: "add2", SizeBytes: 100}, // Added
+				"/target/add3":      {SHA1: "add3", SizeBytes: 100}, // Added
+			},
+			// Total changes = 4 (> 2). Previous logic would force rollup.
+			want: []DiffResult{
+				// Expecting CHILDREN (Expanded) because Unchanged content exists.
+				{Path: "/target/add1", Root: "/", RelPath: "target/add1", Status: StatusAdded, AddedCount: 1},
+				{Path: "/target/add2", Root: "/", RelPath: "target/add2", Status: StatusAdded, AddedCount: 1},
+				{Path: "/target/add3", Root: "/", RelPath: "target/add3", Status: StatusAdded, AddedCount: 1},
+				{Path: "/target/mod1", Root: "/", RelPath: "target/mod1", Status: StatusModified, ModifiedCount: 1},
+			},
+		},
 	}
 
 	for _, tt := range tests {
