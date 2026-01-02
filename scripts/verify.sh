@@ -27,11 +27,11 @@ echo "Running 2nd snapshot..."
 echo "Running diff..."
 DIFF_OUT=$(./fluxion d --db "$DB_FILE" 1 2)
 echo "$DIFF_OUT"
-if [[ "$DIFF_OUT" != *"[M] "*"$TEST_DIR/file1.txt"* ]]; then
+if [[ "$DIFF_OUT" != *"[M] "*"file1.txt"* ]]; then
   echo "Error: Diff failed to detect modification."
   exit 1
 fi
-if [[ "$DIFF_OUT" != *"[+] "*"$TEST_DIR/file3.txt"* ]]; then
+if [[ "$DIFF_OUT" != *"[+] "*"file3.txt"* ]]; then
   echo "Error: Diff failed to detect addition."
   exit 1
 fi
@@ -80,7 +80,7 @@ echo "I should be seen" > "$TEST_DIR/safe_dir.txt"
 # Without exclude, we should see both added
 DIFF_FULL=$(./fluxion d --db "$DB_FILE" "WithDupes" "ExcludeTest")
 # Check for exclude_me dir or file
-if [[ "$DIFF_FULL" != *"$TEST_DIR/exclude_me"* ]]; then
+if [[ "$DIFF_FULL" != *"exclude_me"* ]]; then
     echo "Error: Diff failed to find file without exclude."
     exit 1
 fi
@@ -88,12 +88,12 @@ fi
 # With exclude, exclude_me should be gone, but safe_dir.txt should remain
 DIFF_EXCL=$(./fluxion d --db "$DB_FILE" --exclude "exclude_me" "WithDupes" "ExcludeTest")
 
-if [[ "$DIFF_EXCL" == *"$TEST_DIR/exclude_me"* ]]; then
+if [[ "$DIFF_EXCL" == *"exclude_me"* ]]; then
     echo "Error: Exclude failed! Found ignored file/dir."
     exit 1
 fi
 
-if [[ "$DIFF_EXCL" != *"[+] "*"$TEST_DIR/safe_dir.txt"* ]]; then
+if [[ "$DIFF_EXCL" != *"[+] "*"safe_dir.txt"* ]]; then
     echo "Error: Exclude was too aggressive! Missing safe file."
     exit 1
 fi

@@ -169,11 +169,11 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 		}
 	}
 
-	// Sort results
-	sort.Slice(finalResults, func(i, j int) bool {
-		// Sort by Relative Path, Descending (Z-A)
-		return finalResults[i].RelPath > finalResults[j].RelPath
-	})
+	// Sort results - Removed (Logic is now in traversal order)
+	// Traversal is Post-Order (Depth-First), Sibling A-Z.
+	// This matches user requirement:
+	// 1. Children before Parent (Post-Order)
+	// 2. Siblings A-Z
 
 	return finalResults, nil
 }
@@ -653,8 +653,15 @@ func collectResults(node *Node, results *[]DiffResult, showUnchanged bool) {
 	// But its children are top level.
 
 	if node.Name == "" { // Root
-		for _, child := range node.Children {
-			collectResults(child, results, showUnchanged)
+		// Sort keys for deterministic iteration
+		var names []string
+		for name := range node.Children {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		for _, name := range names {
+			collectResults(node.Children[name], results, showUnchanged)
 		}
 		return
 	}
@@ -719,6 +726,18 @@ func collectResults(node *Node, results *[]DiffResult, showUnchanged bool) {
 
 	// If Mixed, recurse
 	if node.Status == StatusMixed {
+		// Sort keys for deterministic iteration (A-Z Sibling Sort)
+		var names []string
+		for name := range node.Children {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		for _, name := range names {
+			collectResults(node.Children[name], results, showUnchanged)
+		}
+
+		// Post-Order Emission for Mixed/Unchanged Parent
 		if showUnchanged {
 			// Check if this mixed node has unchanged content
 			stats := accumulateStats(node)
@@ -742,9 +761,6 @@ func collectResults(node *Node, results *[]DiffResult, showUnchanged bool) {
 					UnchangedDirCount:  stats.UnchangedDirCount,
 				})
 			}
-		}
-		for _, child := range node.Children {
-			collectResults(child, results, showUnchanged)
 		}
 	}
 }
