@@ -195,9 +195,6 @@ func RunDiff(cfg DiffConfig) error {
 			symbol = "   " // Context line
 		}
 
-		// Construct display path
-		var displayPath string
-
 		fmtRoot := func(r string) string {
 			if r != "" && !strings.HasSuffix(r, string(filepath.Separator)) {
 				return r + string(filepath.Separator)
@@ -205,12 +202,10 @@ func RunDiff(cfg DiffConfig) error {
 			return r
 		}
 
+		displayPath := res.RelPath
 		if res.Status == diff.StatusMove || res.Status == diff.StatusCopy {
 			// [C] [/root/A/ -> /root/B/] relativeA/foo -> relativeB/foo
-			displayPath = fmt.Sprintf("[%s -> %s] %s -> %s", fmtRoot(res.SourceRoot), fmtRoot(res.Root), res.SourceRelPath, res.RelPath)
-		} else {
-			// [*] [/path/to/root/] relative/path
-			displayPath = fmt.Sprintf("[%s] %s", fmtRoot(res.Root), res.RelPath)
+			displayPath = fmt.Sprintf("%s -> %s", res.SourceRelPath, res.RelPath)
 		}
 
 		// Add trailing slash for directories if not present
@@ -249,10 +244,9 @@ func RunDiff(cfg DiffConfig) error {
 				subParts = append(subParts, fmt.Sprintf("%d files", res.UnchangedFileCount))
 			}
 			parts = append(parts, fmt.Sprintf("%s unchanged", strings.Join(subParts, ", ")))
-		}
-
-		if len(parts) > 0 {
 			displayPath = fmt.Sprintf("%s (%s)", displayPath, strings.Join(parts, ", "))
+		} else if len(parts) > 0 {
+			displayPath = fmt.Sprintf("%s (%s in %s)", displayPath, strings.Join(parts, ", "), fmtRoot(res.Root))
 		}
 
 		fmt.Printf("%s %s\n", symbol, displayPath)
