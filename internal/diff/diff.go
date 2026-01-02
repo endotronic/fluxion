@@ -253,19 +253,25 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool, has
 // Returns the status of the node.
 // propagateStatus updates directory statuses based on children.
 // Returns the status of the node.
-func propagateStatus(node *Node) Status {
+// propagateStatus updates directory statuses based on children.
+// Returns the status of the node and a boolean indicating if the node contains any unchanged content (recursively).
+func propagateStatus(node *Node) (Status, bool) {
 	if node.IsFile {
-		return node.Status
+		return node.Status, node.Status == StatusUnchanged
 	}
 
 	// If this node was explicitly detected as Move/Copy (has SourcePath), preserve that status
 	// instead of recalculating from children.
+	// Implicitly, a moved/copied node (that isn't StatusMixed) is treated as "Changed".
+	// However, if it was a Directory Copy, it might contain unchanged files relative to its source?
+	// But in the context of "New vs Old", "Copy" is a change operation.
+	// So we return false for unchanged content (it is a full change).
 	if node.SourcePath != "" {
-		return node.Status
+		return node.Status, false
 	}
 
 	if len(node.Children) == 0 {
-		return StatusUnchanged
+		return StatusUnchanged, true
 	}
 
 	// Check children
@@ -274,11 +280,12 @@ func propagateStatus(node *Node) Status {
 	allRemovedOrMovedSource := true
 	allAddedLike := true // Added, Copy, Move
 
-	hasUnchangedOrMixed := false
 	hasMove := false
 	hasCopy := false
 	hasAdded := false
 	hasModified := false
+
+	hasUnchangedContent := false
 
 	// Track first sources for potential rollup
 	var firstMoveSource string
@@ -292,12 +299,14 @@ func propagateStatus(node *Node) Status {
 	}
 
 	for _, child := range node.Children {
-		s := propagateStatus(child)
+		s, childHasUnchanged := propagateStatus(child)
+
+		if childHasUnchanged {
+			hasUnchangedContent = true
+		}
 
 		if s != StatusUnchanged {
 			allUnchanged = false
-		} else {
-			hasUnchangedOrMixed = true
 		}
 
 		if s != StatusMovedSource {
@@ -332,7 +341,6 @@ func propagateStatus(node *Node) Status {
 		}
 
 		if s == StatusMixed {
-			hasUnchangedOrMixed = true
 			allUnchanged = false
 			allMovedSource = false
 			allRemovedOrMovedSource = false
@@ -346,17 +354,17 @@ func propagateStatus(node *Node) Status {
 
 	if allUnchanged {
 		node.Status = StatusUnchanged
-		return StatusUnchanged
+		return StatusUnchanged, true
 	}
 
 	if allMovedSource {
 		node.Status = StatusMovedSource
-		return StatusMovedSource
+		return StatusMovedSource, false
 	}
 
 	if allRemovedOrMovedSource {
 		node.Status = StatusRemoved
-		return StatusRemoved
+		return StatusRemoved, false
 	}
 
 	// New Rule: If directory is new (HashA empty) and contains only Added-like things (Added, Move, Copy).
@@ -364,24 +372,24 @@ func propagateStatus(node *Node) Status {
 		// 1. Pure additions -> Always added
 		if !hasMove && !hasCopy {
 			node.Status = StatusAdded
-			return StatusAdded
+			return StatusAdded, false
 		}
 		// 2. Mixed/Multiple changes -> Rollup to Added
 		if changeCount > 1 {
 			node.Status = StatusAdded
-			return StatusAdded
+			return StatusAdded, false
 		}
 		// 3. Single Move/Copy -> Fall through to show detail (StatusMixed)
 	}
 
 	// Determine if we should attempt a rollup
-	canRollup := allAddedLike || !hasUnchangedOrMixed || changeCount > 2
+	canRollup := allAddedLike || !hasUnchangedContent || changeCount > 2
 
 	// Refined Prioritization for canRollup:
 	if canRollup {
 		if hasModified {
 			node.Status = StatusModified
-			return StatusModified
+			return StatusModified, hasUnchangedContent
 		}
 		if allAddedLike {
 			// Rule: If we have mixed types of "AddedLike" operations (e.g. Move + Copy),
@@ -400,7 +408,7 @@ func propagateStatus(node *Node) Status {
 
 			if typesFound > 1 {
 				node.Status = StatusModified
-				return StatusModified
+				return StatusModified, hasUnchangedContent
 			}
 
 			// Otherwise, pure type (or single dominating type)
@@ -408,7 +416,7 @@ func propagateStatus(node *Node) Status {
 			if hasMove {
 				if changeCount == 1 {
 					node.Status = StatusMixed
-					return StatusMixed
+					return StatusMixed, hasUnchangedContent
 				}
 				node.Status = StatusMove
 				if firstMoveSource != "" {
@@ -416,19 +424,19 @@ func propagateStatus(node *Node) Status {
 				} else {
 					node.SourcePath = "" // Ensure SourcePath is cleared if not a single source
 				}
-				return StatusMove
+				return StatusMove, false // Move implies pure change
 			}
 			// Added > Copy (per Rollup_Added test)
 			if hasAdded {
 				node.Status = StatusAdded
 				node.SourcePath = "" // Added items don't have a SourcePath
-				return StatusAdded
+				return StatusAdded, false
 			}
 			// Copy last
 			if hasCopy {
 				if changeCount == 1 {
 					node.Status = StatusMixed
-					return StatusMixed
+					return StatusMixed, hasUnchangedContent
 				}
 				node.Status = StatusCopy
 				if firstCopySource != "" {
@@ -436,19 +444,19 @@ func propagateStatus(node *Node) Status {
 				} else {
 					node.SourcePath = "" // Ensure SourcePath is cleared if not a single source
 				}
-				return StatusCopy
+				return StatusCopy, false
 			}
 		}
 		// If canRollup, and we haven't returned yet, it means me have mixed changes (e.g. Added + Removed)
 		// but no Unchanged items preventing rollup. Summary: Modified.
-		if !hasUnchangedOrMixed {
+		if !hasUnchangedContent {
 			node.Status = StatusModified
-			return StatusModified
+			return StatusModified, false
 		}
 	}
 
 	node.Status = StatusMixed
-	return StatusMixed
+	return StatusMixed, hasUnchangedContent
 }
 
 // computeMerkleHashes computes Merkle hash of directory content
