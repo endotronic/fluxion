@@ -33,6 +33,9 @@ type Node struct {
 	HashA string
 	HashB string
 
+	SizeA int64
+	SizeB int64
+
 	// Merkle Hash (computed for dirs) -> reusing HashA/HashB for dirs?
 	// Yes, HashA for Dir is its Merkle Hash in A.
 
@@ -226,9 +229,11 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool, has
 
 	if isA {
 		current.HashA = hash
+		current.SizeA = record.SizeBytes
 		current.Status = StatusRemoved
 	} else {
 		current.HashB = hash
+		current.SizeB = record.SizeBytes
 
 		if current.HashA != "" {
 			// Existed in A
@@ -500,23 +505,27 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 		}
 
 		// Helper to index a hash
-		add := func(m map[string][]string, hash, path string) {
-			if hash != "" {
-				m[hash] = append(m[hash], path)
+		add := func(m map[string][]string, hash, path string, size int64, isFile bool) {
+			if hash == "" {
+				return
 			}
+			if isFile && size == 0 {
+				return
+			}
+			m[hash] = append(m[hash], path)
 		}
 
 		// Only Removed nodes are primary sources for Moves (overwrite/rename)
 		if n.Status == StatusRemoved {
-			add(removedMap, n.HashA, n.Path)
+			add(removedMap, n.HashA, n.Path, n.SizeA, n.IsFile)
 		} else if n.Status == StatusModified {
-			add(modifiedMap, n.HashA, n.Path)
+			add(modifiedMap, n.HashA, n.Path, n.SizeA, n.IsFile)
 		}
 
 		// Any existing node (Removed, Modified, Unchanged) can be source for Copy
 		// (Modified is explicitly tracked in modifiedMap too, but keeping it in existingMap logic for broad copy support)
 		if n.Status != StatusAdded {
-			add(existingMap, n.HashA, n.Path)
+			add(existingMap, n.HashA, n.Path, n.SizeA, n.IsFile)
 		}
 
 		for _, child := range n.Children {
@@ -532,7 +541,9 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 			// Use HashB
 			hash := n.HashB
 			if hash == "" {
-				// Cannot match if no hash
+				return
+			}
+			if n.IsFile && n.SizeB == 0 {
 				return
 			}
 
