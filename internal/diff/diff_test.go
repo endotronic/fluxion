@@ -180,8 +180,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/parent/file2": {SHA1: "hash3", SizeBytes: 100}, // Added
 			},
 			want: []DiffResult{
-				{Path: "/root/parent/file1", Root: "/", RelPath: "root/parent/file1", Status: StatusModified, ModifiedCount: 1},
-				{Path: "/root/parent/file2", Root: "/", RelPath: "root/parent/file2", Status: StatusAdded, AddedCount: 1},
+				{Path: "/root/parent/", Root: "/", RelPath: "root/parent/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1},
 			},
 		},
 		{
@@ -426,8 +425,7 @@ func TestCompareSnapshots(t *testing.T) {
 				"/root/file2": {SHA1: "hash3", SizeBytes: 100}, // Added
 			},
 			want: []DiffResult{
-				{Path: "/root/file1", Root: "/", RelPath: "root/file1", Status: StatusModified, ModifiedCount: 1},
-				{Path: "/root/file2", Root: "/", RelPath: "root/file2", Status: StatusAdded, AddedCount: 1},
+				{Path: "/root/", Root: "/", RelPath: "root/", Status: StatusModified, ModifiedCount: 1, AddedCount: 1},
 			},
 		},
 		{

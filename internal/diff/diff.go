@@ -383,7 +383,7 @@ func propagateStatus(node *Node) (Status, bool) {
 	}
 
 	// Determine if we should attempt a rollup
-	canRollup := !hasUnchangedContent && (allAddedLike || changeCount > 2)
+	canRollup := !hasUnchangedContent && (allAddedLike || changeCount >= 2)
 
 	// Refined Prioritization for canRollup:
 	if canRollup {

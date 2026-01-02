@@ -246,7 +246,12 @@ func RunDiff(cfg DiffConfig) error {
 			parts = append(parts, fmt.Sprintf("%s unchanged", strings.Join(subParts, ", ")))
 			displayPath = fmt.Sprintf("%s (%s)", displayPath, strings.Join(parts, ", "))
 		} else if len(parts) > 0 {
-			displayPath = fmt.Sprintf("%s (%s in %s)", displayPath, strings.Join(parts, ", "), fmtRoot(res.Root))
+			if len(parts) > 1 {
+				// Mixed changes (Added + Removed, etc). Roots might differ. Omit context.
+				displayPath = fmt.Sprintf("%s (%s)", displayPath, strings.Join(parts, ", "))
+			} else {
+				displayPath = fmt.Sprintf("%s (%s in %s)", displayPath, strings.Join(parts, ", "), fmtRoot(res.Root))
+			}
 		}
 
 		fmt.Printf("%s %s\n", symbol, displayPath)

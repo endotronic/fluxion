@@ -140,7 +140,7 @@ func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
 		{
 			// Invariant 2 (Extended): If no files match (Empty Intersection), rollup (IF High Volume).
 			// Directory "swap/" has "a" removed and "b" added.
-			// New Logic: 2 Changes <= 2. Expanded.
+			// New Logic: 2 Changes >= 2. Rollup.
 			name: "Invariant_2_Rollup_Add_Remove_Only",
 			filesA: map[string]models.FileRecord{
 				"/swap/a": {SHA1: "hashA"},
@@ -151,16 +151,11 @@ func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
 			showUnchanged: false,
 			want: []DiffResult{
 				{
-					Path:         "/swap/a",
-					Status:       StatusRemoved,
-					RelPath:      "swap/a",
+					Path:         "/swap/",
+					Status:       StatusModified, // Rolled up!
+					RelPath:      "swap/",
 					RemovedCount: 1,
-				},
-				{
-					Path:       "/swap/b",
-					Status:     StatusAdded,
-					RelPath:    "swap/b",
-					AddedCount: 1,
+					AddedCount:   1,
 				},
 			},
 		},
