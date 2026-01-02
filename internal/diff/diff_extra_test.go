@@ -187,3 +187,61 @@ func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
 		})
 	}
 }
+func TestReproduction_Large_Mixed_Directory(t *testing.T) {
+	// User Scenario:
+	// /docker/ contains:
+	// - Unchanged file (preventing full rollup)
+	// - 5 Removed directories (High change count)
+	// Current Bug: Collapses to [M] /docker/ (StatusModified)
+	// Expected: StatusMixed (Shows children)
+
+	filesA := map[string]models.FileRecord{
+		"/docker/unchanged": {SHA1: "h1"},
+		"/docker/r1/f":      {SHA1: "a"},
+		"/docker/r2/f":      {SHA1: "b"},
+		"/docker/r3/f":      {SHA1: "c"},
+		"/docker/r4/f":      {SHA1: "d"},
+		"/docker/r5/f":      {SHA1: "e"},
+	}
+	filesB := map[string]models.FileRecord{
+		"/docker/unchanged": {SHA1: "h1"},
+		// r1-r5 removed
+	}
+
+	got, err := CompareSnapshots(filesA, filesB, "/", "/", "sha1", false, false, false, nil)
+	if err != nil {
+		t.Fatalf("CompareSnapshots error: %v", err)
+	}
+
+	// We expect multiple results:
+	// - /docker/r1/ (Removed)
+	// ...
+	// - /docker/r5/ (Removed)
+	// Because /docker/ (relPath "docker/") should be StatusMixed and recurse.
+	// If it is StatusModified, we will only see ONE result: /docker/
+
+	// However, note that "unchanged" is not shown (showUnchanged=false).
+
+	foundDockerRoot := false
+	foundRemoved := 0
+
+	for _, res := range got {
+		if res.RelPath == "docker/" {
+			foundDockerRoot = true
+			if res.Status == StatusModified {
+				t.Errorf("FAIL: /docker/ was collapsed to StatusModified. Expected it to be StatusMixed (hidden from results, but children shown).")
+			}
+		}
+		if res.Status == StatusRemoved {
+			foundRemoved++
+		}
+	}
+
+	if foundRemoved < 5 {
+		t.Errorf("Expected at least 5 removed items (r1..r5), got %d. Result dump: %+v", foundRemoved, got)
+	}
+
+	if foundDockerRoot && foundRemoved == 0 {
+		t.Error("Critical: Saw /docker/ root but no children. Over-aggressive rollup occurred.")
+	}
+}

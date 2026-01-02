@@ -436,12 +436,14 @@ func propagateStatus(node *Node) Status {
 		}
 		// If canRollup, and we haven't returned yet, it means me have mixed changes (e.g. Added + Removed)
 		// but no Unchanged items preventing rollup. Summary: Modified.
-		node.Status = StatusModified
-		return StatusModified
+		if !hasUnchangedOrMixed {
+			node.Status = StatusModified
+			return StatusModified
+		}
 	}
 
 	node.Status = StatusMixed
-	return node.Status
+	return StatusMixed
 }
 
 // computeMerkleHashes computes Merkle hash of directory content
