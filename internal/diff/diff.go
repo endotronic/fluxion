@@ -447,9 +447,16 @@ func propagateStatus(node *Node) (Status, bool) {
 				return StatusCopy, false
 			}
 		}
-		// If canRollup, and we haven't returned yet, it means me have mixed changes (e.g. Added + Removed)
+		// If canRollup, and we haven't returned yet, it means we have mixed changes (e.g. Added + Removed)
 		// but no Unchanged items preventing rollup. Summary: Modified.
 		if !hasUnchangedContent {
+			// CRITICAL FIX: If this directory didn't exist in A, it should be Added,
+			// even if it contains "Mixed" things (like Moves/Copies) that confuse allAddedLike.
+			if node.HashA == "" {
+				node.Status = StatusAdded
+				return StatusAdded, false
+			}
+
 			node.Status = StatusModified
 			return StatusModified, false
 		}
