@@ -18,6 +18,7 @@
 ## v0.8.11
 - [ ] sorted dupes by wasted desc, option for limit of results
 - [ ] if copies are disabled, don't show the copies as additions since the hash is not new
+- [ ] import-legacy gets line count while determining root, then uses that to show progress
 
 ## v0.8.10
 - [x] In a diff, when collapsing to a common ancestor, when there is a mix of copies and additions, it should just compress down to additions. Right now the copies make it many lines which is hard to parse. Maybe moves should be included in that - not sure.

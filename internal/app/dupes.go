@@ -16,6 +16,7 @@ type DupesConfig struct {
 	DBPath    string
 	SnapQuery string
 	MinSize   int64
+	Limit     int
 }
 
 func RunDupes(cfg DupesConfig) error {
@@ -107,6 +108,11 @@ func RunDupes(cfg DupesConfig) error {
 		// Descending
 		return sortedGroups[i].Wasted > sortedGroups[j].Wasted
 	})
+
+	// Limit results if requested
+	if cfg.Limit > 0 && len(sortedGroups) > cfg.Limit {
+		sortedGroups = sortedGroups[:cfg.Limit]
+	}
 
 	for _, g := range sortedGroups {
 		fmt.Printf("[DUPE] Size: %s | Count: %d | Wasted: %s\n", util.FormatBytes(g.Size), len(g.Paths), util.FormatBytes(g.Wasted))

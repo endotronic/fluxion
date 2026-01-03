@@ -354,6 +354,8 @@ func runDupes(args []string) {
 	cmd := flag.NewFlagSet("dupes", flag.ExitOnError)
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
 	minSizePtr := cmd.String("min-size", "1MB", "Minimum size (e.g., 10M, 1G) (default 1MB)")
+	limitPtr := cmd.Int("limit", 0, "Limit number of results (0 for all)")
+	cmd.IntVar(limitPtr, "k", 0, "Limit number of results (shorthand)")
 
 	cmd.Parse(args)
 
@@ -378,6 +380,7 @@ func runDupes(args []string) {
 		DBPath:    *dbPtr,
 		SnapQuery: cmd.Arg(0),
 		MinSize:   minSize,
+		Limit:     *limitPtr,
 	}
 
 	if err := app.RunDupes(cfg); err != nil {
