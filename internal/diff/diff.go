@@ -61,8 +61,12 @@ type DiffResult struct {
 	UnchangedDirCount  int64
 }
 
+// FileIterator is a function that calls yield for each file record.
+// It stops if yield returns an error.
+type FileIterator func(yield func(string, models.FileRecord) error) error
+
 // CompareSnapshots computes the diff between two sets of files using a specific hash strategy.
-func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB string, hashType string, noCopies, noMoves, showUnchanged bool, onProgress func(current, total int)) ([]DiffResult, error) {
+func CompareSnapshots(iterA, iterB FileIterator, rootA, rootB string, hashType string, noCopies, noMoves, showUnchanged bool, onProgress func(current int)) ([]DiffResult, error) {
 	root := &Node{
 		Name:     "",
 		Path:     "",
@@ -70,29 +74,36 @@ func CompareSnapshots(filesA, filesB map[string]models.FileRecord, rootA, rootB 
 		Status:   StatusUnchanged,
 	}
 
-	total := len(filesA) + len(filesB)
 	current := 0
 
 	// 1. Insert A
-	for path, record := range filesA {
+	err := iterA(func(path string, record models.FileRecord) error {
 		insertNode(root, path, record, true, hashType)
 		current++
 		if onProgress != nil && current%1000 == 0 {
-			onProgress(current, total)
+			onProgress(current)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	// 2. Insert B
-	for path, record := range filesB {
+	err = iterB(func(path string, record models.FileRecord) error {
 		insertNode(root, path, record, false, hashType)
 		current++
 		if onProgress != nil && current%1000 == 0 {
-			onProgress(current, total)
+			onProgress(current)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	if onProgress != nil {
-		onProgress(total, total)
+		onProgress(current)
 	}
 
 	// 3. Compute Merkle Hashes (Post-Order)

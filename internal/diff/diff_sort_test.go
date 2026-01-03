@@ -108,7 +108,7 @@ func TestDiffSortOrder(t *testing.T) {
 	// home/
 	// root/
 
-	results, err := CompareSnapshots(filesA, filesB, rootA, rootB, "sha1", false, false, true, nil)
+	results, err := CompareSnapshots(mapToIter(filesA), mapToIter(filesB), rootA, rootB, "sha1", false, false, true, nil)
 	assert.NoError(t, err)
 
 	var paths []string

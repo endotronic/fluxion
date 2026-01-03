@@ -20,7 +20,7 @@ func TestZeroByteMoveCopy(t *testing.T) {
 		"root/zero_B": {Filename: "zero_B", SizeBytes: 0, ModTime: time.Now(), SHA1: "da39a3ee5e6b4b0d3255bfef95601890afd80709"},
 	}
 
-	results, err := CompareSnapshots(filesA, filesB, "/root", "/root", "sha1", false, false, false, nil)
+	results, err := CompareSnapshots(mapToIter(filesA), mapToIter(filesB), "/root", "/root", "sha1", false, false, false, nil)
 	assert.NoError(t, err)
 
 	// Expect:
@@ -75,7 +75,7 @@ func TestZeroByteMoveCopy(t *testing.T) {
 		"root/zero_B": {Filename: "zero_B", SizeBytes: 0, ModTime: time.Now(), SHA1: "da39a3ee5e6b4b0d3255bfef95601890afd80709"},
 	}
 
-	results2, err := CompareSnapshots(filesA2, filesB2, "/root", "/root", "sha1", false, false, false, nil)
+	results2, err := CompareSnapshots(mapToIter(filesA2), mapToIter(filesB2), "/root", "/root", "sha1", false, false, false, nil)
 	assert.NoError(t, err)
 
 	hasCopy := false

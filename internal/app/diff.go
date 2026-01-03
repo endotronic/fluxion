@@ -91,69 +91,61 @@ func RunDiff(cfg DiffConfig) error {
 
 	logrus.Infof("Comparing using strategy: %s", strings.ToUpper(strategy))
 
-	// 2. Load Maps with Progress
-	logrus.Infof("Loading Snapshot %d...", oldID)
-	countA, _ := dbStore.GetFileCount(oldID)
-	barA := progressbar.Default(countA)
-	filesA, err := dbStore.GetFilesForSnapshot(oldID, func(c int) { barA.Set(c) })
-	if err != nil {
-		return err
-	}
-
-	logrus.Infof("Loading Snapshot %d...", newID)
-	countB, _ := dbStore.GetFileCount(newID)
-	barB := progressbar.Default(countB)
-	filesB, err := dbStore.GetFilesForSnapshot(newID, func(c int) { barB.Set(c) })
-	if err != nil {
-		return err
-	}
-	logrus.Println()
-
-	// 3. Compare with Progress
-	// Total ops = len(A) + len(B)
+	// 2. Compare (Streaming)
 	logrus.Info("Computing Diff...")
 
-	// Prepare relative maps and apply exclusions
-	relFilesA := make(map[string]models.FileRecord, len(filesA))
-	for k, v := range filesA {
-		if isExcluded(k, snapA.RootPath, cfg.Excludes) {
-			continue
-		}
+	// Setup Progress Bar
+	countA, _ := dbStore.GetFileCount(oldID)
+	countB, _ := dbStore.GetFileCount(newID)
+	totalExpected := countA + countB
+	barDiff := progressbar.Default(totalExpected)
 
-		rel, err := filepath.Rel(snapA.RootPath, k)
-		if err == nil {
-			// Also check relative path against exclusion just in case
-			if isExcluded(rel, "", cfg.Excludes) {
-				continue
-			}
-			relFilesA[rel] = v
-		} else {
-			relFilesA[k] = v // Fallback
+	// Helper to create iterator
+	createIter := func(id int64, rootPath string) diff.FileIterator {
+		return func(yield func(string, models.FileRecord) error) error {
+			return dbStore.IterateFiles(id, func(f models.FileRecord) error {
+				if isExcluded(f.Path, rootPath, cfg.Excludes) {
+					return nil
+				}
+
+				var rel string
+				var err error
+				if strings.HasPrefix(f.Path, rootPath) {
+					rel, err = filepath.Rel(rootPath, f.Path)
+					if err != nil {
+						// Should not happen if prefix matches, but fallback
+						rel = f.Path
+					}
+				} else {
+					// Fallback for paths not under root?
+					rel = f.Path
+				}
+
+				if err == nil {
+					if isExcluded(rel, "", cfg.Excludes) {
+						return nil
+					}
+					return yield(rel, f)
+				}
+				// If error in Rel, default to full path (legacy behavior)
+				return yield(f.Path, f)
+			})
 		}
 	}
 
-	relFilesB := make(map[string]models.FileRecord, len(filesB))
-	for k, v := range filesB {
-		if isExcluded(k, snapB.RootPath, cfg.Excludes) {
-			continue
-		}
-
-		rel, err := filepath.Rel(snapB.RootPath, k)
-		if err == nil {
-			if isExcluded(rel, "", cfg.Excludes) {
-				continue
-			}
-			relFilesB[rel] = v
-		} else {
-			relFilesB[k] = v // Fallback
-		}
-	}
-
-	barDiff := progressbar.Default(int64(len(filesA) + len(filesB)))
-
-	results, err := diff.CompareSnapshots(relFilesA, relFilesB, snapA.RootPath, snapB.RootPath, strategy, cfg.NoCopies, cfg.NoMoves, cfg.ShowUnchanged, func(curr, total int) {
-		barDiff.Set(curr)
-	})
+	results, err := diff.CompareSnapshots(
+		createIter(oldID, snapA.RootPath),
+		createIter(newID, snapB.RootPath),
+		snapA.RootPath,
+		snapB.RootPath,
+		strategy,
+		cfg.NoCopies,
+		cfg.NoMoves,
+		cfg.ShowUnchanged,
+		func(curr int) {
+			barDiff.Set(curr)
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("error during diff: %w", err)
 	}

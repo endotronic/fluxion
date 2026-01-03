@@ -551,7 +551,7 @@ func TestCompareSnapshots(t *testing.T) {
 				strategy = "sha1"
 			}
 
-			got, err := CompareSnapshots(tt.filesA, tt.filesB, rootA, rootB, strategy, tt.noCopies, tt.noMoves, false, nil)
+			got, err := CompareSnapshots(mapToIter(tt.filesA), mapToIter(tt.filesB), rootA, rootB, strategy, tt.noCopies, tt.noMoves, false, nil)
 			if err != nil {
 				t.Errorf("CompareSnapshots() error = %v", err)
 				return
