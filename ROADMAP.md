@@ -15,6 +15,9 @@
     - [ ] Support ZFS snapshot as target (e.g. pool/filesystem@snapshot)
     - [ ] Snapshot all ZFS snapshots for a filesystem (recursive)
 
+## v0.8.11
+- [ ] sorted dupes by wasted desc, option for limit of results
+- [ ] if copies are disabled, don't show the copies as additions since the hash is not new
+
 ## v0.8.10
-- [ ] In a diff, when collapsing to a common ancestor, when there is a mix of copies and additions, it should just compress down to additions. Right now the copies make it many lines which is hard to parse. Maybe moves should be included in that - not sure.
-- [ ]sorted dupes by wasted desc, option for limit of results
+- [x] In a diff, when collapsing to a common ancestor, when there is a mix of copies and additions, it should just compress down to additions. Right now the copies make it many lines which is hard to parse. Maybe moves should be included in that - not sure.
