@@ -7,6 +7,8 @@
 - [ ] first run is detected as being attached to TTY, DB location is default, and no DB exists. Just gives an intro and explains where the DB will be.
 - [ ] if attached to TTY, prompt for DB upgrade. if not, fail.
 - [ ] DB and auto upgrade are top level CLI options
+- [ ] automatic snapshot name should not have the part after the date; it is too long
+- [ ] dupes: if a directory is entirely contained in another, it counts as a folder dupe
 
 ## v0.9.0
 - [ ] command: show largest files, directories
@@ -14,11 +16,15 @@
 - [ ] ZFS tools
     - [ ] Support ZFS snapshot as target (e.g. pool/filesystem@snapshot)
     - [ ] Snapshot all ZFS snapshots for a filesystem (recursive)
+- [ ] import-legacy gets line count while determining root, then uses that to show progress
+
+## v0.8.14
+- [ ] if copies are disabled, don't show the copies as additions since the hash is not new
+
+--- main branch ---
 
 ## v0.8.13
-- [ ] dupes: if a directory is entirely contained in another, it counts as a folder dupe
-- [ ] if copies are disabled, don't show the copies as additions since the hash is not new
-- [ ] import-legacy gets line count while determining root, then uses that to show progress
+- [ ] Add find subcommand
 
 ## v0.8.12
 - [x] Add export-legacy subcommand

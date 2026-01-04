@@ -58,6 +58,8 @@ func main() {
 		runVersion()
 	case "size":
 		runSize(os.Args[2:])
+	case "find":
+		runFind(os.Args[2:])
 	default:
 		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -78,6 +80,7 @@ func printUsage() {
 	fmt.Println("  dupes (z)       Find duplicates within a snapshot")
 	fmt.Println("  merge (m)       Merge multiple snapshots into one")
 	fmt.Println("  size            Report size of a snapshot")
+	fmt.Println("  find            Find files in a snapshot by name pattern")
 	fmt.Println("  version (v)     Print version")
 }
 
@@ -486,6 +489,45 @@ func runSize(args []string) {
 	}
 
 	if err := app.RunSize(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runFind(args []string) {
+	cmd := flag.NewFlagSet("find", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+
+	var caseSensitive bool
+	cmd.BoolVar(&caseSensitive, "case-sensitive", false, "Case sensitive matching")
+	cmd.BoolVar(&caseSensitive, "s", false, "Case sensitive matching (shorthand)")
+
+	var isRegex bool
+	cmd.BoolVar(&isRegex, "regex", false, "Treat pattern as regular expression")
+	cmd.BoolVar(&isRegex, "E", false, "Treat pattern as regular expression (shorthand)")
+
+	cmd.Parse(args)
+
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required")
+		cmd.Usage()
+		os.Exit(1)
+	}
+
+	if cmd.NArg() < 2 {
+		fmt.Println("Usage: fluxion find --db <db> [-s] [-E] <snapshot_id_or_name> <pattern>")
+		os.Exit(1)
+	}
+
+	cfg := app.FindConfig{
+		DBPath:        *dbPtr,
+		SnapQuery:     cmd.Arg(0),
+		Pattern:       cmd.Arg(1),
+		CaseSensitive: caseSensitive,
+		IsRegex:       isRegex,
+	}
+
+	if err := app.RunFind(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
