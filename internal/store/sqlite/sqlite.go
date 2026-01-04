@@ -84,7 +84,7 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 	var snap models.Snapshot
 	query = strings.TrimSpace(query)
 	var hashStr sql.NullString
-	
+
 	row := s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots WHERE id = ?`, query)
 	err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr)
 	if err == nil {
@@ -93,7 +93,7 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 		}
 		return &snap, nil
 	}
-	
+
 	// If failed, try Name
 	row = s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots WHERE name = ? ORDER BY id DESC LIMIT 1`, query)
 	err = row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr)
@@ -103,7 +103,7 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 		}
 		return &snap, nil
 	}
-	
+
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("snapshot not found for query: %s", query)
 	}
@@ -140,7 +140,7 @@ func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
 func (s *SqliteStore) CompleteSnapshot(id int64, finishedAt time.Time) error {
 	// Determine available hashes
 	var hashes []string
-	
+
 	var dum string
 	if err := s.db.QueryRow(`SELECT sha1 FROM files WHERE snapshot_id = ? AND length(sha1) > 0 LIMIT 1`, id).Scan(&dum); err == nil {
 		hashes = append(hashes, "sha1")
@@ -148,7 +148,7 @@ func (s *SqliteStore) CompleteSnapshot(id int64, finishedAt time.Time) error {
 	if err := s.db.QueryRow(`SELECT md5 FROM files WHERE snapshot_id = ? AND length(md5) > 0 LIMIT 1`, id).Scan(&dum); err == nil {
 		hashes = append(hashes, "md5")
 	}
-	
+
 	hashesStr := strings.Join(hashes, ",")
 
 	if finishedAt.IsZero() {
@@ -164,21 +164,21 @@ func (s *SqliteStore) DeleteSnapshot(id int64) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Delete file records
 	_, err = tx.Exec(`DELETE FROM files WHERE snapshot_id = ?`, id)
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf("failed to delete files: %w", err)
 	}
-	
+
 	// Update snapshot status (Soft delete / Tombstone)
 	_, err = tx.Exec(`UPDATE snapshots SET status = ? WHERE id = ?`, models.StatusDeleted, id)
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf("failed to update snapshot status: %w", err)
 	}
-	
+
 	return tx.Commit()
 }
 
@@ -266,6 +266,18 @@ func (s *SqliteStore) GetFileList(snapshotID int64, onProgress func(int)) ([]*mo
 		onProgress(count)
 	}
 	return result, nil
+}
+
+func (s *SqliteStore) HasSizes(snapshotID int64) (bool, error) {
+	var dum int
+	err := s.db.QueryRow(`SELECT 1 FROM files WHERE snapshot_id = ? AND size_bytes > 0 LIMIT 1`, snapshotID).Scan(&dum)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *SqliteStore) GetSnapshotBytes(snapshotID int64) (int64, error) {

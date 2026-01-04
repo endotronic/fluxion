@@ -48,6 +48,8 @@ func main() {
 		runImportDB(os.Args[2:])
 	case "import-legacy":
 		runImportLegacy(os.Args[2:])
+	case "export-legacy":
+		runExportLegacy(os.Args[2:])
 	case "dupes", "z":
 		runDupes(os.Args[2:])
 	case "merge", "m":
@@ -72,6 +74,7 @@ func printUsage() {
 	fmt.Println("  delete (x)      Delete a snapshot")
 	fmt.Println("  import (i)      Import from another DB")
 	fmt.Println("  import-legacy   Import legacy format")
+	fmt.Println("  export-legacy   Export to legacy format")
 	fmt.Println("  dupes (z)       Find duplicates within a snapshot")
 	fmt.Println("  merge (m)       Merge multiple snapshots into one")
 	fmt.Println("  size            Report size of a snapshot")
@@ -307,6 +310,37 @@ func runImportLegacy(args []string) {
 	}
 
 	if err := app.RunImportLegacy(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runExportLegacy(args []string) {
+	cmd := flag.NewFlagSet("export-legacy", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	exportNamePtr := cmd.String("export-name", "", "Name for the export (optional, defaults to snapshot name)")
+
+	cmd.Parse(args)
+
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required.")
+		cmd.Usage()
+		os.Exit(1)
+	}
+
+	if cmd.NArg() < 1 {
+		fmt.Println("Error: snapshot ID/name to export is required as positional argument.")
+		cmd.Usage()
+		os.Exit(1)
+	}
+
+	cfg := app.ExportLegacyConfig{
+		DBPath:     *dbPtr,
+		SnapQuery:  cmd.Arg(0),
+		ExportName: *exportNamePtr,
+	}
+
+	if err := app.RunExportLegacy(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

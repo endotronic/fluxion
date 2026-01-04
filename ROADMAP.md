@@ -15,10 +15,13 @@
     - [ ] Support ZFS snapshot as target (e.g. pool/filesystem@snapshot)
     - [ ] Snapshot all ZFS snapshots for a filesystem (recursive)
 
-## v0.8.12
+## v0.8.13
 - [ ] dupes: if a directory is entirely contained in another, it counts as a folder dupe
 - [ ] if copies are disabled, don't show the copies as additions since the hash is not new
 - [ ] import-legacy gets line count while determining root, then uses that to show progress
+
+## v0.8.12
+- [x] Add export-legacy subcommand
 
 ## v0.8.11
 - [x] memory use optimization for diff
