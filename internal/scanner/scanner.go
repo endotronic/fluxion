@@ -46,6 +46,14 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 	paths := make(chan string, cfg.NumWorkers*consts.ScannerChannelBufferMultiplier)
 	var wg sync.WaitGroup
 
+	// Resolve the root device before starting any workers. Doing it in this order
+	// means an early return here cannot strand goroutines blocked on `paths`.
+	rootDev, err := getDevice(cfg.RootPath)
+	if err != nil {
+		results <- ScanResult{Error: fmt.Errorf("failed to get root device: %w", err)}
+		return
+	}
+
 	// Start workers
 	for i := 0; i < cfg.NumWorkers; i++ {
 		wg.Add(1)
@@ -55,13 +63,6 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 				processFile(path, cfg, results)
 			}
 		}()
-	}
-
-	// Get root device ID
-	rootDev, err := getDevice(cfg.RootPath)
-	if err != nil {
-		results <- ScanResult{Error: fmt.Errorf("failed to get root device: %w", err)}
-		return
 	}
 
 	// Device Cache for Foreign Mounts (Path -> DevID)

@@ -44,18 +44,29 @@ func RunList(cfg ListConfig) error {
 		if s.FinishedAt != nil {
 			finished = s.FinishedAt.Format(time.RFC3339)
 		}
-		
+
+		// A failed snapshot is missing files, and how many is the difference
+		// between "one locked file" and "half the tree unreadable".
+		status := string(s.Status)
+		if s.ErrorCount > 0 {
+			unit := "errors"
+			if s.ErrorCount == 1 {
+				unit = "error"
+			}
+			status = fmt.Sprintf("%s (%d %s)", status, s.ErrorCount, unit)
+		}
+
 		tbl.AddRow([]string{
 			fmt.Sprintf("%d", s.ID),
 			s.Name,
-			string(s.Status),
+			status,
 			s.StartedAt.Format(time.RFC3339),
 			finished,
 			s.ComputerName,
 			s.RootPath,
 		})
 	}
-	
+
 	tbl.Print(os.Stdout)
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -210,6 +211,24 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	var foundBytes atomic.Int64
 	var processedBytes atomic.Int64
 	var processedCount atomic.Int64
+
+	// Files the scan could not read, and batches that failed to write. Both mean
+	// the snapshot is missing data, and a snapshot missing data is dangerous: the
+	// files it never recorded will look like deletions the next time it is
+	// diffed. We count them here and refuse to mark the snapshot completed below.
+	var scanErrors atomic.Int64
+	var writeErrors atomic.Int64
+	var errSamplesMu sync.Mutex
+	var errSamples []string
+	const maxErrSamples = 10
+	recordErr := func(err error) {
+		scanErrors.Add(1)
+		errSamplesMu.Lock()
+		defer errSamplesMu.Unlock()
+		if len(errSamples) < maxErrSamples {
+			errSamples = append(errSamples, err.Error())
+		}
+	}
 	
 	walkDone := make(chan bool)
 	done := make(chan bool)
@@ -336,9 +355,17 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		defer ticker.Stop()
 		
 		walking := true
+
+		// walkDone is closed rather than sent to, so once the walk finishes this
+		// case is permanently ready. Nil the local copy after the first receive:
+		// a nil channel blocks forever, which stops the select from spinning at
+		// full tilt for the whole hashing phase.
+		walkSignal := walkDone
+
 		for {
 			select {
-			case <-walkDone:
+			case <-walkSignal:
+				walkSignal = nil
 				walking = false
 				// Switch to determinate
 				bar.ChangeMax64(foundBytes.Load())
@@ -377,6 +404,12 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			}
 			if err := dbStore.BatchAddFiles(batch); err != nil {
 				logrus.Errorf("Error writing batch: %v", err)
+				writeErrors.Add(1)
+				errSamplesMu.Lock()
+				if len(errSamples) < maxErrSamples {
+					errSamples = append(errSamples, fmt.Sprintf("write batch of %d records: %v", len(batch), err))
+				}
+				errSamplesMu.Unlock()
 			}
 			var sum int64
 			for _, f := range batch {
@@ -394,12 +427,16 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			select {
 			case res, ok := <-results:
 				if !ok {
-					// Channel closed, flush remaining and exit
+					// Channel closed, flush remaining and exit.
+					// Close rather than send: both the UI goroutine and the caller
+					// below wait on this, and a single send would wake only one of
+					// them, leaving the other blocked forever.
 					flush()
-					done <- true
+					close(done)
 					return
 				}
 				if res.Error != nil {
+					recordErr(res.Error)
 					continue
 				}
 				if res.FromResume {
@@ -436,10 +473,34 @@ func RunSnapshot(cfg SnapshotConfig) error {
 
 	<-done
 	
+	totalErrors := scanErrors.Load() + writeErrors.Load()
+	if totalErrors > 0 {
+		errSamplesMu.Lock()
+		samples := append([]string(nil), errSamples...)
+		errSamplesMu.Unlock()
+
+		logrus.Errorf("%d file(s) could not be read or recorded. This snapshot is INCOMPLETE.", totalErrors)
+		for _, e := range samples {
+			logrus.Errorf("  %s", e)
+		}
+		if totalErrors > int64(len(samples)) {
+			logrus.Errorf("  ... and %d more", totalErrors-int64(len(samples)))
+		}
+		logrus.Error("Marking snapshot as failed. Files it did not record would otherwise")
+		logrus.Error("look like deletions when this snapshot is diffed. Fix the cause")
+		logrus.Error("(often permissions - try running as root) and scan again.")
+
+		if err := dbStore.FailSnapshot(snapshotID, time.Time{}, totalErrors); err != nil {
+			fmt.Printf("Error recording snapshot failure: %v\n", err)
+		}
+		logrus.Infof("Finished with errors. Total duration: %v", time.Since(start))
+		return fmt.Errorf("scan incomplete: %d file(s) could not be read or recorded", totalErrors)
+	}
+
 	if err := dbStore.CompleteSnapshot(snapshotID, time.Time{}); err != nil {
 		fmt.Printf("Error completing snapshot: %v\n", err)
 	}
-	
+
 	logrus.Infof("Finished. Total duration: %v", time.Since(start))
 	return nil
 }
