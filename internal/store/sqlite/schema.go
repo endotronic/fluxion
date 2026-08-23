@@ -7,7 +7,7 @@ import (
 )
 
 // Current Schema Version
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 4
 
 // Migrations
 // We define them as function closures so we can execute logic if needed, or just SQL.
@@ -40,7 +40,7 @@ var migrations = []func(*sql.DB) error{
 				FOREIGN KEY(snapshot_id) REFERENCES snapshots(id),
 				CHECK (length(sha1) > 0 OR length(md5) > 0)
 			);`,
-			`CREATE INDEX IF NOT EXISTS idx_files_snapshot_path ON files(snapshot_id, path);`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_files_snapshot_path ON files(snapshot_id, path);`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_name ON snapshots(name);`,
 		}
 		for _, q := range queries {
@@ -53,6 +53,52 @@ var migrations = []func(*sql.DB) error{
 	// Version 2: Add computer_name to snapshots
 	func(db *sql.DB) error {
 		_, err := db.Exec(`ALTER TABLE snapshots ADD COLUMN computer_name TEXT DEFAULT '';`)
+		return err
+	},
+	// Version 3: Record how many files a scan failed to read.
+	//
+	// Before this column existed a scan that could not read part of the tree was
+	// marked "completed" and was indistinguishable from a clean one - which is the
+	// worst failure this tool can have, because the missing files then look deleted.
+	// Snapshots taken before this migration report 0 because the information was
+	// never recorded, not because they were error-free.
+	func(db *sql.DB) error {
+		_, err := db.Exec(`ALTER TABLE snapshots ADD COLUMN error_count INTEGER DEFAULT 0;`)
+		return err
+	},
+	// Version 4: Enforce one row per (snapshot_id, path).
+	//
+	// The index on these columns was never unique, so nothing stopped the same
+	// file being recorded twice in one snapshot. Resuming a scan with --md5
+	// newly enabled did exactly that: records lacking an MD5 were re-hashed and
+	// inserted alongside the originals. Duplicates double-count in `size` and
+	// make `dupes` report a file as a copy of itself.
+	func(db *sql.DB) error {
+		// The de-duplicating DELETE is expensive on a large table, so only run it
+		// when duplicates actually exist. The check rides the existing index.
+		var dup int
+		err := db.QueryRow(
+			`SELECT 1 FROM files GROUP BY snapshot_id, path HAVING COUNT(*) > 1 LIMIT 1`,
+		).Scan(&dup)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+
+		if err == nil {
+			fmt.Println("Removing duplicate file records (keeping the most recent of each)...")
+			if _, err := db.Exec(
+				`DELETE FROM files WHERE id NOT IN (SELECT MAX(id) FROM files GROUP BY snapshot_id, path)`,
+			); err != nil {
+				return err
+			}
+		}
+
+		// Replace the non-unique index rather than adding a second one covering
+		// the same columns.
+		if _, err := db.Exec(`DROP INDEX IF EXISTS idx_files_snapshot_path;`); err != nil {
+			return err
+		}
+		_, err = db.Exec(`CREATE UNIQUE INDEX idx_files_snapshot_path ON files(snapshot_id, path);`)
 		return err
 	},
 }

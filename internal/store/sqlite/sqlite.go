@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type SqliteStore struct {
@@ -18,8 +18,24 @@ type SqliteStore struct {
 // Ensure SqliteStore implements store.Store
 var _ store.Store = (*SqliteStore)(nil)
 
+// buildDSN turns a filesystem path into a SQLite URI with our connection pragmas.
+//
+// The pragmas matter: journal_mode=WAL and synchronous=NORMAL are what make the
+// bulk inserts during `snapshot` tolerable, and busy_timeout stops concurrent
+// readers from failing outright with SQLITE_BUSY.
+func buildDSN(dbPath string) string {
+	// SQLite URI parsing percent-decodes the path, and splits parameters at '?'.
+	// Escape the three characters that would otherwise change the meaning of the
+	// URI so that paths containing them still open the file the caller asked for.
+	r := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
+	return "file:" + r.Replace(dbPath) +
+		"?_pragma=busy_timeout(10000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)"
+}
+
 func NewSqliteStore(dbPath string) (*SqliteStore, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", buildDSN(dbPath))
 	if err != nil {
 		return nil, err
 	}
@@ -36,6 +52,18 @@ func NewSqliteStore(dbPath string) (*SqliteStore, error) {
 	return s, nil
 }
 
+// dbTime renders a time for storage.
+//
+// The driver's default rendering of a time.Time is Go's String() form, which
+// includes a monotonic-clock reading ("m=+0.002088029") and a zone abbreviation
+// that no SQLite date function can parse. We store RFC3339 with nanoseconds
+// instead: unambiguous, sortable as text, and understood by SQLite's own date
+// helpers. Reads stay lenient so databases written by the previous (cgo) driver
+// still load - see the scan path, which accepts several layouts.
+func dbTime(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
 func (s *SqliteStore) Close() error {
 	return s.db.Close()
 }
@@ -43,7 +71,7 @@ func (s *SqliteStore) Close() error {
 func (s *SqliteStore) CreateSnapshot(rootPath, name, computerName string) (*models.Snapshot, error) {
 	now := time.Now()
 	res, err := s.db.Exec(`INSERT INTO snapshots (name, root_path, computer_name, started_at, status) VALUES (?, ?, ?, ?, ?)`,
-		name, rootPath, computerName, now, models.StatusInProgress)
+		name, rootPath, computerName, dbTime(now), models.StatusInProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -62,10 +90,10 @@ func (s *SqliteStore) CreateSnapshot(rootPath, name, computerName string) (*mode
 }
 
 func (s *SqliteStore) GetLastSnapshot(rootPath string) (*models.Snapshot, error) {
-	row := s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots WHERE root_path = ? ORDER BY id DESC LIMIT 1`, rootPath)
+	row := s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes, error_count FROM snapshots WHERE root_path = ? ORDER BY id DESC LIMIT 1`, rootPath)
 	var snap models.Snapshot
 	var hashStr sql.NullString
-	if err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr); err != nil {
+	if err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr, &snap.ErrorCount); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil // No previous snapshot
 		}
@@ -85,8 +113,8 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 	query = strings.TrimSpace(query)
 	var hashStr sql.NullString
 
-	row := s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots WHERE id = ?`, query)
-	err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr)
+	row := s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes, error_count FROM snapshots WHERE id = ?`, query)
+	err := row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr, &snap.ErrorCount)
 	if err == nil {
 		if hashStr.Valid && hashStr.String != "" {
 			snap.Hashes = strings.Split(hashStr.String, ",")
@@ -95,8 +123,8 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 	}
 
 	// If failed, try Name
-	row = s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots WHERE name = ? ORDER BY id DESC LIMIT 1`, query)
-	err = row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr)
+	row = s.db.QueryRow(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes, error_count FROM snapshots WHERE name = ? ORDER BY id DESC LIMIT 1`, query)
+	err = row.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &snap.FinishedAt, &snap.Status, &hashStr, &snap.ErrorCount)
 	if err == nil {
 		if hashStr.Valid && hashStr.String != "" {
 			snap.Hashes = strings.Split(hashStr.String, ",")
@@ -111,7 +139,7 @@ func (s *SqliteStore) FindSnapshot(query string) (*models.Snapshot, error) {
 }
 
 func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
-	rows, err := s.db.Query(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes FROM snapshots ORDER BY finished_at DESC, id DESC`)
+	rows, err := s.db.Query(`SELECT id, name, root_path, computer_name, started_at, finished_at, status, hashes, error_count FROM snapshots ORDER BY finished_at DESC, id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +150,7 @@ func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
 		var snap models.Snapshot
 		var finishedAt sql.NullTime
 		var hashStr sql.NullString
-		if err := rows.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &finishedAt, &snap.Status, &hashStr); err != nil {
+		if err := rows.Scan(&snap.ID, &snap.Name, &snap.RootPath, &snap.ComputerName, &snap.StartedAt, &finishedAt, &snap.Status, &hashStr, &snap.ErrorCount); err != nil {
 			return nil, err
 		}
 		if finishedAt.Valid {
@@ -137,8 +165,8 @@ func (s *SqliteStore) ListSnapshots() ([]*models.Snapshot, error) {
 	return snaps, nil
 }
 
-func (s *SqliteStore) CompleteSnapshot(id int64, finishedAt time.Time) error {
-	// Determine available hashes
+// detectHashes reports which hash algorithms actually made it into the snapshot.
+func (s *SqliteStore) detectHashes(id int64) string {
 	var hashes []string
 
 	var dum string
@@ -149,14 +177,30 @@ func (s *SqliteStore) CompleteSnapshot(id int64, finishedAt time.Time) error {
 		hashes = append(hashes, "md5")
 	}
 
-	hashesStr := strings.Join(hashes, ",")
+	return strings.Join(hashes, ",")
+}
 
+func (s *SqliteStore) finishSnapshot(id int64, status models.SnapshotStatus, finishedAt time.Time, errorCount int64) error {
 	if finishedAt.IsZero() {
 		finishedAt = time.Now()
 	}
-
-	_, err := s.db.Exec(`UPDATE snapshots SET status = ?, finished_at = ?, hashes = ? WHERE id = ?`, models.StatusCompleted, finishedAt, hashesStr, id)
+	_, err := s.db.Exec(
+		`UPDATE snapshots SET status = ?, finished_at = ?, hashes = ?, error_count = ? WHERE id = ?`,
+		status, dbTime(finishedAt), s.detectHashes(id), errorCount, id)
 	return err
+}
+
+func (s *SqliteStore) CompleteSnapshot(id int64, finishedAt time.Time) error {
+	return s.finishSnapshot(id, models.StatusCompleted, finishedAt, 0)
+}
+
+// FailSnapshot closes out a scan that could not read everything it walked.
+//
+// The rows that were collected are kept - a partial snapshot is still useful -
+// but the status marks it as untrustworthy so that a later diff does not present
+// the files it never managed to read as deletions.
+func (s *SqliteStore) FailSnapshot(id int64, finishedAt time.Time, errorCount int64) error {
+	return s.finishSnapshot(id, models.StatusFailed, finishedAt, errorCount)
 }
 
 func (s *SqliteStore) DeleteSnapshot(id int64) error {
@@ -183,8 +227,11 @@ func (s *SqliteStore) DeleteSnapshot(id int64) error {
 }
 
 func (s *SqliteStore) AddFile(f *models.FileRecord) error {
-	_, err := s.db.Exec(`INSERT INTO files (snapshot_id, path, filename, size_bytes, mod_time, sha1, md5) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		f.SnapshotID, f.Path, f.Filename, f.SizeBytes, f.ModTime, f.SHA1, f.MD5)
+	_, err := s.db.Exec(`INSERT INTO files (snapshot_id, path, filename, size_bytes, mod_time, sha1, md5) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(snapshot_id, path) DO UPDATE SET
+			filename=excluded.filename, size_bytes=excluded.size_bytes,
+			mod_time=excluded.mod_time, sha1=excluded.sha1, md5=excluded.md5`,
+		f.SnapshotID, f.Path, f.Filename, f.SizeBytes, dbTime(f.ModTime), f.SHA1, f.MD5)
 	return err
 }
 
@@ -193,7 +240,13 @@ func (s *SqliteStore) BatchAddFiles(files []*models.FileRecord) error {
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT INTO files (snapshot_id, path, filename, size_bytes, mod_time, sha1, md5) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	// Upsert: re-recording a path (a resumed scan that re-hashes files whose
+	// MD5 was missing, for example) must replace the earlier row, not add a
+	// second one for the same file.
+	stmt, err := tx.Prepare(`INSERT INTO files (snapshot_id, path, filename, size_bytes, mod_time, sha1, md5) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(snapshot_id, path) DO UPDATE SET
+			filename=excluded.filename, size_bytes=excluded.size_bytes,
+			mod_time=excluded.mod_time, sha1=excluded.sha1, md5=excluded.md5`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -201,7 +254,7 @@ func (s *SqliteStore) BatchAddFiles(files []*models.FileRecord) error {
 	defer stmt.Close()
 
 	for _, f := range files {
-		_, err := stmt.Exec(f.SnapshotID, f.Path, f.Filename, f.SizeBytes, f.ModTime, f.SHA1, f.MD5)
+		_, err := stmt.Exec(f.SnapshotID, f.Path, f.Filename, f.SizeBytes, dbTime(f.ModTime), f.SHA1, f.MD5)
 		if err != nil {
 			tx.Rollback()
 			return err

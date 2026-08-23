@@ -11,6 +11,7 @@ type Store interface {
 	FindSnapshot(query string) (*models.Snapshot, error)
 	ListSnapshots() ([]*models.Snapshot, error)
 	CompleteSnapshot(id int64, finishedAt time.Time) error
+	FailSnapshot(id int64, finishedAt time.Time, errorCount int64) error
 	AddFile(f *models.FileRecord) error
 	BatchAddFiles(files []*models.FileRecord) error
 	GetFileCount(snapshotID int64) (int64, error)

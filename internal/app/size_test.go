@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -28,10 +29,12 @@ func TestRunSize_Formatted(t *testing.T) {
 	dbPath, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	// 10 files of 100 bytes = 1000 bytes
+	// 10 files of 100 bytes = 1000 bytes.
+	// The paths must be distinct: a snapshot holds one row per path, so ten
+	// records for "/file" would collapse to a single 100-byte file.
 	files := make([]string, 10)
 	for i := 0; i < 10; i++ {
-		files[i] = "/file"
+		files[i] = fmt.Sprintf("/file%d", i)
 	}
 	createDummySnapshot(t, dbPath, "snap1", "", files)
 
@@ -58,10 +61,12 @@ func TestRunSize_TotalBytes(t *testing.T) {
 	dbPath, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	// 10 files of 100 bytes = 1000 bytes
+	// 10 files of 100 bytes = 1000 bytes.
+	// The paths must be distinct: a snapshot holds one row per path, so ten
+	// records for "/file" would collapse to a single 100-byte file.
 	files := make([]string, 10)
 	for i := 0; i < 10; i++ {
-		files[i] = "/file"
+		files[i] = fmt.Sprintf("/file%d", i)
 	}
 	createDummySnapshot(t, dbPath, "snap1", "", files)
 

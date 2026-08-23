@@ -66,12 +66,12 @@ func RunMerge(cfg MergeConfig) error {
 		rootPaths = append(rootPaths, s.RootPath)
 	}
 	rootPath := findLCA(rootPaths)
-	
+
 	hostname := cfg.Hostname
 	if hostname == "" {
 		hostname, _ = os.Hostname()
 	}
-	
+
 	finalName, err := getUniqueSnapshotName(dbStore, cfg.Name, true)
 	if err != nil {
 		return fmt.Errorf("error resolving name: %w", err)
@@ -81,22 +81,28 @@ func RunMerge(cfg MergeConfig) error {
 	if err != nil {
 		return fmt.Errorf("error creating new snapshot: %w", err)
 	}
-	
+
 	logrus.Infof("Created new snapshot ID %d (Name: %s) for merge of %d snapshots.", newSnap.ID, finalName, len(inputSnaps))
 
 	// 3. Merge Files
-	// We want to preserve duplicates. So we list all files from inputs and insert them.
-	
+	//
+	// A snapshot holds one row per path - a path cannot have two contents at the
+	// same instant - so when several inputs contain the same path they collapse
+	// into a single record and the last input listed wins. Collapsing identical
+	// content is silent; collapsing *different* content discards a version, so
+	// that is reported.
+	seenHash := make(map[string]string)
+	var collapsed, conflicts int
+	var conflictSamples []string
+
 	totalImported := 0
-	
+
 	for _, s := range inputSnaps {
 		logrus.Infof("Merging files from snapshot '%s' (ID: %d)...", s.Name, s.ID)
 
 		count, _ := dbStore.GetFileCount(s.ID)
 		bar := progressbar.Default(count, fmt.Sprintf("Reading %s", s.Name))
-		
-		// Use GetFileList to get ALL records (including duplicates within a snapshot if any, though usually unique path)
-		// But definitively duplications ACROSS snapshots.
+
 		files, err := dbStore.GetFileList(s.ID, func(c int) {
 			bar.Set(c)
 		})
@@ -110,6 +116,21 @@ func RunMerge(cfg MergeConfig) error {
 		// Insert into new snapshot
 		batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
 		for _, f := range files {
+			hash := f.SHA1
+			if hash == "" {
+				hash = f.MD5
+			}
+			if prev, ok := seenHash[f.Path]; ok {
+				collapsed++
+				if prev != hash {
+					conflicts++
+					if len(conflictSamples) < 10 {
+						conflictSamples = append(conflictSamples, f.Path)
+					}
+				}
+			}
+			seenHash[f.Path] = hash
+
 			newRec := &models.FileRecord{
 				SnapshotID: newSnap.ID,
 				Path:       f.Path,
@@ -120,7 +141,7 @@ func RunMerge(cfg MergeConfig) error {
 				MD5:        f.MD5,
 			}
 			batch = append(batch, newRec)
-			
+
 			if len(batch) >= consts.DBBatchSize {
 				if err := dbStore.BatchAddFiles(batch); err != nil {
 					logrus.Errorf("Error writing batch: %v", err)
@@ -135,13 +156,27 @@ func RunMerge(cfg MergeConfig) error {
 		}
 		totalImported += len(files)
 	}
-	
+
 	// 4. Complete
 	if err := dbStore.CompleteSnapshot(newSnap.ID, time.Time{}); err != nil {
 		logrus.Errorf("Error completing snapshot: %v", err)
 	}
-	
-	logrus.Infof("Successfully merged %d files into snapshot '%s'.", totalImported, finalName)
+
+	if collapsed > 0 {
+		logrus.Infof("%d record(s) repeated a path already seen in an earlier input and were combined.", collapsed)
+	}
+	if conflicts > 0 {
+		logrus.Warnf("%d path(s) held different content in different inputs; the last input listed won:", conflicts)
+		for _, p := range conflictSamples {
+			logrus.Warnf("  %s", p)
+		}
+		if conflicts > len(conflictSamples) {
+			logrus.Warnf("  ... and %d more", conflicts-len(conflictSamples))
+		}
+	}
+
+	logrus.Infof("Successfully merged %d records into snapshot '%s' (%d unique paths).",
+		totalImported, finalName, len(seenHash))
 
 	return nil
 }
@@ -150,32 +185,32 @@ func findLCA(paths []string) string {
 	if len(paths) == 0 {
 		return "/"
 	}
-	
+
 	common := paths[0]
 	// If it doesn't end in separator and isn't root, ideally we treat it as directory.
 	// But snapshots root_paths are usually directories.
 	// We'll trust the string manipulation.
-	
+
 	for _, p := range paths[1:] {
 		// Shrink common until it is a prefix of p
 		// Note: We must respect path boundaries. "/data" is not a prefix of "/data2".
 		// It must be "/data" prefix of "/data/subdir" OR "/data" == "/data".
-		
+
 		for {
-			if common == p || strings.HasPrefix(p, common + string(os.PathSeparator)) || (common == string(os.PathSeparator) && strings.HasPrefix(p, common)) {
+			if common == p || strings.HasPrefix(p, common+string(os.PathSeparator)) || (common == string(os.PathSeparator) && strings.HasPrefix(p, common)) {
 				break
 			}
-			// Special case: if common is "/" and p doesn't match, well p must be relative? 
+			// Special case: if common is "/" and p doesn't match, well p must be relative?
 			// But assumption is absolute paths.
 			if common == "/" || common == "" || common == "." {
 				common = "/"
 				break
 			}
-			
+
 			common = filepath.Dir(common)
 		}
 	}
-	
+
 	if common == "" {
 		return "/"
 	}

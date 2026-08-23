@@ -21,6 +21,11 @@ type Snapshot struct {
 	StartedAt    time.Time
 	FinishedAt   *time.Time
 	Status       SnapshotStatus
+
+	// ErrorCount is how many files the scan could not read. A snapshot with a
+	// non-zero count is incomplete: anything it is missing will look deleted in a
+	// later diff. Always 0 for snapshots taken before schema version 3.
+	ErrorCount int64
 	
 	// Available Hashes (e.g. "sha1", "md5")
 	Hashes []string
