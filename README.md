@@ -50,6 +50,8 @@ This produces the `fluxion` binary.
     *   `--exclude` (`-e`): Exclude directory from diff (relative to root or absolute). Can be used (multiple times).
     *   `--no-copies`: Do not detect file copies.
     *   `--no-moves`: Do not detect file moves. Use both to treat moves/copies as pure additions/removals.
+    *   `--show-unchanged`: Also print unchanged counts for the directories containing changes.
+    *   `--max-lines <n>`: Cap how many lines a single directory prints (default 25, `0` for no limit). The remainder is summarised as `... N more under dir/`.
 
 *   **`merge` (`m`)**: Merge multiple snapshots into a single new snapshot.
     ```bash

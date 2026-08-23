@@ -15,14 +15,18 @@ import (
 )
 
 type DiffConfig struct {
-	DBPath        string
-	OldQuery      string
-	NewQuery      string
-	UpdateMode    bool
-	Excludes      []string
-	NoCopies      bool
-	NoMoves       bool
-	ShowUnchanged bool
+	DBPath     string
+	OldQuery   string
+	NewQuery   string
+	UpdateMode bool
+
+	// MaxLinesPerDir caps how many lines one directory may contribute; 0 shows
+	// everything. See diff.DefaultMaxLinesPerDir.
+	MaxLinesPerDir int
+	Excludes       []string
+	NoCopies       bool
+	NoMoves        bool
+	ShowUnchanged  bool
 }
 
 func RunDiff(cfg DiffConfig) error {
@@ -136,14 +140,17 @@ func RunDiff(cfg DiffConfig) error {
 	results, err := diff.CompareSnapshots(
 		createIter(oldID, snapA.RootPath),
 		createIter(newID, snapB.RootPath),
-		snapA.RootPath,
-		snapB.RootPath,
-		strategy,
-		cfg.NoCopies,
-		cfg.NoMoves,
-		cfg.ShowUnchanged,
-		func(curr int) {
-			barDiff.Set(curr)
+		diff.Options{
+			RootA:          snapA.RootPath,
+			RootB:          snapB.RootPath,
+			HashType:       strategy,
+			NoCopies:       cfg.NoCopies,
+			NoMoves:        cfg.NoMoves,
+			ShowUnchanged:  cfg.ShowUnchanged,
+			MaxLinesPerDir: cfg.MaxLinesPerDir,
+			OnProgress: func(curr int) {
+				barDiff.Set(curr)
+			},
 		},
 	)
 	if err != nil {
@@ -169,6 +176,18 @@ func RunDiff(cfg DiffConfig) error {
 				continue
 			}
 			// Show: StatusRemoved (Missing in B), StatusModified (Changed in B)
+		}
+
+		// A truncation summary stands in for lines that were not printed, so it
+		// survives update-mode filtering: what it hides may well be exactly what
+		// update mode is looking for.
+		if res.Status == diff.StatusTruncated {
+			where := res.RelPath
+			if where == "." || where == "" {
+				where = fmtRootPath(res.Root)
+			}
+			fmt.Printf("... %d more under %s%s\n", res.HiddenCount, where, countSummary(res))
+			continue
 		}
 
 		symbol := "?"
@@ -249,6 +268,37 @@ func RunDiff(cfg DiffConfig) error {
 		fmt.Printf("%s %s\n", symbol, displayPath)
 	}
 	return nil
+}
+
+func fmtRootPath(r string) string {
+	if r != "" && !strings.HasSuffix(r, string(filepath.Separator)) {
+		return r + string(filepath.Separator)
+	}
+	return r
+}
+
+// countSummary renders the change counts a line carries, in parentheses, or "".
+func countSummary(res diff.DiffResult) string {
+	var parts []string
+	if res.AddedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d added", res.AddedCount))
+	}
+	if res.RemovedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d removed", res.RemovedCount))
+	}
+	if res.ModifiedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d modified", res.ModifiedCount))
+	}
+	if res.CopyCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d copied", res.CopyCount))
+	}
+	if res.MoveCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d moved", res.MoveCount))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
 func isExcluded(path, root string, excludes []string) bool {

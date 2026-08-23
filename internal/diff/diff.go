@@ -19,7 +19,19 @@ const (
 	StatusMove        Status = "Move"
 	StatusCopy        Status = "Copy"
 	StatusMovedSource Status = "MovedSource" // Internal: Source of a move, should be hidden
+
+	// StatusTruncated stands in for the lines a directory did not have the
+	// budget to print. It carries their combined counts, so the content is
+	// summarised rather than dropped.
+	StatusTruncated Status = "Truncated"
 )
+
+// DefaultMaxLinesPerDir is the line budget a single directory gets before the
+// rest of its changes are summarised as one "... and N more" line. A directory
+// that holds unchanged content may not be collapsed - saying "Modified" over a
+// file that did not change is the kind of claim goals.md forbids - so without a
+// budget a half-changed directory of 40,000 files prints 20,000 lines.
+const DefaultMaxLinesPerDir = 25
 
 // Node represents a file or directory in the diff tree
 type Node struct {
@@ -62,16 +74,6 @@ type Node struct {
 	// a rollup. Only a matched status is fixed; a rolled-up one has to be
 	// recomputed whenever the children beneath it change.
 	matched bool
-
-	// moveDest is set on the source of a detected move, pointing at where the
-	// content went. A move's source line is normally suppressed because the
-	// destination line names it - but only if that destination line survives
-	// collapsing, which is what this pointer lets us check.
-	moveDest *Node
-
-	// visible records whether collectResults will emit a line for this node at
-	// its own path, rather than folding it into an ancestor's summary.
-	visible bool
 }
 
 // presentInA reports whether anything at or under this node existed in A.
@@ -100,14 +102,43 @@ type DiffResult struct {
 	MoveCount          int64
 	UnchangedFileCount int64
 	UnchangedDirCount  int64
+
+	// HiddenCount is set only on StatusTruncated: how many lines this one line
+	// stands in for.
+	HiddenCount int64
 }
 
 // FileIterator is a function that calls yield for each file record.
 // It stops if yield returns an error.
 type FileIterator func(yield func(string, models.FileRecord) error) error
 
-// CompareSnapshots computes the diff between two sets of files using a specific hash strategy.
-func CompareSnapshots(iterA, iterB FileIterator, rootA, rootB string, hashType string, noCopies, noMoves, showUnchanged bool, onProgress func(current int)) ([]DiffResult, error) {
+// Options configures a comparison. The zero value is valid except for HashType,
+// and means "compare against no roots, detect moves and copies, print every
+// line" - note that MaxLinesPerDir 0 is unlimited, so callers wanting the
+// default budget must say DefaultMaxLinesPerDir.
+type Options struct {
+	RootA, RootB string
+	HashType     string // "sha1" or "md5"
+
+	NoCopies bool
+	NoMoves  bool
+
+	// ShowUnchanged adds context lines carrying the unchanged counts.
+	ShowUnchanged bool
+
+	// MaxLinesPerDir caps how many lines any one directory contributes before
+	// the remainder is summarised. 0 means no cap.
+	MaxLinesPerDir int
+
+	OnProgress func(current int)
+}
+
+// CompareSnapshots computes the diff between two sets of files.
+func CompareSnapshots(iterA, iterB FileIterator, opts Options) ([]DiffResult, error) {
+	rootA, rootB := opts.RootA, opts.RootB
+	hashType := opts.HashType
+	onProgress := opts.OnProgress
+
 	root := &Node{
 		Name:     "",
 		Path:     "",
@@ -157,31 +188,36 @@ func CompareSnapshots(iterA, iterB FileIterator, rootA, rootB string, hashType s
 	propagateStatus(root)
 
 	// 6. Detect Moves/Copies
-	detectMovesCopies(root, noCopies, noMoves)
+	detectMovesCopies(root, opts.NoCopies, opts.NoMoves)
 
 	// 7. Propagate Status (Pass 2)
 	propagateStatus(root)
 
-	// 8. Work out what will actually be printed, and make sure no move source
-	// is left unmentioned because its destination line got collapsed away.
-	// Reinstating a source changes what its ancestors should say, so this runs
-	// to a fixed point. Each pass only ever turns MovedSource into Removed, so
-	// it converges; the bound is a guard, not an expected limit.
-	for i := 0; i < 8; i++ {
-		markVisible(root, true)
+	// 8. Make sure no move source is left unmentioned because the line that was
+	// supposed to name it got collapsed - or truncated - away. The only reliable
+	// way to know what the output says is to collect it, so this collects a
+	// trial run, demotes any source that run failed to account for, and repeats:
+	// reinstating a source changes what its ancestors say, which changes the
+	// output again. Each pass only ever turns MovedSource into Removed, so it
+	// converges; the bound is a guard, not an expected limit.
+	newCollector := func() *collector {
+		return &collector{showUnchanged: opts.ShowUnchanged, maxLinesPerDir: opts.MaxLinesPerDir}
+	}
 
-		named := make(map[string]bool)
-		namedMoveSources(root, named)
+	c := newCollector()
+	c.collect(root)
 
-		if !reinstateHiddenMoveSources(root, named, false) {
+	for i := 0; i < 32; i++ {
+		if !reinstateHiddenMoveSources(root, accountedPaths(c.results)) {
 			break
 		}
 		propagateStatus(root)
+		c = newCollector()
+		c.collect(root)
 	}
 
-	// 9. Collapse and Collect
-	var results []DiffResult
-	collectResults(root, &results, showUnchanged)
+	// 9. The trial run above is the final output.
+	results := c.results
 
 	// 10. Reconstruct Absolute Paths
 	finalResults := make([]DiffResult, len(results))
@@ -241,6 +277,7 @@ func CompareSnapshots(iterA, iterB FileIterator, rootA, rootB string, hashType s
 			MoveCount:          res.MoveCount,
 			UnchangedFileCount: res.UnchangedFileCount,
 			UnchangedDirCount:  res.UnchangedDirCount,
+			HiddenCount:        res.HiddenCount,
 		}
 	}
 
@@ -793,7 +830,6 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 
 				if src.Status == StatusRemoved {
 					src.Status = StatusMovedSource
-					src.moveDest = n
 				}
 				matched = true
 			} else if n.Status == StatusModified {
@@ -850,46 +886,35 @@ func sortedChildren(n *Node) []*Node {
 	return children
 }
 
-// markVisible records which nodes collectResults will reach. Collection stops
-// descending at any node with a collapsing status, so a node is emitted at its
-// own path only when every ancestor above it is Mixed.
-func markVisible(node *Node, reachable bool) {
-	node.visible = reachable
-	if node.FileTwin != nil {
-		node.FileTwin.visible = reachable
-	}
-
-	// The root is virtual and always recurses; everything else only recurses
-	// when it stays Mixed.
-	childrenReachable := reachable && (node.Name == "" || node.Status == StatusMixed)
-	for _, child := range node.Children {
-		markVisible(child, childrenReachable)
-	}
-}
-
-// namedMoveSources collects the origins that the printed output will actually
-// name. A move's origin is mentioned on the destination's line ("<- old/x"), so
-// this is the set of paths the reader can see something happened to - but only
-// from lines that survive collapsing.
-func namedMoveSources(node *Node, out map[string]bool) {
-	consider := func(n *Node) {
-		if n.visible && n.Status == StatusMove && n.SourcePath != "" {
-			out[strings.TrimSuffix(n.SourcePath, "/")] = true
+// accountedPaths reads a trial run of the output and returns the paths it tells
+// the reader something about - either as the origin of a move ("<- old/x"), or
+// as a line reporting loss, whose counts cover everything beneath it.
+//
+// Deriving this from real output rather than predicting it is what keeps the
+// check honest: collection collapses subtrees *and* enforces the line budget,
+// and both can make a line the reader was supposed to see disappear.
+//
+// Truncation summaries are deliberately not included. A suppressed move source
+// emits no line, so it contributes nothing to a summary's counts - being inside
+// a truncated block is not being mentioned.
+func accountedPaths(results []DiffResult) map[string]bool {
+	out := make(map[string]bool)
+	for _, r := range results {
+		switch r.Status {
+		case StatusMove:
+			if r.SourcePath != "" {
+				out[strings.TrimSuffix(r.SourcePath, "/")] = true
+			}
+		case StatusRemoved, StatusModified:
+			out[strings.TrimSuffix(r.Path, "/")] = true
 		}
 	}
-
-	consider(node)
-	if node.FileTwin != nil {
-		consider(node.FileTwin)
-	}
-	for _, child := range node.Children {
-		namedMoveSources(child, out)
-	}
+	return out
 }
 
-// sourceNamed reports whether path, or a directory containing it, is named as
-// the origin of a move somewhere in the output. Naming the parent is enough:
-// "Move new/ <- old/" accounts for everything that was under old/.
+// sourceNamed reports whether path, or a directory containing it, is accounted
+// for in the output. An ancestor is enough: "Move new/ <- old/" accounts for
+// everything that was under old/, and so does "Removed old/".
 func sourceNamed(named map[string]bool, path string) bool {
 	p := strings.TrimSuffix(path, "/")
 	for p != "" && p != "/" {
@@ -905,14 +930,18 @@ func sourceNamed(named map[string]bool, path string) bool {
 	return false
 }
 
+// reinstateHiddenMoveSources turns a suppressed move source back into a plain
+// removal when nothing in the output would have mentioned it.
+//
 // It reports whether it changed anything, because the change has to be fed back
 // through propagateStatus: an ancestor that rolled up to "Added" while this node
 // was still a suppressed move source is wrong once the node is a removal again.
-func reinstateHiddenMoveSources(node *Node, named map[string]bool, covered bool) bool {
+func reinstateHiddenMoveSources(node *Node, named map[string]bool) bool {
 	if node.Status == StatusMovedSource {
-		if covered || sourceNamed(named, node.Path) {
-			// The destination line names this path, so everything under it is
-			// accounted for and there is nothing to recurse into.
+		if sourceNamed(named, node.Path) {
+			// Something in the output names this path or a directory above it,
+			// so everything under it is accounted for and there is nothing to
+			// recurse into.
 			return false
 		}
 		// Convert the whole subtree, not just this node. Leaving MovedSource
@@ -924,22 +953,13 @@ func reinstateHiddenMoveSources(node *Node, named map[string]bool, covered bool)
 
 	changed := false
 	if twin := node.FileTwin; twin != nil && twin.Status == StatusMovedSource &&
-		!covered && !sourceNamed(named, twin.Path) {
+		!sourceNamed(named, twin.Path) {
 		twin.Status = StatusRemoved
 		changed = true
 	}
 
-	// An emitted line that already reports content leaving this subtree points
-	// the reader here, and its counts include what is below it. Restating one of
-	// those departures as a removal would only inflate the count. The root is
-	// excluded: it is virtual and never prints, so it covers nothing.
-	if node.Name != "" && node.visible &&
-		(node.Status == StatusRemoved || node.Status == StatusModified) {
-		covered = true
-	}
-
 	for _, child := range node.Children {
-		if reinstateHiddenMoveSources(child, named, covered) {
+		if reinstateHiddenMoveSources(child, named) {
 			changed = true
 		}
 	}
@@ -960,55 +980,94 @@ func demoteMovedSources(node *Node) {
 
 // collectResults walks the tree and appends one entry per reportable node,
 // collapsing whole subtrees where a single line says everything.
-func collectResults(node *Node, results *[]DiffResult, showUnchanged bool) {
+// collector walks the finished tree and turns it into the lines the user sees.
+type collector struct {
+	results        []DiffResult
+	showUnchanged  bool
+	maxLinesPerDir int
+}
+
+func (c *collector) collect(node *Node) {
 	if node.Name != "" && node.FileTwin != nil {
 		twin := node.FileTwin
 		// Two lines for one path. Emit whichever half existed in A first, so
 		// the pair reads in the order things happened: the old thing goes, the
 		// new thing arrives.
 		if twin.Status == StatusRemoved || twin.Status == StatusMovedSource {
-			collectNodeResults(twin, results, showUnchanged)
-			collectNodeResults(node, results, showUnchanged)
+			c.collectNode(twin)
+			c.collectNode(node)
 		} else {
-			collectNodeResults(node, results, showUnchanged)
-			collectNodeResults(twin, results, showUnchanged)
+			c.collectNode(node)
+			c.collectNode(twin)
 		}
 		return
 	}
 
-	collectNodeResults(node, results, showUnchanged)
+	c.collectNode(node)
 }
 
-func collectNodeResults(node *Node, results *[]DiffResult, showUnchanged bool) {
-	// Skip root virtual node (unless root itself changed? e.g. everything removed?)
-	// Root has no name/path usually in this implementation ("").
-	// But its children are top level.
+// collectChildren emits the children of a directory that could not be collapsed,
+// then applies the line budget to whatever they produced.
+//
+// The virtual root is exempt. The budget exists to stop one directory drowning
+// the output, not to cap the diff as a whole - and since a truncated directory
+// always emits budget+1 lines, a capped root would immediately re-truncate the
+// summary it had just produced, leaving one "... N more" line for the entire
+// run.
+func (c *collector) collectChildren(node *Node) {
+	start := len(c.results)
+	for _, child := range sortedChildren(node) {
+		c.collect(child)
+	}
+	if node.Name != "" {
+		c.applyBudget(node, start)
+	}
+}
 
+// applyBudget folds everything this directory emitted past maxLinesPerDir into a
+// single summary line. The summary carries the combined counts of the lines it
+// replaces, so nothing is silently dropped - the reader is told how much more is
+// there and what kind it is, and can re-run with a larger budget to see it.
+func (c *collector) applyBudget(node *Node, start int) {
+	if c.maxLinesPerDir <= 0 {
+		return
+	}
+	emitted := c.results[start:]
+	if len(emitted) <= c.maxLinesPerDir {
+		return
+	}
+
+	var sum DiffResult
+	for _, r := range emitted[c.maxLinesPerDir:] {
+		sum.AddedCount += r.AddedCount
+		sum.RemovedCount += r.RemovedCount
+		sum.ModifiedCount += r.ModifiedCount
+		sum.CopyCount += r.CopyCount
+		sum.MoveCount += r.MoveCount
+		sum.UnchangedFileCount += r.UnchangedFileCount
+		sum.UnchangedDirCount += r.UnchangedDirCount
+		// A nested summary already stands in for lines of its own; this one
+		// stands in for those too.
+		sum.HiddenCount += r.HiddenCount
+	}
+	sum.HiddenCount += int64(len(emitted) - c.maxLinesPerDir)
+
+	sum.Path = node.Path + "/"
+	sum.Status = StatusTruncated
+
+	c.results = append(c.results[:start+c.maxLinesPerDir], sum)
+}
+
+func (c *collector) collectNode(node *Node) {
 	if node.Name == "" { // Root
-		// Sort keys for deterministic iteration
-		var names []string
-		for name := range node.Children {
-			names = append(names, name)
-		}
-		sort.Strings(names)
+		c.collectChildren(node)
 
-		for _, name := range names {
-			collectResults(node.Children[name], results, showUnchanged)
-		}
-
-		if showUnchanged {
+		if c.showUnchanged {
 			stats := accumulateStats(node)
 			if stats.UnchangedFileCount > 0 || stats.UnchangedDirCount > 0 {
-				path := "." // Root representation
-				*results = append(*results, DiffResult{
-					Path:               path,
+				c.results = append(c.results, DiffResult{
+					Path:               ".", // Root representation
 					Status:             StatusMixed,
-					SourcePath:         "",
-					AddedCount:         0,
-					RemovedCount:       0,
-					ModifiedCount:      0,
-					CopyCount:          0,
-					MoveCount:          0,
 					UnchangedFileCount: stats.UnchangedFileCount,
 					UnchangedDirCount:  stats.UnchangedDirCount,
 				})
@@ -1040,7 +1099,7 @@ func collectNodeResults(node *Node, results *[]DiffResult, showUnchanged bool) {
 			modified = stats.ModifiedCount
 			copied = stats.CopyCount
 			moved = stats.MoveCount
-			if showUnchanged {
+			if c.showUnchanged {
 				unchangedFiles = stats.UnchangedFileCount
 				unchangedDirs = stats.UnchangedDirCount
 			}
@@ -1060,7 +1119,7 @@ func collectNodeResults(node *Node, results *[]DiffResult, showUnchanged bool) {
 			}
 		}
 
-		*results = append(*results, DiffResult{
+		c.results = append(c.results, DiffResult{
 			Path:               path,
 			Status:             node.Status,
 			SourcePath:         node.SourcePath,
@@ -1077,19 +1136,10 @@ func collectNodeResults(node *Node, results *[]DiffResult, showUnchanged bool) {
 
 	// If Mixed, recurse
 	if node.Status == StatusMixed {
-		// Sort keys for deterministic iteration (A-Z Sibling Sort)
-		var names []string
-		for name := range node.Children {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-
-		for _, name := range names {
-			collectResults(node.Children[name], results, showUnchanged)
-		}
+		c.collectChildren(node)
 
 		// Post-Order Emission for Mixed/Unchanged Parent
-		if showUnchanged {
+		if c.showUnchanged {
 			// Check if this mixed node has unchanged content
 			stats := accumulateStats(node)
 			if stats.UnchangedFileCount > 0 || stats.UnchangedDirCount > 0 {
@@ -1097,17 +1147,12 @@ func collectNodeResults(node *Node, results *[]DiffResult, showUnchanged bool) {
 				if !node.IsFile {
 					path += "/"
 				}
-				*results = append(*results, DiffResult{
+				c.results = append(c.results, DiffResult{
 					Path:       path,
 					Status:     StatusMixed,
 					SourcePath: node.SourcePath,
 					// For Mixed nodes (context), we only report Unchanged counts.
 					// Recursive changes (Added/Removed/etc) are reported by children traversal.
-					AddedCount:         0,
-					RemovedCount:       0,
-					ModifiedCount:      0,
-					CopyCount:          0,
-					MoveCount:          0,
 					UnchangedFileCount: stats.UnchangedFileCount,
 					UnchangedDirCount:  stats.UnchangedDirCount,
 				})

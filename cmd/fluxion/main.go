@@ -9,6 +9,7 @@ import (
 
 	"fluxion/internal/app"
 	"fluxion/internal/consts"
+	"fluxion/internal/diff"
 	"fluxion/internal/util"
 
 	"github.com/sirupsen/logrus"
@@ -235,6 +236,9 @@ func runDiff(args []string) {
 	var showUnchanged bool
 	cmd.BoolVar(&showUnchanged, "show-unchanged", false, "Show unchanged counts for parent directories of changes")
 
+	maxLines := cmd.Int("max-lines", diff.DefaultMaxLinesPerDir,
+		"Maximum lines one directory may print before the rest is summarised as \"... N more\" (0 = no limit)")
+
 	cmd.Parse(args)
 
 	if *dbPtr == "" {
@@ -258,6 +262,8 @@ func runDiff(args []string) {
 		NoCopies:      noCopies,
 		NoMoves:       noMoves,
 		ShowUnchanged: showUnchanged,
+
+		MaxLinesPerDir: *maxLines,
 	}
 
 	if err := app.RunDiff(cfg); err != nil {

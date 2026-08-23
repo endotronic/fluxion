@@ -36,9 +36,7 @@ type Node struct {
     FileTwin   *Node           // the file half of a path that is a dir on the other side
     SourcePath string          // set only for Move/Copy
 
-    matched  bool              // Move/Copy came from content matching, not a rollup
-    moveDest *Node             // on a MovedSource: where the content went
-    visible  bool              // collectResults will emit a line for this node
+    matched bool              // Move/Copy came from content matching, not a rollup
 }
 ```
 
@@ -64,7 +62,8 @@ absent from A. `presentInA()` / `presentInB()` combine the flags with the twin's
 | `Mixed` | directory only: children disagree, do not collapse — recurse |
 | `Move` | in B, content matched a `Removed` node in A; `SourcePath` set |
 | `Copy` | in B, content matched a node still present in A; `SourcePath` set |
-| `MovedSource` | the A-side of a `Move`. Suppressed *if* the output names it (stage 9) |
+| `MovedSource` | the A-side of a `Move`. Suppressed *if* the output names it (stage 8) |
+| `Truncated` | stands in for the lines a directory had no budget to print; carries their counts and `HiddenCount` |
 
 `Mixed` is not a user-visible outcome so much as a *control-flow* signal to
 `collectResults`: "this directory cannot be summarised in one line."
@@ -90,7 +89,9 @@ forces the host to `Mixed` so no ancestor can collapse over it and hide one of t
 
 ## The pipeline
 
-`CompareSnapshots(iterA, iterB, rootA, rootB, hashType, noCopies, noMoves, showUnchanged, onProgress)`
+`CompareSnapshots(iterA, iterB FileIterator, opts Options)` — `Options` carries the two
+roots, the hash type, the `--no-moves`/`--no-copies`/`--show-unchanged` switches, the line
+budget `MaxLinesPerDir`, and the progress callback.
 
 | # | Stage | Function |
 |---|---|---|
@@ -101,8 +102,8 @@ forces the host to `Mixed` so no ancestor can collapse over it and hide one of t
 | 5 | roll child statuses up into directories (**pass 1**) | `propagateStatus` |
 | 6 | match added/modified content against removed/existing | `detectMovesCopies` |
 | 7 | roll up again, now that moves/copies exist (**pass 2**) | `propagateStatus` |
-| 8 | reinstate move sources the output would not mention, to a fixed point | `markVisible` → `reinstateHiddenMoveSources` → `propagateStatus` |
-| 9 | walk the tree emitting collapsed results | `collectResults` |
+| 8 | collect a trial output, reinstate any move source it failed to mention, repeat to a fixed point | `collector.collect` → `accountedPaths` → `reinstateHiddenMoveSources` → `propagateStatus` |
+| 9 | the last trial run *is* the output | `collector` |
 | 10 | turn relative node paths back into absolute paths | inline in `CompareSnapshots` |
 
 Two `propagateStatus` passes are required: `detectMovesCopies` needs directory hashes and
@@ -241,8 +242,8 @@ without this every empty file would "move" to every other. Directories are not e
 
 **Match pass** — for every node (and twin) with `Status == Added` or `Modified`, keyed on
 `HashB` (zero-byte files skipped again):
-1. `removedMap` hit → `Move`, mark the source node `MovedSource`, set its `moveDest`, and
-   **consume** the entry, so N removals can absorb at most N moves.
+1. `removedMap` hit → `Move`, mark the source node `MovedSource`, and **consume** the
+   entry, so N removals can absorb at most N moves.
 2. else, if the node itself is `Modified`, a `modifiedMap` hit → `Move` (the file-swap
    case), also consumed.
 3. else `modifiedMap`, then `existingMap` → `Copy`. Copies are **not consumed** — one
@@ -262,44 +263,56 @@ seeds found real data loss through this path.
 `--no-moves` / `--no-copies` gate the two halves; if both are set the whole stage returns
 immediately.
 
-## Stage 8: visibility and hidden move sources
+## Stage 8: hidden move sources
 
 A `MovedSource` is normally suppressed, on the assumption that the destination's line
 names it (`Move new/x <- old/x`). That assumption breaks when the destination line is
-itself collapsed into an ancestor summary: the source is then mentioned **nowhere**, and a
-file that is gone from B reads as untouched. This is the false-unchanged failure that
-[goals.md](goals.md) ranks worst, and it is what the property test found first.
+itself collapsed into an ancestor summary, or dropped by the line budget: the source is
+then mentioned **nowhere**, and a file that is gone from B reads as untouched. This is the
+false-unchanged failure that [goals.md](goals.md) ranks worst, and it is what the property
+test found first.
 
-The stage is a loop, because reinstating a source changes what its ancestors should say:
+The stage does not try to *predict* what will print. It collects a trial output and asks
+it, then repeats — because reinstating a source changes what its ancestors say, which
+changes the output again:
 
 ```go
-for i := 0; i < 8; i++ {
-    markVisible(root, true)                       // which nodes will actually print
-    named := make(map[string]bool)
-    namedMoveSources(root, named)                 // origins those lines will name
-    if !reinstateHiddenMoveSources(root, named, false) { break }
-    propagateStatus(root)                         // ancestors re-summarise
+c := newCollector()
+c.collect(root)
+
+for i := 0; i < 32; i++ {
+    if !reinstateHiddenMoveSources(root, accountedPaths(c.results)) { break }
+    propagateStatus(root)
+    c = newCollector()
+    c.collect(root)
 }
+results := c.results          // the last trial run is the answer
 ```
 
-- `markVisible` mirrors `collectResults`: recursion continues only through the virtual
-  root and through `Mixed` nodes, so a node is `visible` exactly when a line is emitted at
-  its own path.
-- `namedMoveSources` collects the `SourcePath` of every **visible** `Move` line.
-- A `MovedSource` is left alone if it is covered, and demoted to `Removed` if not. It is
-  covered when either its path or an ancestor of its path is named as an origin — "Move
-  new/ <- old/" accounts for everything that was under `old/` — or when a visible
-  ancestor line already reports loss (`Removed` or `Modified`), whose counts include it.
-  The virtual root is excluded from that second rule: it never prints, so it covers
-  nothing. When a node is covered, its whole subtree is, and recursion stops.
+- `accountedPaths` reads the trial results and returns the paths the output tells the
+  reader something about: the `SourcePath` of every `Move` line, and the path of every
+  `Removed` or `Modified` line (whose counts cover its whole subtree).
+- **Truncation summaries are deliberately excluded.** A suppressed move source emits no
+  line, so it contributes nothing to a summary's counts — being inside a truncated block
+  is not being mentioned.
+- A `MovedSource` is left alone if it, or a directory above it, is in that set — "Move
+  new/ <- old/" accounts for everything that was under `old/`. Otherwise it is demoted to
+  `Removed`. When a node is covered, its whole subtree is, and recursion stops.
 - Demotion applies to the entire subtree (`demoteMovedSources`). Leaving `MovedSource`
   descendants behind would let the next `propagateStatus` roll the node straight back to
   `MovedSource` and undo the fix.
 
 Each pass only ever turns `MovedSource` into `Removed`, so the loop converges; the bound of
-8 is a guard, not an expected limit.
+32 is a guard, not an expected limit.
 
-## Stage 9: `collectResults`
+An earlier version predicted the output with a `markVisible` pass instead. It was wrong
+twice over — once because a `Move` line collapsed into an enclosing `Move` still names the
+source, and again because it knew nothing about the line budget. Deriving the answer from
+real output is what keeps the two mechanisms in step. **Anything new that removes lines
+from the output has to be added to the collector, not applied afterwards**, or this stage
+will not see it.
+
+## Stage 9: the `collector`
 
 A pre-order walk with sorted sibling names, emitting at most one `DiffResult` per subtree.
 A node with a `FileTwin` emits both aspects, A-side first, so a path that changed kind
@@ -317,6 +330,29 @@ produces two adjacent lines.
 `accumulateStats` counts **files** for changed statuses but counts **directories** for
 `UnchangedDirCount` — an asymmetry that is intentional (so output can say "3 directories,
 8 files unchanged") but is not obvious from the code.
+
+### The line budget
+
+A directory holding unchanged content may not be collapsed — a single `Modified dir/` line
+would claim something about files that did not change — so a directory where 20,000 files
+changed and 20,000 did not prints 20,000 lines. `Options.MaxLinesPerDir` (CLI
+`--max-lines`, default `DefaultMaxLinesPerDir` = 25, `0` = unlimited) caps what one
+directory contributes: `applyBudget` keeps the first N lines and replaces the rest with one
+`StatusTruncated` line carrying their combined counts and a `HiddenCount`.
+
+This is the only mechanism in the engine that *removes* information rather than summarising
+it in place, so two things are load-bearing:
+
+- The summary is emitted at the directory's own path and carries the counts of everything
+  it replaced, so no change is silently dropped — the reader is told how much more is there
+  and of what kind, and `--max-lines 0` shows it all.
+- **The virtual root is exempt.** The budget exists to stop one directory drowning the
+  output, not to cap the run. A truncated directory always emits budget+1 lines, so a
+  capped root would immediately re-truncate the summary it had just produced, collapsing
+  the entire diff into a single line.
+
+Truncation interacts with stage 8: dropping a `Move` line un-names its source. That is
+handled by stage 8 running *after* collection rather than before it.
 
 ## Remaining known defects
 
@@ -358,6 +394,10 @@ hand-built scenarios and over generated tree pairs:
   direction-sensitive: an `Added` directory line does not account for a *removed* file);
 - **soundness** — a collapsed `Added` or `Removed` directory line must not contradict the
   snapshots (nothing under an `Added` directory existed in A).
+
+`TestInvariant_RandomTrees_Budgeted` re-runs every generated pair through a line budget of
+1, because truncation is the one mechanism that removes lines on purpose and so the one
+most able to lose a file.
 
 It found five distinct data-loss bugs on first run — 200 of the first 300 generated trees
 lost files — and every one of them was real. Failures print the seed and the whole diff.

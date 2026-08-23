@@ -47,7 +47,7 @@ fluxion s --db <db> [--name N] [--dir D] [--threads N] [--md5]
 
 ```
 fluxion d --db <db> [-u|--update] [-e|--exclude PATH]... 
-         [--no-copies] [--no-moves] [--show-unchanged] <A> <B>
+         [--no-copies] [--no-moves] [--show-unchanged] [--max-lines N] <A> <B>
 ```
 
 `A` and `B` are snapshot IDs or names. Output symbols:
@@ -59,10 +59,21 @@ fluxion d --db <db> [-u|--update] [-e|--exclude PATH]...
 | `[M]` | Modified |
 | `[>]` | Move (with `(from ...)`) |
 | `[C]` | Copy (with `(from ...)`) |
+| `...` | Truncation summary: `... 8 more under many/ (8 modified)` |
 
 - `--update` filters to what A has that B lacks or has differently — it drops `Added`,
-  `Move`, and `Copy` rows. This is the "is it safe to delete A?" mode, and therefore the
-  mode where the data-loss bugs in [known-issues.md](known-issues.md) hurt most.
+  `Move`, and `Copy` rows, keeping `Removed` and `Modified`. Read it as **"what would I
+  still have to copy from A to B?"**, which is the same question as **"is it safe to
+  delete A?"**: if `diff --update A B` prints nothing, every file in A is present in B
+  with identical content, and A's copy is redundant. It is a filter on the *printed
+  rows*, not a different comparison, so the roll-up rules apply to it unchanged.
+  Truncation summaries are never filtered out — what they hide may be exactly what the
+  mode is looking for.
+- `--max-lines N` (default 25, `0` = unlimited) caps how many lines any one directory may
+  print; the rest become a single `... N more under dir/` line carrying their combined
+  counts. It applies per directory, not to the run as a whole — the top level is exempt.
+  A directory containing unchanged files may not be collapsed (that would claim something
+  about files that did not change), so this is the only lever that shortens such a block.
 - `--exclude` is repeatable (`arrayFlags`). **It currently matches by raw
   `strings.HasPrefix` with no path-boundary check**, so `--exclude data` also excludes
   `data2/` and `database/`. Confirmed bug; see [known-issues.md](known-issues.md).

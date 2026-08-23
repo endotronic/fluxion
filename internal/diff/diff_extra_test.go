@@ -26,7 +26,7 @@ func TestCompareSnapshots_ShowUnchanged(t *testing.T) {
 	// - svc2 Removed
 	// - root/ Mixed (Context) with UnchangedDirCount=1 (common), UnchangedFileCount=2 (f3, f4 recursive)
 
-	got, err := CompareSnapshots(mapToIter(filesA), mapToIter(filesB), "/", "/", "sha1", false, false, true, nil)
+	got, err := CompareSnapshots(mapToIter(filesA), mapToIter(filesB), Options{RootA: "/", RootB: "/", HashType: "sha1", NoCopies: false, NoMoves: false, ShowUnchanged: true})
 	if err != nil {
 		t.Fatalf("CompareSnapshots error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestReproduction_Rollup_And_ShowUnchanged(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := CompareSnapshots(mapToIter(tt.filesA), mapToIter(tt.filesB), "/", "/", "sha1", false, false, tt.showUnchanged, nil)
+			got, err := CompareSnapshots(mapToIter(tt.filesA), mapToIter(tt.filesB), Options{RootA: "/", RootB: "/", HashType: "sha1", NoCopies: false, NoMoves: false, ShowUnchanged: tt.showUnchanged})
 			if err != nil {
 				t.Fatalf("CompareSnapshots error: %v", err)
 			}
@@ -219,7 +219,7 @@ func TestReproduction_Large_Mixed_Directory(t *testing.T) {
 		// r1-r5 removed
 	}
 
-	got, err := CompareSnapshots(mapToIter(filesA), mapToIter(filesB), "/", "/", "sha1", false, false, false, nil)
+	got, err := CompareSnapshots(mapToIter(filesA), mapToIter(filesB), Options{RootA: "/", RootB: "/", HashType: "sha1", NoCopies: false, NoMoves: false, ShowUnchanged: false})
 	if err != nil {
 		t.Fatalf("CompareSnapshots error: %v", err)
 	}

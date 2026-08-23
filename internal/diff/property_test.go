@@ -28,9 +28,9 @@ import (
 // what it hides - but only in the right direction. "Added dir/" must never be
 // what accounts for a file that was *removed* from underneath it.
 var collapsing = map[string][]Status{
-	"removed":  {StatusRemoved, StatusModified, StatusMove, StatusMovedSource},
-	"added":    {StatusAdded, StatusModified, StatusMove, StatusCopy},
-	"modified": {StatusModified, StatusAdded, StatusRemoved, StatusMove, StatusCopy},
+	"removed":  {StatusRemoved, StatusModified, StatusMove, StatusMovedSource, StatusTruncated},
+	"added":    {StatusAdded, StatusModified, StatusMove, StatusCopy, StatusTruncated},
+	"modified": {StatusModified, StatusAdded, StatusRemoved, StatusMove, StatusCopy, StatusTruncated},
 }
 
 // accountedFor reports whether some result covers path.
@@ -192,7 +192,14 @@ func rec(path, hash string, size int64) models.FileRecord {
 
 func runDiff(t *testing.T, a, b map[string]models.FileRecord) []DiffResult {
 	t.Helper()
-	results, err := CompareSnapshots(mapToIter(a), mapToIter(b), "/", "/", "sha1", false, false, false, nil)
+	return runDiffBudget(t, a, b, 0)
+}
+
+func runDiffBudget(t *testing.T, a, b map[string]models.FileRecord, maxLines int) []DiffResult {
+	t.Helper()
+	results, err := CompareSnapshots(mapToIter(a), mapToIter(b), Options{
+		RootA: "/", RootB: "/", HashType: "sha1", MaxLinesPerDir: maxLines,
+	})
 	if err != nil {
 		t.Fatalf("CompareSnapshots failed: %v", err)
 	}
@@ -391,4 +398,55 @@ func addIfNoConflict(m map[string]models.FileRecord, path, hash string) bool {
 	}
 	m[path] = rec(path, hash, 10)
 	return true
+}
+
+// TestInvariant_RandomTrees_Budgeted runs the same generated pairs through a
+// deliberately tiny line budget. Truncation is the one mechanism that removes
+// lines from the output on purpose, so it is the one most able to lose a file:
+// the summary line it leaves behind has to account for everything it replaced.
+func TestInvariant_RandomTrees_Budgeted(t *testing.T) {
+	for seed := int64(0); seed < randomTreeSeeds; seed++ {
+		a, b := generateTreePair(rand.New(rand.NewSource(seed)))
+		results := runDiffBudget(t, a, b, 1)
+		name := fmt.Sprintf("seed %d (budget 1)", seed)
+		checkComplete(t, name, a, b, results)
+		checkSound(t, name, a, b, results)
+	}
+}
+
+func TestLineBudget(t *testing.T) {
+	a := map[string]models.FileRecord{}
+	b := map[string]models.FileRecord{}
+	// 10 files under d/, all modified, plus one unchanged file so the directory
+	// cannot legitimately collapse on its own.
+	for i := 0; i < 10; i++ {
+		p := fmt.Sprintf("/d/f%02d", i)
+		a[p] = rec(p, fmt.Sprintf("old%d", i), 10)
+		b[p] = rec(p, fmt.Sprintf("new%d", i), 10)
+	}
+	a["/d/keep"] = rec("/d/keep", "same", 10)
+	b["/d/keep"] = rec("/d/keep", "same", 10)
+
+	if got := len(runDiffBudget(t, a, b, 0)); got != 10 {
+		t.Fatalf("unlimited budget: got %d lines, want 10", got)
+	}
+
+	results := runDiffBudget(t, a, b, 4)
+	if len(results) != 5 {
+		t.Fatalf("budget 4: got %d lines, want 5\n%s", len(results), formatResults(results))
+	}
+
+	last := results[len(results)-1]
+	if last.Status != StatusTruncated {
+		t.Fatalf("budget 4: last line is %s, want %s\n%s", last.Status, StatusTruncated, formatResults(results))
+	}
+	if last.HiddenCount != 6 {
+		t.Errorf("budget 4: HiddenCount = %d, want 6", last.HiddenCount)
+	}
+	if last.ModifiedCount != 6 {
+		t.Errorf("budget 4: ModifiedCount = %d, want 6", last.ModifiedCount)
+	}
+	if last.RelPath != "d/" {
+		t.Errorf("budget 4: summary reported at %q, want %q", last.RelPath, "d/")
+	}
 }
