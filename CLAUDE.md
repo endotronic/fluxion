@@ -27,7 +27,7 @@ from the code alone.
 |---|---|
 | `knowledge/goals.md` | you need to make any judgement call. Defines what the tool is for and the **severity rule** (a false "unchanged/present" answer can lose the user data; over-reporting only costs reading time) that should decide every trade-off. Also covers lineage from the author's Python `dupe-finder` and the explicit non-goals. |
 | `knowledge/architecture.md` | you are adding a command, moving code between packages, or touching output/error handling. Covers the `cmd → app → store/algorithms` layering, the two testability seams (`store.Store`, `diff.FileIterator`), which store methods stream vs. materialise, and the inconsistent stdout/stderr conventions. |
-| `knowledge/diff-algo.md` | **before touching `internal/diff` or `internal/app/diff.go` — this is the highest-risk code in the project.** Explains the unified two-snapshot tree, the seven-stage pipeline, the synthetic "merkle" directory hashes and their two failure modes, the `propagateStatus` rollup precedence, move/copy matching and consumption rules, and the collapsing logic — plus the confirmed edge-case failures. |
+| `knowledge/diff-algo.md` | **before touching `internal/diff` or `internal/app/diff.go` — this is the highest-risk code in the project.** Explains the unified two-snapshot tree, the ten-stage pipeline, `FileTwin` and the presence flags, the synthetic "merkle" directory hashes and their two failure modes, the `propagateStatus` rollup precedence, move/copy matching and consumption rules, the hidden-move-source fixed point, and the collapsing logic — plus what the property test asserts and the defects still open. |
 | `knowledge/dupes-algo.md` | working on `internal/dupes` or `dupes` output. The highest-level-duplicate rule, the `covered` suppression, and why `--min-size` behaves the way it does on directories. |
 | `knowledge/scanner.md` | working on `internal/scanner` or `snapshot`. What is recorded and — more importantly — **what is not** (symlinks, hard-link identity, empty directories, permissions), mount-boundary handling, and resume semantics. |
 | `knowledge/data-model.md` | touching the schema, migrations, or snapshot lifecycle. Table definitions, the missing unique constraint on `(snapshot_id, path)`, how to add a migration safely, and the `in_progress`/`completed`/`failed`/`deleted` states. |
@@ -51,6 +51,8 @@ for intent; `knowledge/` is the source of truth for how things actually behave t
   deliberation as comments — comments that ask questions and weigh options rather than
   describing the code. Treat them as archaeology; the load-bearing reasoning has been
   extracted into `knowledge/`.
-- Existing diff tests are golden-output, case-by-case. Prefer property-style assertions for
-  new ones; the invariant that catches the worst bugs is *every file present in A and
-  absent from B appears somewhere in the output.*
+- `internal/diff/property_test.go` asserts the invariants that catch the worst bugs —
+  *every file that differs is accounted for somewhere in the output*, and *a collapsed
+  Added/Removed directory line does not contradict the snapshots*. **Run it before the
+  golden tests when changing `internal/diff`:** golden output tells you something changed,
+  the property test tells you whether the change loses data.

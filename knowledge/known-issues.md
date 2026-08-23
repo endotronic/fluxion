@@ -8,32 +8,19 @@ Items marked **CONFIRMED** were reproduced with executed tests, not inferred fro
 
 **Everything listed here is still open.** Issues fixed since the review have been removed
 from this file rather than annotated — `git log` is the record of what was fixed. As of
-2026-08-23 that is 1.4, 1.5, 2.3, 3.3, 3.4, and 3.6, plus the cgo modernisation item;
-the numbering of what remains is unchanged so earlier references still resolve.
+2026-08-23 that is 1.1, 1.2, 1.4, 1.5, 2.1, 2.3, 3.3, 3.4, and 3.6, plus the cgo
+modernisation item; the numbering of what remains is unchanged so earlier references still
+resolve.
+
+The diff rewrite that closed 1.1, 1.2 and 2.1 also added `internal/diff/property_test.go`,
+which found and closed four further data-loss bugs that this review had missed entirely —
+all of them cases where a move source or a lost directory went unmentioned after a rollup.
+See [diff-algo.md](diff-algo.md) for what it asserts and why. **Anything you fix in
+`internal/diff` should be fixed against that test, not against the golden output.**
 
 ---
 
 ## Severity 1 — silent data loss in diff output
-
-### 1.1 File → directory transition drops the added files — CONFIRMED
-`x` is a regular file in snapshot A; in B, `x` is a directory containing `y` and `z`.
-Diff reports exactly one line: `Removed /r/x`. **`y` and `z` are never reported.**
-
-`insertNode` marks whichever node is a leaf with `IsFile = true`, so A's pass marks `x` as
-a file. `computeMerkleHashes` and `propagateStatus` both `return` immediately on
-`IsFile`, so B's children — which are present in the tree, hanging off `x` — are never
-visited.
-
-`internal/diff/diff.go:230` (`current.IsFile = true`), `:270`, `:483`.
-
-### 1.2 Directory → file transition drops the removed files — CONFIRMED
-The mirror case, and worse. `x/y` and `x/z` in A; `x` is a regular file in B. Diff reports
-only `Added /r/x`. **Both removals vanish, including under `--update`** — the exact mode
-whose purpose is answering "is it safe to delete the source?".
-
-Same root cause. A real fix needs per-side kind tracking (`IsFileA`/`IsFileB`) rather than
-one `IsFile` flag, plus a decision on how a type change should be *reported* — that
-decision is a product question, not a mechanical one.
 
 ### 1.3 `--exclude` over-excludes on non-boundary prefixes — CONFIRMED
 `isExcluded` (`internal/app/diff.go:254`) tests `strings.HasPrefix(path, excl)` with no
@@ -56,16 +43,6 @@ in `import-legacy`'s root autodetection (`internal/app/import.go`).
 ---
 
 ## Severity 2 — wrong or unstable results
-
-### 2.1 Move/copy source attribution is nondeterministic — CONFIRMED
-`detectMovesCopies`'s `index` closure walks `n.Children` (a Go map) in randomised order,
-while its `match` closure explicitly sorts. When several candidate sources share a hash,
-`paths[0]` is arbitrary. Measured: **200 runs over identical input reported 4 different
-sources** (`/r/s1/` 133×, `/r/s2/` 27×, `/r/s3/` 18×, `/r/s4/` 22×).
-
-Two runs of `fluxion diff` on the same DB can print different `(from ...)` paths. Fix: sort
-each `map[string][]string` bucket after indexing — cheap, and yields the explainable rule
-"lexicographically first source wins". `internal/diff/diff.go:557`.
 
 ### 2.2 Directory hashes are not injective (collision) — CONFIRMED
 `computeMerkleHashes` joins `child.Name + ":" + child.Hash` with `,` and does not escape
