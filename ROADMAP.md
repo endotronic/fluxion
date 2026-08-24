@@ -21,6 +21,13 @@
   can already be scanned today as an ordinary tree.
     - [ ] ~~Support ZFS snapshot as target (e.g. pool/filesystem@snapshot)~~
     - [ ] ~~Snapshot all ZFS snapshots for a filesystem (recursive)~~
+- [ ] `coverage` command: "is every file in A present by content anywhere in B", answered by
+  merge-joining two hash-sorted streams with no diff tree — needs an index on
+  `(sha1, snapshot_id)`. See `knowledge/diff-memory.md`; this is the cheap unblock for the
+  fleet's multi-terabyte delete decisions
+- [ ] external/streaming diff engine so `diff` fits in 1 GB regardless of tree size —
+  six-phase plan in `knowledge/diff-memory.md`, starting with fixed-width digests
+  (issues 2.2/3.1) and `--engine auto|memory|external`
 - [ ] metadata-only scan mode (no hashing) so a 185T fleet can be triaged by size+name
   first and hashed only where trees actually overlap — blocked by the
   `CHECK (length(sha1) > 0 OR length(md5) > 0)` constraint on `files`

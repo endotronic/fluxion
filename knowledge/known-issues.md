@@ -83,6 +83,11 @@ The store side streams (that was ROADMAP 0.8.11's "memory use optimization"), bu
 whole unified tree is materialised. A 10M-file tree would want ~10 GiB. 3.1 is the largest
 single component.
 
+**This is the issue that stalled the project.** The author reported needing ~200 GB of
+swap to diff real snapshots, which puts the working set at roughly 100-200M nodes. It is
+severity 3 only by the numbering here; in practice it is what blocks the tool from being
+used at all. The plan to fix it is [diff-memory.md](diff-memory.md).
+
 ### 3.5 `dupes`, `merge`, and `import` materialise whole snapshots
 `GetFilesForSnapshot` / `GetFileList` load every row into a map or slice. `merge` only ever
 iterates its input and could stream trivially. `dupes` cannot without restructuring its
