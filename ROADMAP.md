@@ -21,10 +21,10 @@
   can already be scanned today as an ordinary tree.
     - [ ] ~~Support ZFS snapshot as target (e.g. pool/filesystem@snapshot)~~
     - [ ] ~~Snapshot all ZFS snapshots for a filesystem (recursive)~~
-- [ ] `coverage` command: "is every file in A present by content anywhere in B", answered by
-  merge-joining two hash-sorted streams with no diff tree — needs an index on
-  `(sha1, snapshot_id)`. See `knowledge/diff-memory.md`; this is the cheap unblock for the
-  fleet's multi-terabyte delete decisions
+- [x] `coverage` command: "is every file in A present by content anywhere in B", answered
+  without a diff tree by a SQL semi-join over partial indexes on `(sha1, snapshot_id)` and
+  `(md5, snapshot_id)` (schema v5). Union of multiple keepers, exit 2 when something would
+  be lost. Measured at 1.3 MiB of heap over 4M file rows. See `knowledge/cli.md`
 - [ ] external/streaming diff engine so `diff` fits in 1 GB regardless of tree size —
   six-phase plan in `knowledge/diff-memory.md`, starting with fixed-width digests
   (issues 2.2/3.1) and `--engine auto|memory|external`

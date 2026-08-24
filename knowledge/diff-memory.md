@@ -184,7 +184,18 @@ Note that ~40 GB of temp space is itself a real constraint on a fleet with 8.11T
 spread across pools at 94–96%. The temp directory must be configurable
 (`--temp-dir`), and the engine should refuse to start rather than fill a pool.
 
-## The shortcut worth taking first
+## The shortcut worth taking first — BUILT (2026-08-23)
+
+**This is now the `coverage` command.** What follows is the reasoning that produced it,
+kept because it is the argument for why the six phases above are still deferred. For how
+to use it see [cli.md](cli.md); the schema change is migration 5 in
+[data-model.md](data-model.md).
+
+It landed as a SQL semi-join rather than the merge-join described below — the partial
+index makes SQLite do the streaming — and it measured **1.3 MiB of peak heap over 4M file
+rows** (2M per side, 200k uncovered, 21.9s, 956 MiB database). Flat, not merely bounded:
+nothing accumulates per row. The index cost 2 partial indexes rather than the 10 GB
+estimated here, because it only covers rows with a non-empty hash.
 
 Before any of the above: **the fleet's actual question does not need the diff tree at
 all.**
@@ -207,7 +218,9 @@ not what stands between the author and the disk space.
 
 Caveats to state whenever this command is used: it ignores paths entirely (a tree could be
 "covered" while being unrecognisably reorganised), it inherits SHA-1's collision
-properties, and it says nothing about which side is newer.
+properties, and it says nothing about which side is newer. As built it also counts a file
+with no comparable hash as *not* covered, which is the direction [goals.md](goals.md)
+requires.
 
 ## Before building any of it: measure
 

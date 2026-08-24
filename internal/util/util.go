@@ -70,3 +70,34 @@ func FormatBytes(bytes int64) string {
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
+
+// Comma renders a count with thousands separators. File counts in this tool run
+// to eight digits, and an unseparated one is unreadable.
+func Comma(n int64) string {
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		if neg {
+			return "-" + s
+		}
+		return s
+	}
+
+	var b strings.Builder
+	if neg {
+		b.WriteByte('-')
+	}
+	lead := len(s) % 3
+	if lead == 0 {
+		lead = 3
+	}
+	b.WriteString(s[:lead])
+	for i := lead; i < len(s); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}

@@ -9,7 +9,9 @@ at 94–96% full, including multi-terabyte datasets named `deprecated`, `copy`, 
 that are *presumed* redundant. Fluxion is the thing that has to prove a tree is safe to
 destroy before it gets destroyed. Read `knowledge/fleet.md` — it is the context behind
 most priority calls, and it is why the severity rule in `knowledge/goals.md` is not
-theoretical.
+theoretical. The command built for that job is `coverage` (not `diff`): it compares
+content only, ignores paths, runs in flat memory, and exits 2 when something would be
+lost.
 
 Go 1.25.5, module `fluxion` (imports are `fluxion/internal/...`). **Pure Go — no C
 compiler needed**; the SQLite driver is `modernc.org/sqlite`. It was `mattn/go-sqlite3`
@@ -36,7 +38,7 @@ from the code alone.
 | `knowledge/fleet.md` | **read this early — it is why the project matters right now.** The author's real target: ~185T across four ZFS hosts at 94–96% full, with multi-terabyte trees named `deprecated`/`copy`/`backup` that are *presumed* deletable and need Fluxion to prove it. Covers the fleet inventory, the sibling planning project in `../scratch`, how to scan ZFS safely, and **why per-snapshot ZFS scanning is deliberately not being built**. |
 | `knowledge/architecture.md` | you are adding a command, moving code between packages, or touching output/error handling. Covers the `cmd → app → store/algorithms` layering, the two testability seams (`store.Store`, `diff.FileIterator`), which store methods stream vs. materialise, and the inconsistent stdout/stderr conventions. |
 | `knowledge/diff-algo.md` | **before touching `internal/diff` or `internal/app/diff.go` — this is the highest-risk code in the project.** Explains the unified two-snapshot tree, the ten-stage pipeline, `FileTwin` and the presence flags, the synthetic "merkle" directory hashes and their two failure modes, the `propagateStatus` rollup precedence, move/copy matching and consumption rules, the hidden-move-source fixed point, and the collapsing logic — plus what the property test asserts and the defects still open. |
-| `knowledge/diff-memory.md` | `diff` runs out of RAM, or you are touching how the tree is built or held. Records where the measured ~1 KiB/node goes, why compaction alone cannot reach a 1 GB ceiling, and the six-phase plan to replace the in-memory tree with a DFS stream plus external sorts — including the much cheaper content-coverage shortcut that answers the author's actual question without a diff tree. |
+| `knowledge/diff-memory.md` | `diff` runs out of RAM, or you are touching how the tree is built or held. Records where the measured ~1 KiB/node goes, why compaction alone cannot reach a 1 GB ceiling, and the six-phase plan to replace the in-memory tree with a DFS stream plus external sorts — including why the `coverage` command was built first instead. |
 | `knowledge/dupes-algo.md` | working on `internal/dupes` or `dupes` output. The highest-level-duplicate rule, the `covered` suppression, and why `--min-size` behaves the way it does on directories. |
 | `knowledge/scanner.md` | working on `internal/scanner` or `snapshot`. What is recorded and — more importantly — **what is not** (symlinks, hard-link identity, empty directories, permissions), mount-boundary handling, and resume semantics. |
 | `knowledge/data-model.md` | touching the schema, migrations, or snapshot lifecycle. Table definitions, the missing unique constraint on `(snapshot_id, path)`, how to add a migration safely, and the `in_progress`/`completed`/`failed`/`deleted` states. |

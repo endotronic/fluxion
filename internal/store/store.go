@@ -21,6 +21,15 @@ type Store interface {
 	GetFileList(snapshotID int64, onProgress func(int)) ([]*models.FileRecord, error)
 	HasSizes(snapshotID int64) (bool, error)
 	GetSnapshotBytes(snapshotID int64) (int64, error)
+
+	// SnapshotTotals counts the files at or above minSize and their bytes.
+	SnapshotTotals(snapshotID int64, minSize int64) (count int64, bytes int64, err error)
+
+	// IterateUncovered streams, in path order, the files of candidateID whose
+	// content is absent from every one of keeperIDs. Files with no hash of the
+	// requested type are yielded as well, with an empty hash: they cannot be
+	// compared and must never be reported as covered.
+	IterateUncovered(candidateID int64, keeperIDs []int64, hashType string, minSize int64, onFile func(models.FileRecord) error) error
 	DeleteSnapshot(id int64) error
 	Close() error
 }

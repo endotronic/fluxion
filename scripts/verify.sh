@@ -98,7 +98,48 @@ if [[ "$DIFF_EXCL" != *"[+] "*"safe_dir.txt"* ]]; then
     exit 1
 fi
 
+# Test Coverage — the delete predicate. Content-only, path-insensitive, and the exit
+# status is the answer, so it is checked here rather than just the output text.
+echo "Testing Coverage..."
+COV_DIR="${TEST_DIR}_cov"
+rm -rf "$COV_DIR"
+mkdir -p "$COV_DIR/somewhere/else"
+# Same content as two files in TEST_DIR, deliberately at unrelated paths.
+cp "$TEST_DIR/file1.txt" "$COV_DIR/somewhere/else/renamed_1.dat"
+cp "$TEST_DIR/safe_dir.txt" "$COV_DIR/renamed_2.dat"
+./fluxion s --db "$DB_FILE" --name "CovKeeper" --dir "$COV_DIR" > /dev/null
+
+# Every file of CovKeeper exists by content in ExcludeTest, at different paths. Exit 0.
+if ! ./fluxion coverage --db "$DB_FILE" "CovKeeper" "ExcludeTest" > /dev/null; then
+    echo "Error: Coverage reported a loss for content that is present at another path."
+    exit 1
+fi
+
+# Add one file that exists nowhere else. Must be reported, and must exit 2.
+echo "only copy in the world" > "$COV_DIR/unique.txt"
+./fluxion s --db "$DB_FILE" --name "CovUnique" --dir "$COV_DIR" > /dev/null
+set +e
+COV_OUT=$(./fluxion coverage --db "$DB_FILE" "CovUnique" "ExcludeTest")
+COV_RC=$?
+set -e
+echo "$COV_OUT"
+
+if [[ "$COV_RC" -ne 2 ]]; then
+    echo "Error: Coverage exited $COV_RC, expected 2 for an uncovered file."
+    exit 1
+fi
+
+if [[ "$COV_OUT" != *"unique.txt"* ]]; then
+    echo "Error: Coverage did not name the file that would be lost."
+    exit 1
+fi
+
+if [[ "$COV_OUT" == *"renamed_1.dat"* ]]; then
+    echo "Error: Coverage reported a file whose content is present at another path."
+    exit 1
+fi
+
 # Cleanup
-rm -rf "$TEST_DIR" "${TEST_DIR}_moved" "$DB_FILE"
+rm -rf "$TEST_DIR" "${TEST_DIR}_moved" "$COV_DIR" "$DB_FILE"
 echo
 echo "Verification passed!"

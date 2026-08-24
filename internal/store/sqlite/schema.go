@@ -7,7 +7,7 @@ import (
 )
 
 // Current Schema Version
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // Migrations
 // We define them as function closures so we can execute logic if needed, or just SQL.
@@ -100,6 +100,31 @@ var migrations = []func(*sql.DB) error{
 		}
 		_, err = db.Exec(`CREATE UNIQUE INDEX idx_files_snapshot_path ON files(snapshot_id, path);`)
 		return err
+	},
+	// Version 5: Index content hashes, so "is this file's content present in
+	// some other snapshot?" is a lookup rather than a table scan.
+	//
+	// This is what makes `coverage` answer the question the tool exists for -
+	// "is it safe to delete this copy?" - in bounded memory. Without it the
+	// semi-join degrades to a full scan of `files` per candidate row, which on
+	// a fleet-sized database never finishes.
+	//
+	// Both indexes are partial. A snapshot carries SHA-1 or MD5, rarely both
+	// (legacy `dupe-finder` imports are MD5-only, see goals.md), so the index
+	// for the algorithm a database does not use costs nothing but its schema
+	// entry. snapshot_id is the second column so that restricting to a set of
+	// keeper snapshots is served by the same index.
+	func(db *sql.DB) error {
+		queries := []string{
+			`CREATE INDEX IF NOT EXISTS idx_files_sha1 ON files(sha1, snapshot_id) WHERE sha1 != '';`,
+			`CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5, snapshot_id) WHERE md5 != '';`,
+		}
+		for _, q := range queries {
+			if _, err := db.Exec(q); err != nil {
+				return err
+			}
+		}
+		return nil
 	},
 }
 

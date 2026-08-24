@@ -64,8 +64,23 @@ and `idx_snapshots_name ON snapshots(name)` (unique).
 ## Migrations
 
 `internal/store/sqlite/schema.go`. `migrations` is an ordered `[]func(*sql.DB) error`;
-`CurrentSchemaVersion = 4`. `migrations[i]` upgrades version `i` → `i+1`, and the version
+`CurrentSchemaVersion = 5`. `migrations[i]` upgrades version `i` → `i+1`, and the version
 is written to `db_metadata` after each step.
+
+Version 5 (2026-08-23) added two **partial** indexes on the content hashes:
+
+```sql
+CREATE INDEX idx_files_sha1 ON files(sha1, snapshot_id) WHERE sha1 != '';
+CREATE INDEX idx_files_md5  ON files(md5,  snapshot_id) WHERE md5  != '';
+```
+
+They exist for `coverage` (`sqlite/coverage.go`), which asks "does this content appear in
+any of these other snapshots?" once per candidate file. With the index that is a covering
+lookup; without it, a table scan per file. The `WHERE ... != ''` clause both keeps the
+index off the many empty-hash rows and is what the query must repeat (`g.sha1 != ''`) for
+SQLite to prove the partial index applies — see the comment in `coverage.go`. The measured
+plan on 4M rows is `SEARCH f USING INDEX idx_files_snapshot_path` + `SEARCH g USING
+COVERING INDEX idx_files_sha1`, with no temp b-tree.
 
 Special case on open: if `schema_version` is absent but a `snapshots` table exists, the DB
 is assumed to be a pre-metadata legacy database and is stamped as **version 1** without

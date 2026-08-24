@@ -88,6 +88,12 @@ swap to diff real snapshots, which puts the working set at roughly 100-200M node
 severity 3 only by the numbering here; in practice it is what blocks the tool from being
 used at all. The plan to fix it is [diff-memory.md](diff-memory.md).
 
+Still open, but no longer blocking the fleet work: the `coverage` command (2026-08-23)
+answers *"is it safe to delete this?"* without building the tree at all, in flat memory.
+Reach for it whenever the question is a delete decision; `diff` remains the only way to
+ask what changed and where it went, and remains unusable at fleet scale until this is
+fixed.
+
 ### 3.5 `dupes`, `merge`, and `import` materialise whole snapshots
 `GetFilesForSnapshot` / `GetFileList` load every row into a map or slice. `merge` only ever
 iterates its input and could stream trivially. `dupes` cannot without restructuring its

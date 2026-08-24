@@ -61,6 +61,8 @@ func main() {
 		runSize(os.Args[2:])
 	case "find":
 		runFind(os.Args[2:])
+	case "coverage", "c":
+		runCoverage(os.Args[2:])
 	default:
 		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -82,6 +84,7 @@ func printUsage() {
 	fmt.Println("  merge (m)       Merge multiple snapshots into one")
 	fmt.Println("  size            Report size of a snapshot")
 	fmt.Println("  find            Find files in a snapshot by name pattern")
+	fmt.Println("  coverage (c)    Check every file of one snapshot exists, by content, in others")
 	fmt.Println("  version (v)     Print version")
 }
 
@@ -536,5 +539,56 @@ func runFind(args []string) {
 	if err := app.RunFind(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// runCoverage answers "is it safe to delete this?" without building a diff tree.
+//
+// Exit status is meaningful here in a way it is not for `diff`: 0 means fully
+// covered, 2 means something would be lost. That makes it usable as a shell
+// predicate in front of an actual destroy.
+func runCoverage(args []string) {
+	cmd := flag.NewFlagSet("coverage", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	minSizePtr := cmd.String("min-size", "0", "Skip files smaller than this (e.g. 1M); they are not checked and not counted as covered")
+	limitPtr := cmd.Int("limit", app.DefaultCoverageLimit, "Maximum entries to list; totals are always complete (0 = list all)")
+	byDirPtr := cmd.Bool("by-dir", false, "List one line per containing directory instead of one per file")
+
+	var excludes arrayFlags
+	cmd.Var(&excludes, "exclude", "Path to exclude (can be repeated)")
+
+	cmd.Parse(args)
+
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required")
+		cmd.Usage()
+		os.Exit(1)
+	}
+	if cmd.NArg() < 2 {
+		fmt.Println("Usage: fluxion coverage --db <db> <snapshot-to-delete> <snapshot-to-keep> [more-to-keep...]")
+		os.Exit(1)
+	}
+
+	minSize, err := util.ParseSize(*minSizePtr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid --min-size: %v\n", err)
+		os.Exit(1)
+	}
+
+	res, err := app.RunCoverage(app.CoverageConfig{
+		DBPath:         *dbPtr,
+		CandidateQuery: cmd.Arg(0),
+		KeeperQueries:  cmd.Args()[1:],
+		MinSize:        minSize,
+		Limit:          *limitPtr,
+		ByDir:          *byDirPtr,
+		Excludes:       excludes,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if !res.Covered() {
+		os.Exit(2)
 	}
 }

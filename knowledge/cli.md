@@ -23,6 +23,7 @@ an open v1.0 roadmap item.
 | `export-legacy` | — | write `dupe-finder` flat files |
 | `size` | — | total bytes of a snapshot |
 | `find` | — | search a snapshot by filename |
+| `coverage` | `c` | is every file of one snapshot present, by content, in others? |
 | `version` | `v` | print `consts.Version` |
 
 ## snapshot
@@ -100,6 +101,48 @@ Glob by default (`filepath.Match` semantics), regex with `-E`. Globs get a SQL `
 prefilter in `sqlite/search.go` before Go-side verification; regex matching happens
 entirely in Go. Note: `--case-sensitive` is **ignored in regex mode** — the pattern is
 compiled as given, with no `(?i)`.
+
+## coverage
+
+```
+fluxion c --db <db> [--min-size 1M] [--limit N] [--by-dir]
+         [-e|--exclude PATH]... <candidate> <keeper>...
+```
+
+**The delete predicate.** Answers "if I destroy `<candidate>`, is every byte of it still
+somewhere in `<keeper>...`?" — the question the tool exists for, and the reason it is a
+separate command from `diff --update`: it is answered by a SQL semi-join in O(1) memory,
+with no unified tree, no merkle hashes, and no move/copy matching. See
+[fleet.md](fleet.md) for the job it was built for and
+[diff-memory.md](diff-memory.md) for why the diff route could not be used.
+
+- **Content only.** It compares hashes and ignores paths entirely, which is what makes it
+  right for the "same tree, reorganised, replicated to another host" case that `diff`
+  reports as thousands of moves. It says nothing about paths, nothing about which side is
+  newer, and nothing about files the keepers have that the candidate does not.
+- Multiple keepers are a **union**: a file is covered if its content appears in any one of
+  them. Keepers may be in any state; naming the candidate as its own keeper is rejected.
+- The hash is negotiated across the candidate and every keeper — SHA-1 if they all have it,
+  otherwise MD5 (legacy imports), otherwise an error. Printed in the header so the answer
+  is never ambiguous about what it compared.
+- **A file with no comparable hash counts against coverage**, listed separately in the
+  summary as `no hash`. Per [goals.md](goals.md), absent evidence is not evidence of
+  absence.
+- `--min-size` (`util.ParseSize`, default 0) skips small files entirely; they are reported
+  as skipped, never as covered.
+- `--limit` (default 50, `0` = all) caps the **listing** only. The totals in the summary
+  always count everything.
+- `--by-dir` aggregates the listing to one line per containing directory, streamed — use it
+  when a whole subtree is missing and the per-file list would be noise.
+- Incomplete (`in_progress` / `failed`) snapshots are warned about on stderr but still used;
+  an incomplete *keeper* is the dangerous direction and is called out as such.
+
+Exit status is meaningful: **0** = fully covered, **2** = something would be lost, **1** =
+error. This is the only command that can be used as a shell predicate:
+
+```bash
+fluxion c --db f.db artemis_deprecated luna_kevin && zfs destroy artemis/deprecated
+```
 
 ## merge / import
 

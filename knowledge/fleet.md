@@ -158,6 +158,11 @@ be, because of the following.
 
 ### Suggested order of work
 
+0. For any dataset whose only question is *"can I delete this?"* — every `deprecated`,
+   `copy`, `backup`, and `old` tree — run `coverage` and stop there. It needs no diff, no
+   tree, and no judgement about rollups; it prints exactly what would be lost and exits 2
+   if anything would. Use `diff` only when the question is genuinely *"what changed and
+   where did it go?"*.
 1. A ~100G replica pair first — `luna/kevin/archives/file_records` vs
    `artemis/luna/kevin/archives/file_records` (80.2G used / 572G logical, many small
    files, scans in minutes). Cheap, and it produces real diff output to calibrate the
@@ -174,11 +179,14 @@ Recorded as design pressure, not yet as issues in [known-issues.md](known-issues
   margin. The schema currently forbids it: `files` carries
   `CHECK (length(sha1) > 0 OR length(md5) > 0)`. This is a far better use of build time
   than any ZFS integration.
-- **Cross-tree coverage is not a first-class question.** "Is every file under X present
-  *somewhere* in Y, at any path" is what the fleet actually needs, and it is currently
-  spelled as a `diff --update` between two whole-tree scans. Whether that scales to a
-  9.36T tree against an 82.8T one is untested — see the memory notes in
-  [architecture.md](architecture.md) about which store methods materialise.
+- ~~**Cross-tree coverage is not a first-class question.**~~ **Closed 2026-08-23** by the
+  `coverage` command ([cli.md](cli.md)). "Is every file under X present *somewhere* in Y,
+  at any path" is now a SQL semi-join over content hashes with no diff tree: measured at
+  1.3 MiB of heap over 4M file rows, and it exits 2 when something would be lost so it can
+  gate a real `zfs destroy`. This is the command to reach for on this fleet — **not**
+  `diff --update` — because the trees here were reorganised as well as copied, which is
+  exactly the case the path-based diff reports as thousands of moves and the memory
+  ceiling it cannot survive.
 - **Nothing records which device or host a snapshot came from.** `ROADMAP.md` v0.9.0
   already wants this ("track the device(s) that held the filesystems"); with scans
   arriving from four hosts via `import`, `computer_name` alone is thin provenance.
