@@ -126,6 +126,10 @@ per snapshot and a full-verify escape hatch offered.
 
 **The division of labour to keep: ZFS says how many bytes. Fluxion says what you'd lose.**
 
+This is orthogonal to `fluxion zfs-scan` ([cli.md](cli.md#zfs-scan)): that command mounts
+and walks *live* datasets for a fresh, present-moment scan — it never reads
+`.zfs/snapshot/*` or `zfs diff`, so it does not reopen this question.
+
 ## Running Fluxion against this fleet
 
 Fluxion is not ZFS-aware in any way — `internal/scanner` is a plain `filepath.WalkDir`
@@ -137,7 +141,13 @@ be, because of the following.
   mountpoints and produces one 82.8T snapshot record. Setting it false yields one Fluxion
   snapshot per ZFS dataset — the granularity `../scratch` reasons in — and, because each
   `.zfs/snapshot/<name>` automount has its own `st_dev`, it also makes the snapdir hazard
-  below disappear for free.
+  below disappear for free. **`fluxion zfs-scan` (`zs`) does this whole pass for you**: it
+  enumerates every dataset under a root with `zfs list`, mounts whatever isn't already
+  mounted, scans each with `--cross-mounts=false`, then unmounts what it mounted — one
+  invocation instead of walking the dataset list by hand. See [cli.md](cli.md#zfs-scan).
+  Run it with `--dry-run` first: mounting a previously-unmounted dataset makes it newly
+  accessible (and writable) to every other process on the host for the scan's duration, and
+  across dozens of datasets in one run that's worth reviewing before it happens for real.
 - **Check `zfs get -r snapdir luna artemis` before the first scan.** ZFS defaults to
   `snapdir=hidden`, in which case `.zfs` never appears in `readdir` and a walk cannot
   descend into it. Any dataset set to `visible` would, with default flags, have every one

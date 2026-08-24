@@ -76,6 +76,9 @@ text files and has been in real use for years verifying backups. That history is
   plain directory walk. A ZFS snapshot directory can be scanned like any other tree, and
   space accounting for shared blocks is ZFS's job, not Fluxion's. [fleet.md](fleet.md)
   records why the `ROADMAP.md` v0.9.0 "ZFS tools" item is deliberately not being built.
+  `zfs-scan`'s dataset enumeration and mount/unmount driver doesn't reverse this: it drives
+  ordinary present-moment `snapshot` calls against *live* datasets and never reads
+  `.zfs/snapshot/*` or ZFS's own snapshot history.
 
 ## Where the project is
 

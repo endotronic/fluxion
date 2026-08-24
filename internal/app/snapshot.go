@@ -34,6 +34,10 @@ type SnapshotConfig struct {
 	ComputeMD5   bool
 	SkipEstimation bool
 	EstimateOnly bool
+
+	// NonInteractive skips the implicit in-progress resume prompt and always
+	// resumes, for callers driving many scans unattended (zfs-scan).
+	NonInteractive bool
 }
 
 func RunSnapshot(cfg SnapshotConfig) error {
@@ -106,6 +110,8 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			// 2. Implicit Resume (In Progress)
 			if cfg.ForceNew {
 				doResume = false
+			} else if cfg.NonInteractive {
+				doResume = true
 			} else {
 				// Prompt
 				fmt.Printf("Found incomplete snapshot started at %s. Resume? [y/N]: ", lastSnap.StartedAt)

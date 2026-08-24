@@ -63,6 +63,8 @@ func main() {
 		runFind(os.Args[2:])
 	case "coverage", "c":
 		runCoverage(os.Args[2:])
+	case "zfs-scan", "zscan", "zs":
+		runZFSScan(os.Args[2:])
 	default:
 		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -85,6 +87,7 @@ func printUsage() {
 	fmt.Println("  size            Report size of a snapshot")
 	fmt.Println("  find            Find files in a snapshot by name pattern")
 	fmt.Println("  coverage (c)    Check every file of one snapshot exists, by content, in others")
+	fmt.Println("  zfs-scan (zs)   Scan every dataset under a ZFS pool into its own snapshot")
 	fmt.Println("  version (v)     Print version")
 }
 
@@ -590,5 +593,48 @@ func runCoverage(args []string) {
 	}
 	if !res.Covered() {
 		os.Exit(2)
+	}
+}
+
+func runZFSScan(args []string) {
+	cmd := flag.NewFlagSet("zfs-scan", flag.ExitOnError)
+	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
+	threadsPtr := cmd.Int("threads", runtime.NumCPU(), "Number of threads per dataset scan")
+	md5Ptr := cmd.Bool("md5", false, "Compute MD5 checksums")
+	dryRunPtr := cmd.Bool("dry-run", false, "Print the plan (mount/scan/skip per dataset) without mounting, scanning, or writing to the DB")
+
+	var excludes arrayFlags
+	cmd.Var(&excludes, "exclude-dataset", "Dataset name to skip, exact or prefix (can be repeated)")
+
+	cmd.Parse(args)
+
+	if *dbPtr == "" {
+		fmt.Println("Error: --db is required")
+		cmd.Usage()
+		os.Exit(1)
+	}
+	if cmd.NArg() < 1 {
+		fmt.Println("Usage: fluxion zfs-scan --db <db> [--dry-run] <pool-or-dataset>...")
+		os.Exit(1)
+	}
+
+	if os.Geteuid() != 0 {
+		logrus.Warn("not running as root - mounting or reading some datasets may fail")
+	}
+
+	res, err := app.RunZFSScan(app.ZFSScanConfig{
+		DBPath:          *dbPtr,
+		Roots:           cmd.Args(),
+		Threads:         *threadsPtr,
+		ComputeMD5:      *md5Ptr,
+		DryRun:          *dryRunPtr,
+		ExcludeDatasets: excludes,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if res.HadFailures {
+		os.Exit(1)
 	}
 }

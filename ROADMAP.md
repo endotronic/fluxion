@@ -25,6 +25,12 @@
   without a diff tree by a SQL semi-join over partial indexes on `(sha1, snapshot_id)` and
   `(md5, snapshot_id)` (schema v5). Union of multiple keepers, exit 2 when something would
   be lost. Measured at 1.3 MiB of heap over 4M file rows. See `knowledge/cli.md`
+- [x] `zfs-scan` command: enumerate every dataset under a pool with `zfs list`, mount
+  whichever aren't already mounted, scan each into its own snapshot with
+  `--cross-mounts=false`, then unmount whatever it mounted. One invocation instead of
+  driving `snapshot` dataset-by-dataset by hand. `--dry-run` prints the full plan with no
+  mounting or DB writes. Does not read ZFS's own snapshot history — orthogonal to the
+  dropped "ZFS tools" item above. See `knowledge/cli.md`
 - [ ] external/streaming diff engine so `diff` fits in 1 GB regardless of tree size —
   six-phase plan in `knowledge/diff-memory.md`, starting with fixed-width digests
   (issues 2.2/3.1) and `--engine auto|memory|external`

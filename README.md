@@ -68,6 +68,18 @@ This produces the `fluxion` binary.
 
     Unlike `diff`, this runs in constant memory — measured at ~1.3 MiB of heap over 4M files — because it never builds a tree.
 
+*   **`zfs-scan` (`zs`)**: Scan every ZFS dataset under one or more pools/datasets into its own snapshot, one invocation instead of driving `snapshot` dataset-by-dataset.
+    ```bash
+    ./fluxion zfs-scan --db <db_path> [options] <pool-or-dataset> [<pool-or-dataset>...]
+    ```
+    Enumerates datasets with `zfs list`, mounts whichever aren't already mounted, scans each with `--cross-mounts=false` so mount boundaries are never crossed, then unmounts whatever it mounted. Skips zvols, `canmount=off` container datasets, and datasets with no mountpoint; one dataset failing to mount or scan doesn't abort the rest of the run. Exits **1** if anything failed.
+    *   `--threads <n>`: Scan worker threads (default: number of CPUs).
+    *   `--md5`: Also compute MD5 alongside SHA-1.
+    *   `--dry-run`: Print the full per-dataset plan with no mounting, scanning, or DB writes.
+    *   `--exclude-dataset <name>`: Skip a dataset (and its children). Can be used multiple times.
+
+    Requires root to mount/read most real-world datasets. Run with `--dry-run` first — mounting a dataset makes it accessible to other processes on the host for the scan's duration.
+
 *   **`merge` (`m`)**: Merge multiple snapshots into a single new snapshot.
     ```bash
     ./fluxion merge --name <new_name> [options] <snap1> <snap2> ...
