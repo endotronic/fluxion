@@ -25,6 +25,13 @@ This framing drives the design more than anything else. In particular it explain
 the diff works on **content hashes**, not paths or mtimes: a file that moved is the same
 file, and the tool must say so.
 
+As of 2026-08-23 question 1 has a concrete, urgent target: see [fleet.md](fleet.md). The
+author's four ZFS hosts hold ~185T at 94–96% capacity, with multi-terabyte datasets named
+`deprecated`/`copy`/`backup` that are presumed deletable. Fluxion is the evidence that
+turns that presumption into a defensible verdict — and the presumption runs in exactly the
+direction the severity rule below says is dangerous, so the tool must be the thing that
+says *no*.
+
 ## Design consequences of that framing
 
 - **False "unchanged"/"present" answers are the worst possible failure.** If Fluxion says
@@ -65,6 +72,10 @@ text files and has been in real use for years verifying backups. That history is
 - No handling of symlinks, hard links, devices, sockets, FIFOs, permissions, ownership,
   xattrs, or empty directories. Only **regular files** are recorded. See
   [scanner.md](scanner.md) for exactly what this means for diff results.
+- **Not filesystem-aware.** No ZFS, btrfs, or snapshot-format knowledge; the scanner is a
+  plain directory walk. A ZFS snapshot directory can be scanned like any other tree, and
+  space accounting for shared blocks is ZFS's job, not Fluxion's. [fleet.md](fleet.md)
+  records why the `ROADMAP.md` v0.9.0 "ZFS tools" item is deliberately not being built.
 
 ## Where the project is
 

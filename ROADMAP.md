@@ -13,9 +13,17 @@
 ## v0.9.0
 - [ ] command: show largest files, directories
 - [ ] In snapshots table, track the device(s) that held the filesystems (need to think about multiple devices case)
-- [ ] ZFS tools
-    - [ ] Support ZFS snapshot as target (e.g. pool/filesystem@snapshot)
-    - [ ] Snapshot all ZFS snapshots for a filesystem (recursive)
+- [ ] ~~ZFS tools~~ — **dropped 2026-08-23, see `knowledge/fleet.md`.** Measured against
+  the author's own fleet, all 2,916 snapshots on terra+saturn hold 5.65 TiB combined
+  (one of them is 2.40T), while scanning a snapshot costs hashing everything it
+  *references*. ZFS already answers "how many bytes" exactly and for free; Fluxion would
+  answer it worse, because it has no concept of shared blocks. A ZFS snapshot directory
+  can already be scanned today as an ordinary tree.
+    - [ ] ~~Support ZFS snapshot as target (e.g. pool/filesystem@snapshot)~~
+    - [ ] ~~Snapshot all ZFS snapshots for a filesystem (recursive)~~
+- [ ] metadata-only scan mode (no hashing) so a 185T fleet can be triaged by size+name
+  first and hashed only where trees actually overlap — blocked by the
+  `CHECK (length(sha1) > 0 OR length(md5) > 0)` constraint on `files`
 - [ ] import-legacy gets line count while determining root, then uses that to show progress
 
 ## v0.8.14

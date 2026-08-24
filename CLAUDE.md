@@ -4,6 +4,13 @@ Fluxion records **metadata-only snapshots of a filesystem** (path, size, mtime, 
 optional MD5) into SQLite, then diffs them, finds duplicates, and answers *"is it safe to
 delete this copy?"* It never writes to or deletes the files it scans.
 
+**The live job it is being built for:** the author has ~185T across four ZFS hosts sitting
+at 94–96% full, including multi-terabyte datasets named `deprecated`, `copy`, and `backup`
+that are *presumed* redundant. Fluxion is the thing that has to prove a tree is safe to
+destroy before it gets destroyed. Read `knowledge/fleet.md` — it is the context behind
+most priority calls, and it is why the severity rule in `knowledge/goals.md` is not
+theoretical.
+
 Go 1.25.5, module `fluxion` (imports are `fluxion/internal/...`). **Pure Go — no C
 compiler needed**; the SQLite driver is `modernc.org/sqlite`. It was `mattn/go-sqlite3`
 (cgo) until 2026-08-23, so an old checkout or an old binary may still fail at runtime with
@@ -26,6 +33,7 @@ from the code alone.
 | File | Read it when… |
 |---|---|
 | `knowledge/goals.md` | you need to make any judgement call. Defines what the tool is for and the **severity rule** (a false "unchanged/present" answer can lose the user data; over-reporting only costs reading time) that should decide every trade-off. Also covers lineage from the author's Python `dupe-finder` and the explicit non-goals. |
+| `knowledge/fleet.md` | **read this early — it is why the project matters right now.** The author's real target: ~185T across four ZFS hosts at 94–96% full, with multi-terabyte trees named `deprecated`/`copy`/`backup` that are *presumed* deletable and need Fluxion to prove it. Covers the fleet inventory, the sibling planning project in `../scratch`, how to scan ZFS safely, and **why per-snapshot ZFS scanning is deliberately not being built**. |
 | `knowledge/architecture.md` | you are adding a command, moving code between packages, or touching output/error handling. Covers the `cmd → app → store/algorithms` layering, the two testability seams (`store.Store`, `diff.FileIterator`), which store methods stream vs. materialise, and the inconsistent stdout/stderr conventions. |
 | `knowledge/diff-algo.md` | **before touching `internal/diff` or `internal/app/diff.go` — this is the highest-risk code in the project.** Explains the unified two-snapshot tree, the ten-stage pipeline, `FileTwin` and the presence flags, the synthetic "merkle" directory hashes and their two failure modes, the `propagateStatus` rollup precedence, move/copy matching and consumption rules, the hidden-move-source fixed point, and the collapsing logic — plus what the property test asserts and the defects still open. |
 | `knowledge/dupes-algo.md` | working on `internal/dupes` or `dupes` output. The highest-level-duplicate rule, the `covered` suppression, and why `--min-size` behaves the way it does on directories. |
