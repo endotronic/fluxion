@@ -71,16 +71,26 @@ paths that several inputs disagree about; that part is inherent, the slice is no
 - `logrus` → **stderr**, used for status/progress narration ("Comparing using strategy…").
   Configured in `main.go`'s `init()` with `DisableTimestamp: true`, level Info.
 - `fmt.Print*` → **stdout**, used for actual results (diff lines, dupe groups, tables).
-- Progress bars (`schollz/progressbar/v3`) → mostly stderr, but
-  `progressbar.Default(...)` writes to **stdout**, so `merge`, `import`, `export-legacy`,
-  and the diff's own progress bar contaminate stdout. That matters because it makes those
-  commands unpipeable.
+- Progress bars (`schollz/progressbar/v3`) → mostly stderr, but any bar built with
+  `NewOptions`/`NewOptions64` and no explicit `OptionSetWriter` defaults to the library's
+  own default, which is **stdout** (`progressbar.go`'s `writer: os.Stdout` in `NewOptions64`
+  — `progressbar.Default(...)` is just that constructor with stderr set explicitly, despite
+  the name). `merge`, `import`, `export-legacy`, and the diff's own progress bar all omit
+  `OptionSetWriter` and so contaminate stdout with `\r`-driven redraws. That matters because
+  it makes those commands unpipeable — a redirected `diff`/`merge` output file gets binary
+  progress-bar noise mixed into the actual result lines, not just a noisy log.
+- **`internal/app/snapshot.go`'s two bars are the one place this is fixed**: both are TTY-gated
+  via `isatty.IsTerminal(os.Stderr.Fd())` (a `quiet` bool computed once near the top of
+  `RunSnapshot`, fed through the local `progressWriter(quiet)` helper) — when stderr isn't a
+  terminal the bar writer becomes `io.Discard` instead of spamming a piped log. Added because
+  `zfs-scan` drives `RunSnapshot` unattended under `tmux`/`tee` across many datasets; the
+  other commands listed above still have the plain-stdout-contamination bug.
 - Some errors go through `logrus.Errorf`, some through `fmt.Printf`, some are returned.
   `app/diff.go` does all three within the same function.
 
-There is no `--quiet`, no `--json`, and no TTY detection. TTY detection is an explicit
-v1.0 roadmap item, and doing it properly requires first settling the stdout/stderr split
-above.
+There is no `--quiet`, no `--json`, and TTY detection exists only for `snapshot`'s bars (see
+above) — not applied anywhere else yet. Full TTY detection is an explicit v1.0 roadmap item,
+and doing it properly requires first settling the stdout/stderr split above.
 
 ## Error-handling posture (important, and currently weak)
 

@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +18,20 @@ import (
 	"fluxion/internal/store/sqlite"
 	"fluxion/internal/util"
 
+	"github.com/mattn/go-isatty"
 	"github.com/schollz/progressbar/v3"
 	"github.com/sirupsen/logrus"
 )
+
+// progressWriter discards the progress bar's carriage-return-driven redraws
+// when stderr isn't a terminal (piped to `tee`/a log file, as zfs-scan runs
+// often are), instead of filling the capture with unreadable \r noise.
+func progressWriter(quiet bool) io.Writer {
+	if quiet {
+		return io.Discard
+	}
+	return os.Stderr
+}
 
 type SnapshotConfig struct {
 	TargetDir    string
@@ -45,6 +57,8 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	if err != nil {
 		return fmt.Errorf("error getting abs path: %w", err)
 	}
+
+	quiet := !isatty.IsTerminal(os.Stderr.Fd())
 
 	dbPath := cfg.DBPath
 	if dbPath == "" {
@@ -136,7 +150,24 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				totalFiles = -1
 			}
 
-			bar := progressbar.Default(totalFiles, "Loading existing")
+			bar := progressbar.NewOptions64(
+				totalFiles,
+				progressbar.OptionSetDescription("Loading existing"),
+				progressbar.OptionSetWriter(progressWriter(quiet)),
+				progressbar.OptionSetWidth(10),
+				progressbar.OptionShowTotalBytes(true),
+				progressbar.OptionThrottle(65*time.Millisecond),
+				progressbar.OptionShowCount(),
+				progressbar.OptionShowIts(),
+				progressbar.OptionOnCompletion(func() {
+					if !quiet {
+						fmt.Fprint(os.Stderr, "\n")
+					}
+				}),
+				progressbar.OptionSpinnerType(14),
+				progressbar.OptionFullWidth(),
+				progressbar.OptionSetRenderBlankState(true),
+			)
 			
 			if totalFiles > 0 {
 				logrus.Infof("Loading %d existing files...", totalFiles)
@@ -340,13 +371,15 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	bar := progressbar.NewOptions64(
 		estimatedTotal,
 		progressbar.OptionSetDescription("Scanning..."),
-		progressbar.OptionSetWriter(os.Stderr),
+		progressbar.OptionSetWriter(progressWriter(quiet)),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetWidth(15),
 		progressbar.OptionThrottle(65*time.Millisecond),
 		progressbar.OptionShowCount(),
 		progressbar.OptionOnCompletion(func() {
-			fmt.Fprint(os.Stderr, "\n")
+			if !quiet {
+				fmt.Fprint(os.Stderr, "\n")
+			}
 		}),
 		progressbar.OptionSpinnerType(14),
 		progressbar.OptionFullWidth(),
