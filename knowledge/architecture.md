@@ -69,7 +69,9 @@ paths that several inputs disagree about; that part is inherent, the slice is no
 ## Output conventions (inconsistent — worth knowing before changing them)
 
 - `logrus` → **stderr**, used for status/progress narration ("Comparing using strategy…").
-  Configured in `main.go`'s `init()` with `DisableTimestamp: true`, level Info.
+  Configured in `main.go`'s `init()` with `FullTimestamp: true` (RFC3339), level Info —
+  added so a `zfs-scan` run piped to a log file can be correlated to wall-clock time
+  afterward; before 2026-08-24 timestamps were disabled entirely.
 - `fmt.Print*` → **stdout**, used for actual results (diff lines, dupe groups, tables).
 - Progress bars (`schollz/progressbar/v3`) → mostly stderr, but any bar built with
   `NewOptions`/`NewOptions64` and no explicit `OptionSetWriter` defaults to the library's

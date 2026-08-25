@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"fluxion/internal/app"
 	"fluxion/internal/consts"
@@ -18,7 +19,8 @@ import (
 func init() {
 	logrus.SetOutput(os.Stderr)
 	logrus.SetFormatter(&logrus.TextFormatter{
-		DisableTimestamp: true,
+		FullTimestamp:   true,
+		TimestampFormat: time.RFC3339,
 	})
 	logrus.SetLevel(logrus.InfoLevel)
 }
