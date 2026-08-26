@@ -72,20 +72,39 @@ func ListDatasets(run Runner, roots []string) ([]Dataset, error) {
 	return datasets, nil
 }
 
-// Mount runs `zfs mount <dataset>`.
-func Mount(run Runner, dataset string) error {
-	out, err := run("zfs", "mount", dataset)
+// MountAt mounts a dataset at an arbitrary path via the generic `mount -t
+// zfs -o zfsutil`, instead of `zfs mount` (which only knows how to mount a
+// dataset at its own `mountpoint` property, refuses when that property is
+// "none", and refuses outright if the dataset is already mounted anywhere).
+// `-o zfsutil` tells the mount.zfs helper to register the mount with ZFS the
+// same way `zfs mount` would, and ZFS-level properties (notably `readonly`)
+// are still honored. This never reads or writes the dataset's `mountpoint`
+// property.
+//
+// zfs-scan uses this for every dataset, not only ones without a configured
+// mountpoint: mounting a fresh, isolated, empty directory - even for a
+// dataset that's already mounted at its usual location - means nothing else
+// can already be nested inside it, so a scan sees exactly that one dataset's
+// own content, including anything that would otherwise be hidden underneath
+// a child dataset's mount at the same path in the live tree.
+func MountAt(run Runner, dataset, path string) error {
+	out, err := run("mount", "-t", "zfs", "-o", "zfsutil", dataset, path)
 	if err != nil {
-		return fmt.Errorf("zfs mount %s: %w\n%s", dataset, err, out)
+		return fmt.Errorf("mount -t zfs -o zfsutil %s %s: %w\n%s", dataset, path, err, out)
 	}
 	return nil
 }
 
-// Unmount runs `zfs unmount <dataset>`.
-func Unmount(run Runner, dataset string) error {
-	out, err := run("zfs", "unmount", dataset)
+// UnmountPath runs the generic `umount <path>`, targeting one specific mount
+// point rather than a dataset name. zfs-scan may mount the same dataset a
+// second time at a temporary location while it's already mounted elsewhere
+// (deliberately - see MountAt) - `zfs unmount <dataset>` looks the mount up
+// by dataset name and would be ambiguous about which instance to tear down
+// in that case. Unmounting by path has no such ambiguity.
+func UnmountPath(run Runner, path string) error {
+	out, err := run("umount", path)
 	if err != nil {
-		return fmt.Errorf("zfs unmount %s: %w\n%s", dataset, err, out)
+		return fmt.Errorf("umount %s: %w\n%s", path, err, out)
 	}
 	return nil
 }

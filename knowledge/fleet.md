@@ -142,12 +142,20 @@ be, because of the following.
   snapshot per ZFS dataset — the granularity `../scratch` reasons in — and, because each
   `.zfs/snapshot/<name>` automount has its own `st_dev`, it also makes the snapdir hazard
   below disappear for free. **`fluxion zfs-scan` (`zs`) does this whole pass for you**: it
-  enumerates every dataset under a root with `zfs list`, mounts whatever isn't already
-  mounted, scans each with `--cross-mounts=false`, then unmounts what it mounted — one
-  invocation instead of walking the dataset list by hand. See [cli.md](cli.md#zfs-scan).
-  Run it with `--dry-run` first: mounting a previously-unmounted dataset makes it newly
-  accessible (and writable) to every other process on the host for the scan's duration, and
-  across dozens of datasets in one run that's worth reviewing before it happens for real.
+  enumerates every dataset under a root with `zfs list`, then mounts *every* dataset it
+  scans — even one already mounted at its usual location — at a fresh, temporary, isolated
+  path (never touching the persistent `mountpoint` property; see [cli.md](cli.md#zfs-scan)),
+  scans each with `--cross-mounts=false`, then unmounts and removes the temporary directory.
+  Mounting a dedicated copy unconditionally, instead of reusing whatever's already mounted,
+  buys two things worth knowing about for this fleet specifically: `--cross-mounts=false`
+  no longer has to reason about this fleet's real mount layout at all (nothing can already
+  be nested inside a fresh empty directory), and it surfaces files that a dataset's live
+  mountpoint would otherwise hide underneath wherever a child dataset happens to be mounted
+  on top of it — exactly the kind of leftover content the fleet's `deprecated`/`copy`/`backup`
+  trees are suspected of containing. Run it with `--dry-run` first: mounting a
+  previously-unmounted dataset makes it newly accessible (and writable) to every other
+  process on the host for the scan's duration, and across dozens of datasets in one run
+  that's worth reviewing before it happens for real.
 - **Check `zfs get -r snapdir luna artemis` before the first scan.** ZFS defaults to
   `snapdir=hidden`, in which case `.zfs` never appears in `readdir` and a walk cannot
   descend into it. Any dataset set to `visible` would, with default flags, have every one

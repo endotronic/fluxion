@@ -149,6 +149,7 @@ fluxion c --db f.db artemis_deprecated luna_kevin && zfs destroy artemis/depreca
 
 ```
 fluxion zs --db <db> [--threads N] [--md5] [--dry-run]
+          [--include-canmount-off]
           [--exclude-dataset NAME]... <pool-or-dataset>...
 ```
 
@@ -157,35 +158,82 @@ given root(s), instead of the user running it dataset-by-dataset by hand. Each s
 named after its full ZFS dataset name (e.g. `artemis/deprecated/zalt`). This is the way to
 do the per-dataset pass described in [fleet.md](fleet.md).
 
-**Live datasets only.** It runs `zfs list ... -r <roots>`, mounts whatever isn't currently
-mounted (via `zfs mount`), scans, then unmounts whatever *it* mounted, deepest child first.
-It never reads `.zfs/snapshot/*` or ZFS's own snapshot history — see the "Not
-filesystem-aware" note in [goals.md](goals.md); this is a mount-and-walk driver for a
-present-moment scan, not the rejected per-ZFS-snapshot scanning feature.
+**Live datasets only.** It runs `zfs list ... -r <roots>`, then, for every dataset that
+isn't skipped, mounts a *fresh, isolated copy* of it at a temporary directory
+(`os.MkdirTemp` + `zfsutil.MountAt`) and scans that, then unmounts and removes the
+temporary directory. It never reads `.zfs/snapshot/*` or ZFS's own snapshot history — see
+the "Not filesystem-aware" note in [goals.md](goals.md); this is a mount-and-walk driver
+for a present-moment scan, not the rejected per-ZFS-snapshot scanning feature.
+
+**Every dataset is mounted this way, even ones already mounted at their usual location.**
+This is deliberate, not just a fallback for datasets without a `mountpoint`. `MountAt` uses
+the generic `mount -t zfs -o zfsutil <dataset> <path>` instead of `zfs mount` (which only
+knows how to mount a dataset at its own `mountpoint` property, refuses when that property is
+`none`, and refuses outright if the dataset is already mounted anywhere) — `-o zfsutil`
+registers the mount with ZFS the same way `zfs mount` would, and ZFS-level properties
+(notably `readonly`) are still honored, but the dataset's `mountpoint` property is never
+read or written, so persistent ZFS configuration is untouched. Two benefits fall out of
+mounting this way unconditionally:
+  - A brand-new, empty temporary directory can never already have anything nested inside
+    it, so the scanner's mount-boundary logic never has to reason about the fleet's real
+    mount layout — `--cross-mounts=false` becomes a formality rather than something doing
+    real work.
+  - A dataset's live mountpoint can have files underneath it that are invisible in the
+    normal tree because a child dataset happens to be mounted at that same path, shadowing
+    them (e.g. leftover content in `artemis/deprecated` from before `artemis/deprecated/zalt`
+    became its own dataset mounted on top of it). Mounting the parent fresh, on its own,
+    with nothing else mounted inside, surfaces that content instead of silently missing it —
+    which matters for a tool whose job is proving a tree is safe to delete.
+- Unmounting is done **by path** (`umount <path>`, `zfsutil.UnmountPath`), not by dataset
+  name (`zfs unmount <dataset>`): since the same dataset may now be mounted twice at once
+  (its usual location plus zfs-scan's temporary copy), a name-based unmount would be
+  ambiguous about which instance to tear down. Unmounting the exact path zfs-scan mounted
+  has no such ambiguity, and only that mount is ever affected.
+- The temporary directory is removed with `os.Remove` (never `os.RemoveAll`) only after its
+  unmount succeeds, so a failed unmount just leaves the directory behind rather than risking
+  a recursive delete into anything still mounted there.
 
 Per-dataset skip reasons (printed, and folded into `Skipped` — not treated as failures):
-`not a filesystem (zvol)`, `container dataset, no files of its own` (`canmount=off`), `no
-mountpoint set`, `legacy mountpoint, not currently mounted`, `excluded`. A dataset already
-scanned to `completed` under its own name is silently reported as already done, making
-re-runs of the same root idempotent and cheap.
+`not a filesystem (zvol)`, `canmount=off` (container dataset, no files of its own — unless
+`--include-canmount-off` is set, see below), `excluded`. A dataset already scanned to
+`completed` under its own name is silently reported
+as already done, making re-runs of the same root idempotent and cheap — that DB check
+happens *before* any mount attempt, so a re-run mounts nothing for datasets it's already
+scanned.
 
 Counted as **failures** (`Failed`, and the run's exit code): a mount that errors (permission,
-degraded pool), a scan error, or a dataset whose most recent snapshot by that name is
-`failed` (blocked until that snapshot is deleted — a silent skip here is exactly the kind of
-false "safe" answer [goals.md](goals.md)'s severity rule warns about). One failing dataset
-does not abort the run; everything else still gets scanned.
+degraded pool, or any other `mount -t zfs -o zfsutil` failure — including for a dataset
+that's already mounted elsewhere and perfectly healthy there), a scan error, or a dataset
+whose most recent snapshot by that name is `failed` (blocked until that snapshot is deleted
+— a silent skip here is exactly the kind of false "safe" answer [goals.md](goals.md)'s
+severity rule warns about). One failing dataset does not abort the run; everything else
+still gets scanned.
 
-- `--dry-run` prints the full per-dataset plan (mount+scan / already mounted / already
-  scanned / skip \<reason\>) with **no mounting, no scanning, no DB writes at all** —
-  review this before pointing it at a whole pool.
+- `--dry-run` prints the full per-dataset plan (mount+scan, noting when a dataset is
+  already mounted elsewhere / already scanned / skip \<reason\>) with **no mounting, no
+  scanning, no DB writes at all** — review this before pointing it at a whole pool.
 - `--exclude-dataset` is repeatable and boundary-aware (exact name, or `name/` prefix) —
   unlike the raw-`strings.HasPrefix` `--exclude` bug on `diff`/`coverage`, `luna/kevin`
   does not also exclude `luna/kevin2`.
-- Mounting a previously-unmounted dataset makes it newly readable (and writable) by other
-  processes on the host for the scan's duration — a side effect worth knowing about before
-  running this against a whole pool unattended.
-- No signal handling: a `SIGINT`/`SIGTERM` mid-run can leave a dataset mounted that this run
-  mounted. Left as a known, accepted limitation — cosmetic, not data risk.
+- A dataset already mounted at its usual location gets logged (`logrus.Infof`) when zfs-scan
+  mounts a second, temporary copy of it — worth knowing since it's the more surprising case
+  operationally (a live, in-service mount now briefly has a second, independent mount of the
+  same content elsewhere too).
+- `--include-canmount-off` mounts and scans `canmount=off` datasets instead of skipping
+  them. `canmount=off` conventionally means "not mountable via `zfs mount`, ignored by `zfs
+  mount -a`" — but that restriction is enforced by the `zfs` CLI/libzfs, not the kernel or
+  the `mount.zfs` helper, so the same `mount -t zfs -o zfsutil` bypass `MountAt` already uses
+  for every dataset works for these too. Off by default because `canmount=off` is normal for
+  purely organizational parent datasets with no files of their own; opt in when a fleet has
+  `canmount=off` datasets that do hold real content worth scanning.
+- No signal handling: a `SIGINT`/`SIGTERM` mid-run can leave zfs-scan's temporary mounts in
+  place. Left as a known, accepted limitation — cosmetic, not data risk, and never touches
+  the dataset's pre-existing mount (see the by-path unmount point above).
+- **No progress bar in a piped/logged run** (e.g. `zfs-scan ... | tee log`): the progress
+  bar writer is discarded whenever stderr isn't a TTY (see
+  [architecture.md](architecture.md) "Output conventions"), and `RunSnapshot` fills that gap
+  with a periodic `logrus.Infof` heartbeat every 30s instead — expect status lines, not a
+  redrawing bar, when this command's output is redirected.
 
 Exit status: **0** = every dataset scanned or expectedly skipped, **1** = at least one
 dataset failed (mount/scan error, or blocked by a prior failed snapshot) — same discipline

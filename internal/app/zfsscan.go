@@ -2,25 +2,25 @@ package app
 
 import (
 	"fmt"
-	"sort"
+	"os"
 	"strings"
 
 	"fluxion/internal/models"
 	"fluxion/internal/store"
 	"fluxion/internal/store/sqlite"
-	"fluxion/internal/util"
 	"fluxion/internal/zfsutil"
 
 	"github.com/sirupsen/logrus"
 )
 
 type ZFSScanConfig struct {
-	DBPath          string
-	Roots           []string
-	Threads         int
-	ComputeMD5      bool
-	DryRun          bool
-	ExcludeDatasets []string
+	DBPath             string
+	Roots              []string
+	Threads            int
+	ComputeMD5         bool
+	DryRun             bool
+	ExcludeDatasets    []string
+	IncludeCanMountOff bool // also mount+scan canmount=off datasets, instead of skipping them
 
 	// Runner is injected so tests can substitute a fake `zfs`/`mount`; nil
 	// means the real thing.
@@ -32,7 +32,7 @@ type ZFSScanConfig struct {
 type ZFSScanResult struct {
 	Scanned     []string
 	AlreadyDone []string
-	Skipped     []string // expected, non-fatal: not a filesystem, canmount=off, excluded, no mountpoint
+	Skipped     []string // expected, non-fatal: not a filesystem, canmount=off (unless included), excluded
 	Failed      []string // mount failure, scan error, or blocked by a prior failed snapshot
 
 	// HadFailures is true if anything in Failed is non-empty - the run did not
@@ -40,9 +40,19 @@ type ZFSScanResult struct {
 	HadFailures bool
 }
 
-// RunZFSScan enumerates every dataset under cfg.Roots, mounts whichever are
-// not already mounted, scans each into its own Fluxion snapshot (named after
-// the dataset) with cross-mounts disabled, and unmounts whatever it mounted.
+// RunZFSScan enumerates every dataset under cfg.Roots and scans each into its
+// own Fluxion snapshot (named after the dataset) with cross-mounts disabled.
+//
+// Every dataset is mounted at a fresh, temporary, isolated directory via
+// `mount -t zfs -o zfsutil` (zfsutil.MountAt) - even one that's already
+// mounted at its usual location. This is deliberate, not just for datasets
+// that lack a mountpoint: a dedicated, empty temp directory can never have
+// anything else already mounted inside it, so the scan sees exactly that one
+// dataset's own on-disk content, including any files left behind underneath
+// wherever a child dataset happens to be mounted in the live tree (which
+// would otherwise shadow them). It also means the scanner's mount-boundary
+// logic never has to reason about the fleet's normal mount layout at all.
+// Every mount this run creates is torn down afterward.
 //
 // It does not read ZFS's own snapshot history - see knowledge/fleet.md
 // "Verdict: do NOT build per-snapshot scanning". This only drives repeated,
@@ -79,10 +89,9 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 	type planned struct {
 		dataset    zfsutil.Dataset
 		mountpoint string
-		weMounted  bool
 	}
 	var toScan []planned
-	var mountedByUs []string // dataset names, in the order we mounted them
+	var mountedDirs []string // temp dirs we mounted, for teardown
 
 	for _, ds := range datasets {
 		if excluded(ds.Name, cfg.ExcludeDatasets) {
@@ -95,30 +104,10 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			res.Skipped = append(res.Skipped, ds.Name)
 			continue
 		}
-		if ds.CanMount == "off" {
-			fmt.Printf("  skip  %-55s container dataset, no files of its own\n", ds.Name)
+		if ds.CanMount == "off" && !cfg.IncludeCanMountOff {
+			fmt.Printf("  skip  %-55s canmount=off (use --include-canmount-off to scan it anyway)\n", ds.Name)
 			res.Skipped = append(res.Skipped, ds.Name)
 			continue
-		}
-
-		mountpoint := ds.Mountpoint
-		if mountpoint == "none" {
-			fmt.Printf("  skip  %-55s no mountpoint set\n", ds.Name)
-			res.Skipped = append(res.Skipped, ds.Name)
-			continue
-		}
-		if mountpoint == "legacy" {
-			found := ""
-			if mp, err := findLegacyMount(ds.Name); err == nil {
-				found = mp
-			}
-			if found == "" {
-				fmt.Printf("  skip  %-55s legacy mountpoint, not currently mounted\n", ds.Name)
-				res.Skipped = append(res.Skipped, ds.Name)
-				continue
-			}
-			mountpoint = found
-			ds.Mounted = true
 		}
 
 		if !cfg.DryRun && dbStore != nil {
@@ -139,26 +128,39 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			}
 		}
 
-		weMounted := false
-		if !ds.Mounted {
-			if cfg.DryRun {
-				fmt.Printf("  plan  %-55s mount + scan\n", ds.Name)
+		if cfg.DryRun {
+			if ds.Mounted {
+				fmt.Printf("  plan  %-55s already mounted (mountpoint=%s); mount a second, isolated copy at a temporary location + scan\n", ds.Name, ds.Mountpoint)
 			} else {
-				if err := zfsutil.Mount(run, ds.Name); err != nil {
-					logrus.Errorf("failed to mount %s: %v", ds.Name, err)
-					fmt.Printf("  fail  %-55s mount failed: %v\n", ds.Name, err)
-					res.Failed = append(res.Failed, ds.Name)
-					res.HadFailures = true
-					continue
-				}
-				weMounted = true
-				mountedByUs = append(mountedByUs, ds.Name)
+				fmt.Printf("  plan  %-55s mount at temporary location + scan\n", ds.Name)
 			}
-		} else if cfg.DryRun {
-			fmt.Printf("  plan  %-55s already mounted, scan\n", ds.Name)
+			toScan = append(toScan, planned{dataset: ds})
+			continue
 		}
 
-		toScan = append(toScan, planned{dataset: ds, mountpoint: mountpoint, weMounted: weMounted})
+		if ds.Mounted {
+			logrus.Infof("%s is already mounted (mountpoint=%s); mounting an additional, isolated copy for this scan so nothing shadowed by a nested mount is missed", ds.Name, ds.Mountpoint)
+		}
+
+		dir, err := os.MkdirTemp("", "fluxion-zfsscan-")
+		if err != nil {
+			logrus.Errorf("failed to create temp mount dir for %s: %v", ds.Name, err)
+			fmt.Printf("  fail  %-55s could not create temp mount dir: %v\n", ds.Name, err)
+			res.Failed = append(res.Failed, ds.Name)
+			res.HadFailures = true
+			continue
+		}
+		if err := zfsutil.MountAt(run, ds.Name, dir); err != nil {
+			os.Remove(dir)
+			logrus.Errorf("failed to mount %s: %v", ds.Name, err)
+			fmt.Printf("  fail  %-55s mount failed: %v\n", ds.Name, err)
+			res.Failed = append(res.Failed, ds.Name)
+			res.HadFailures = true
+			continue
+		}
+		mountedDirs = append(mountedDirs, dir)
+
+		toScan = append(toScan, planned{dataset: ds, mountpoint: dir})
 	}
 
 	if cfg.DryRun {
@@ -185,12 +187,23 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 		}
 	}
 
-	// Unmount everything we mounted, deepest child first, so a still-mounted
-	// child never blocks unmounting its parent.
-	sort.Sort(sort.Reverse(sort.StringSlice(mountedByUs)))
-	for _, name := range mountedByUs {
-		if err := zfsutil.Unmount(run, name); err != nil {
-			logrus.Warnf("failed to unmount %s (left mounted): %v", name, err)
+	// Unmount everything we mounted, by path rather than dataset name. A
+	// dataset may already have been mounted elsewhere before this run (see
+	// above), so `zfs unmount <dataset>` - which looks the mount up by
+	// dataset name - could target the wrong instance. Unmounting the exact
+	// path we mounted has no such ambiguity. Order doesn't matter: every
+	// mount here is its own freshly created, empty directory, never nested
+	// inside another one of them.
+	for _, dir := range mountedDirs {
+		if err := zfsutil.UnmountPath(run, dir); err != nil {
+			logrus.Warnf("failed to unmount %s (left mounted): %v", dir, err)
+			continue
+		}
+		// Only remove the directory itself (never RemoveAll) - if unmount
+		// somehow left content behind, os.Remove fails safely on a
+		// non-empty directory instead of deleting anything inside it.
+		if err := os.Remove(dir); err != nil {
+			logrus.Warnf("failed to remove temporary mount directory %s: %v", dir, err)
 		}
 	}
 
@@ -207,22 +220,6 @@ func printZFSScanSummary(res ZFSScanResult) {
 	if len(res.Failed) > 0 {
 		fmt.Printf("  FAILED:        %d  (%s)\n", len(res.Failed), strings.Join(res.Failed, ", "))
 	}
-}
-
-// findLegacyMount looks up where a `mountpoint=legacy` dataset is currently
-// mounted, if anywhere: ZFS doesn't know a legacy dataset's path itself, but
-// /proc/mounts records the dataset name as the mount source verbatim.
-func findLegacyMount(dataset string) (string, error) {
-	mounts, err := util.GetMounts()
-	if err != nil {
-		return "", err
-	}
-	for _, m := range mounts {
-		if m.Source == dataset {
-			return m.Target, nil
-		}
-	}
-	return "", fmt.Errorf("not mounted")
 }
 
 // excluded reports whether name is excluded by an exact match or a

@@ -72,10 +72,11 @@ This produces the `fluxion` binary.
     ```bash
     ./fluxion zfs-scan --db <db_path> [options] <pool-or-dataset> [<pool-or-dataset>...]
     ```
-    Enumerates datasets with `zfs list`, mounts whichever aren't already mounted, scans each with `--cross-mounts=false` so mount boundaries are never crossed, then unmounts whatever it mounted. Skips zvols, `canmount=off` container datasets, and datasets with no mountpoint; one dataset failing to mount or scan doesn't abort the rest of the run. Exits **1** if anything failed.
+    Enumerates datasets with `zfs list`, then mounts *every* dataset it scans at a fresh, temporary, isolated path (`mount -t zfs -o zfsutil`, never touching the persistent `mountpoint` property) — even one already mounted at its usual location — so nothing else can already be nested inside the scan target and files shadowed by a child dataset's mount elsewhere in the live tree still get seen. Scans each with `--cross-mounts=false`, then unmounts by path (not dataset name, since the same dataset may now be mounted twice) and removes the temporary directory. Skips zvols and, by default, `canmount=off` container datasets; one dataset failing to mount or scan doesn't abort the rest of the run. Exits **1** if anything failed.
     *   `--threads <n>`: Scan worker threads (default: number of CPUs).
     *   `--md5`: Also compute MD5 alongside SHA-1.
     *   `--dry-run`: Print the full per-dataset plan with no mounting, scanning, or DB writes.
+    *   `--include-canmount-off`: Also mount and scan `canmount=off` datasets instead of skipping them.
     *   `--exclude-dataset <name>`: Skip a dataset (and its children). Can be used multiple times.
 
     Requires root to mount/read most real-world datasets. Run with `--dry-run` first — mounting a dataset makes it accessible to other processes on the host for the scan's duration.

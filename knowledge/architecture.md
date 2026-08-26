@@ -87,6 +87,13 @@ paths that several inputs disagree about; that part is inherent, the slice is no
   terminal the bar writer becomes `io.Discard` instead of spamming a piped log. Added because
   `zfs-scan` drives `RunSnapshot` unattended under `tmux`/`tee` across many datasets; the
   other commands listed above still have the plain-stdout-contamination bug.
+- **Discarding the bar when `quiet` left a real gap**: with no bar and no substitute, a
+  multi-hour piped scan produced zero output between the initial "Estimated scan size" line
+  and the final "Finished" line — indistinguishable from a hang in a `tee`'d log. Fixed
+  2026-08-24 by adding a `quiet`-gated 30-second heartbeat inside the same UI goroutine that
+  drives the bar, logging via `logrus.Infof` ("Scanning... found N files" during the walk,
+  "Hashing... N/M files done" afterward). TTY/interactive behavior is unaffected — the
+  heartbeat channel stays `nil` (blocks forever in the `select`) whenever `quiet` is false.
 - Some errors go through `logrus.Errorf`, some through `fmt.Printf`, some are returned.
   `app/diff.go` does all three within the same function.
 

@@ -75,40 +75,56 @@ func TestListDatasets_CommandFailure(t *testing.T) {
 	}
 }
 
-func TestMount_InvokesCorrectArgs(t *testing.T) {
+func TestMountAt_InvokesCorrectArgs(t *testing.T) {
 	var gotName string
 	var gotArgs []string
 	run := func(name string, args ...string) (string, error) {
 		gotName, gotArgs = name, args
 		return "", nil
 	}
-	if err := Mount(run, "luna/kevin"); err != nil {
-		t.Fatalf("Mount: %v", err)
+	if err := MountAt(run, "luna/no-mountpoint", "/tmp/fluxion-abc123"); err != nil {
+		t.Fatalf("MountAt: %v", err)
 	}
-	if gotName != "zfs" || len(gotArgs) != 2 || gotArgs[0] != "mount" || gotArgs[1] != "luna/kevin" {
-		t.Errorf("Mount ran %q %v, want zfs [mount luna/kevin]", gotName, gotArgs)
+	wantArgs := []string{"-t", "zfs", "-o", "zfsutil", "luna/no-mountpoint", "/tmp/fluxion-abc123"}
+	if gotName != "mount" || len(gotArgs) != len(wantArgs) {
+		t.Fatalf("MountAt ran %q %v, want mount %v", gotName, gotArgs, wantArgs)
+	}
+	for i := range wantArgs {
+		if gotArgs[i] != wantArgs[i] {
+			t.Errorf("MountAt arg[%d] = %q, want %q", i, gotArgs[i], wantArgs[i])
+		}
 	}
 }
 
-func TestMount_PropagatesError(t *testing.T) {
+func TestMountAt_PropagatesError(t *testing.T) {
 	run := func(name string, args ...string) (string, error) {
-		return "cannot mount: permission denied", fmt.Errorf("exit status 1")
+		return "mount.zfs: dataset does not exist", fmt.Errorf("exit status 1")
 	}
-	if err := Mount(run, "luna/kevin"); err == nil {
-		t.Fatal("expected Mount to propagate the runner's error")
+	if err := MountAt(run, "luna/no-mountpoint", "/tmp/x"); err == nil {
+		t.Fatal("expected MountAt to propagate the runner's error")
 	}
 }
 
-func TestUnmount_InvokesCorrectArgs(t *testing.T) {
+func TestUnmountPath_InvokesCorrectArgs(t *testing.T) {
+	var gotName string
 	var gotArgs []string
 	run := func(name string, args ...string) (string, error) {
-		gotArgs = args
+		gotName, gotArgs = name, args
 		return "", nil
 	}
-	if err := Unmount(run, "luna/kevin"); err != nil {
-		t.Fatalf("Unmount: %v", err)
+	if err := UnmountPath(run, "/tmp/fluxion-abc123"); err != nil {
+		t.Fatalf("UnmountPath: %v", err)
 	}
-	if len(gotArgs) != 2 || gotArgs[0] != "unmount" || gotArgs[1] != "luna/kevin" {
-		t.Errorf("Unmount ran args %v, want [unmount luna/kevin]", gotArgs)
+	if gotName != "umount" || len(gotArgs) != 1 || gotArgs[0] != "/tmp/fluxion-abc123" {
+		t.Errorf("UnmountPath ran %q %v, want umount [/tmp/fluxion-abc123]", gotName, gotArgs)
+	}
+}
+
+func TestUnmountPath_PropagatesError(t *testing.T) {
+	run := func(name string, args ...string) (string, error) {
+		return "umount: /tmp/x: not mounted", fmt.Errorf("exit status 1")
+	}
+	if err := UnmountPath(run, "/tmp/x"); err == nil {
+		t.Fatal("expected UnmountPath to propagate the runner's error")
 	}
 }

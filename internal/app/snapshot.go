@@ -392,7 +392,19 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		defer close(uiDone)
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-		
+
+		// When the progress bar itself is discarded (piped/non-TTY stderr),
+		// nothing else stands in for it - a multi-hour scan would otherwise go
+		// completely silent between the "Estimated scan size" line and
+		// "Finished", which reads as a hang. Log the same status periodically
+		// instead, at a rate sane for a log file rather than a terminal.
+		var heartbeat <-chan time.Time
+		if quiet {
+			hb := time.NewTicker(30 * time.Second)
+			defer hb.Stop()
+			heartbeat = hb.C
+		}
+
 		walking := true
 
 		// walkDone is closed rather than sent to, so once the walk finishes this
@@ -426,6 +438,12 @@ func RunSnapshot(cfg SnapshotConfig) error {
 					bar.Describe(desc)
 				}
 				bar.Set64(current)
+			case <-heartbeat:
+				if walking {
+					logrus.Infof("Scanning... found %d files (%s) so far", foundCount.Load(), util.FormatBytes(foundBytes.Load()))
+				} else {
+					logrus.Infof("Hashing... %d/%d files done", processedCount.Load(), foundCount.Load())
+				}
 			case <-done:
 				bar.Finish()
 				return

@@ -604,6 +604,7 @@ func runZFSScan(args []string) {
 	threadsPtr := cmd.Int("threads", runtime.NumCPU(), "Number of threads per dataset scan")
 	md5Ptr := cmd.Bool("md5", false, "Compute MD5 checksums")
 	dryRunPtr := cmd.Bool("dry-run", false, "Print the plan (mount/scan/skip per dataset) without mounting, scanning, or writing to the DB")
+	includeCanMountOffPtr := cmd.Bool("include-canmount-off", false, "Also mount and scan canmount=off datasets, instead of skipping them")
 
 	var excludes arrayFlags
 	cmd.Var(&excludes, "exclude-dataset", "Dataset name to skip, exact or prefix (can be repeated)")
@@ -625,12 +626,13 @@ func runZFSScan(args []string) {
 	}
 
 	res, err := app.RunZFSScan(app.ZFSScanConfig{
-		DBPath:          *dbPtr,
-		Roots:           cmd.Args(),
-		Threads:         *threadsPtr,
-		ComputeMD5:      *md5Ptr,
-		DryRun:          *dryRunPtr,
-		ExcludeDatasets: excludes,
+		DBPath:             *dbPtr,
+		Roots:              cmd.Args(),
+		Threads:            *threadsPtr,
+		ComputeMD5:         *md5Ptr,
+		DryRun:             *dryRunPtr,
+		ExcludeDatasets:    excludes,
+		IncludeCanMountOff: *includeCanMountOffPtr,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
