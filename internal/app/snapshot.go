@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,7 +23,43 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/schollz/progressbar/v3"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/term"
 )
+
+// ansiEscape matches CSI escape sequences (e.g. cursor movement, erase) so
+// they can be stripped before measuring how many terminal columns a rendered
+// line actually occupies.
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+// truncateLine clips line to at most width visible (non-ANSI) runes, so it
+// can never be wrapped by the terminal onto a second physical row. redraw()
+// below relies on each of its two lines occupying exactly one row - it was
+// originally tried the other way (measure how many rows a long line wraps
+// to, and move the cursor up that many rows next frame), but that turned
+// out to depend on each terminal's own "pending wrap" behavior at the exact
+// column where a line's length is a multiple of the terminal width, which
+// is inconsistent enough between terminals that the up-N-rows math drifted
+// out of sync with reality within a few frames - the drift compounds every
+// redraw because each frame's erase then starts from the wrong row, which
+// is what produced the "updates no longer in place, rapidly creates many
+// newlines" symptom in the first place. Truncating removes the wrap
+// entirely instead of trying to account for it. width<=0 (terminal width
+// unknown) leaves the line untouched, matching the pre-existing behavior
+// for a non-terminal or an unqueryable stderr.
+func truncateLine(line string, width int) string {
+	if width <= 1 {
+		return line
+	}
+	stripped := ansiEscape.ReplaceAllString(line, "")
+	runes := []rune(stripped)
+	if len(runes) <= width {
+		return line
+	}
+	// line may carry ANSI escapes of its own (it doesn't today, but nothing
+	// stops that changing); truncate the escape-stripped text rather than
+	// the raw string so a truncation can't land mid-escape-sequence.
+	return string(runes[:width-1]) + "…"
+}
 
 // progressWriter discards the progress bar's carriage-return-driven redraws
 // when stderr isn't a terminal (piped to `tee`/a log file, as zfs-scan runs
@@ -487,7 +524,10 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	// linesReserved is how many terminal rows the previous dualLine frame
 	// occupied (0 before the first frame), so redraw() knows how far to move
 	// the cursor back up before overwriting. Only touched from the UI
-	// goroutine below.
+	// goroutine below. This is always 2 once a frame has been drawn: each of
+	// the bar line and OverallLine is truncated (see truncateLine) to fit
+	// within the terminal width, specifically so it can never wrap onto a
+	// second row and invalidate this assumption.
 	linesReserved := 0
 
 	// redraw draws the bar's current text and OverallLine's current text as
@@ -508,20 +548,42 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		barLine := strings.TrimPrefix(bar.String(), "\r")
 		overallLine := cfg.OverallLine(processedBytes.Load())
 
+		// Re-checked every frame since a real terminal can be resized
+		// mid-scan; 0 (unknown - not actually a terminal, or the ioctl
+		// failed) leaves both lines untouched, same as before this existed.
+		width, _, err := term.GetSize(int(os.Stderr.Fd()))
+		if err != nil {
+			width = 0
+		}
+		barLine = truncateLine(barLine, width)
+		overallLine = truncateLine(overallLine, width)
+
 		var b strings.Builder
 		if linesReserved > 0 {
 			if linesReserved > 1 {
 				fmt.Fprintf(&b, "\x1b[%dA", linesReserved-1)
 			}
-			// \r homes the cursor to column 0; \x1b[J erases from there to
-			// the end of the screen, so a frame shorter than the previous
-			// one (e.g. a narrower description) can't leave stale trailing
-			// characters behind.
-			b.WriteString("\r\x1b[J")
+			b.WriteString("\r")
 		}
+		// \x1b[K (erase to end of *line*) after each line, rather than a
+		// single \x1b[J (erase to end of *screen*) before either line, so a
+		// frame shorter than the previous one can't leave stale trailing
+		// characters behind. This looks equivalent to the ED-based version
+		// on paper - both should clear the same cells before the new frame
+		// lands - but isn't: reproduced directly against a real terminal
+		// (tmux, TERM=xterm-256color), issuing \x1b[J right after the
+		// cursor-reposition escapes caused every redraw to be appended as a
+		// new pair of lines instead of overwriting the previous pair in
+		// place, i.e. exactly the "updates no longer land in place, rapidly
+		// creates many newlines" symptom - confirmed both on a bare
+		// \x1b[1A\r\x1b[J sequence with no bar/schollz involved at all, and
+		// fixed by switching to per-line EL instead. Do not swap this back
+		// to \x1b[J without re-testing on a real terminal, not just eyeballing
+		// the escape sequences.
 		b.WriteString(barLine)
-		b.WriteString("\n")
+		b.WriteString("\x1b[K\n")
 		b.WriteString(overallLine)
+		b.WriteString("\x1b[K")
 		fmt.Fprint(os.Stderr, b.String())
 		linesReserved = 2
 	}

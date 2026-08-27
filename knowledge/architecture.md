@@ -188,6 +188,45 @@ paths that several inputs disagree about; that part is inherent, the slice is no
   concurrently with walking (a streaming pipeline, not walk-then-hash), it's normal and
   expected for `seen` to differ from `Found`'s Y in either direction while walking is still in
   progress.
+- **`redraw()`'s dual-line block stopped landing in place and instead scrolled a fresh copy of
+  itself down the terminal every ~100ms** (fixed 2026-08-27, real-fleet report at `--threads 4`:
+  "the updates are no longer in place; the progress rapidly creates many newlines"). Two
+  independent bugs, both in `redraw()`, both required to reproduce:
+  1. **The rate/ETA text added by the previous two bullets made the bar's description long
+     enough to wrap.** `linesReserved` (the cursor-up distance for the next frame) was hardcoded
+     to `2`, implicitly assuming each of the bar line and `OverallLine` fits in one physical
+     terminal row. With `[100% Saturated]` plus the new `(X/s avg, ETA ~Y)` suffix, the bar
+     line can run 150+ visible characters — comfortably wider than an 80- or 100-column
+     terminal — so it wraps onto 2 rows, `linesReserved` under-counts, and each redraw's
+     cursor-up/erase starts one row too low, permanently under-erasing. Fixed with
+     `truncateLine` (`snapshot.go`): both lines are clipped to the real terminal width (via
+     `golang.org/x/term.GetSize` on `os.Stderr`, re-read every frame since the terminal can be
+     resized mid-scan) before being written, so a line can never wrap and `linesReserved == 2`
+     stays true. Width `<= 1` (not a real terminal, or the ioctl failed) leaves both lines
+     untouched — matches the pre-existing behavior for a non-terminal `os.Stderr`.
+  2. **Even with wrapping ruled out, the erase strategy itself was wrong.** The prior code
+     issued a single `\x1b[J` (erase-to-end-of-*screen*) right after the cursor-up/`\r`, before
+     writing either line. Reproduced directly against a real terminal (tmux,
+     `TERM=xterm-256color`) with a trivial fixed-width two-line block and no bar/schollz
+     involved at all: `\x1b[1A\r\x1b[J` followed by new content caused every redraw to be
+     appended as a new pair of lines instead of overwriting the previous pair — despite the
+     cursor math being individually correct (confirmed by dumping the raw bytes via `tmux
+     pipe-pane`). Swapping the *order* of `\x1b[1A` and `\r`, or replacing `\x1b[1A\r` with the
+     equivalent combined `\x1b[1F` (CPL), made it work; adding `\x1b[J` back in either of those
+     forms broke it again — so the erase call itself, not cursor positioning, was the actual
+     cause. No further explanation for *why* `\x1b[J` misbehaves here was pursued (a tmux/VTE
+     implementation quirk, not a spec violation worth chasing) - the fix was to stop using it.
+     `redraw()` now erases per-line instead: `\x1b[K` (erase-to-end-of-*line*) written
+     immediately after each line's content, rather than one screen-wide erase before either
+     line. This is also more targeted (only clears the row just written, not everything below
+     the cursor) and was confirmed clean over 15+ frames at both 80- and 60-column widths with
+     the worst-case (`Saturated` + rate + ETA) description text.
+  Point 1 alone (wrapping) could not reproduce the bug without point 2 (`\x1b[J`) also present -
+  a `wrappedRows`-style fix that only corrected the cursor-up *distance* to account for wrapped
+  lines was tried first and still scrolled, which is what surfaced the `\x1b[J` behavior. If
+  `redraw()` needs further changes, re-verify empirically against a real terminal (e.g. via
+  `tmux new-session -d -x <cols> -y <rows>` + `tmux capture-pane`), not just by re-reading the
+  escape sequences - this bug looked correct on paper at every step until it was actually run.
 - **`snapshot.go`'s two bars deliberately do not use `progressbar.OptionFullWidth()`** (removed
   2026-08-26). Full-width mode recomputes the bar's *content* width from the live terminal
   width on every render, but the library's own line-clearing logic tracks the **maximum**
