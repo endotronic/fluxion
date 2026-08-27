@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -251,6 +252,14 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 
 	var mounted mountTracker
 
+	// stopCh is closed on SIGINT/SIGTERM, before cleanup runs, so the
+	// currently in-flight RunSnapshot call (if any) stops touching its mount
+	// promptly instead of continuing to scan for however long that dataset
+	// takes - see the interrupt handler below for why this matters: without
+	// it, cleanupMounts's retry loop was racing a scan that never stopped,
+	// and could never win.
+	stopCh := make(chan struct{})
+
 	// Interrupt handling: a real run can hold open temporary mounts for
 	// hours (every dataset is mounted upfront, scanned in turn, then all
 	// unmounted at the end - see below). Without this, ^C or a `kill` mid-run
@@ -273,6 +282,15 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 					<-sigCh
 					os.Exit(1)
 				}()
+				// Stop the current dataset's scan before attempting to
+				// unmount anything: closing stopCh makes RunSnapshot's
+				// walker/workers stand down within roughly one in-flight
+				// file's hash time, instead of running for however much
+				// longer that dataset's scan would otherwise take. Without
+				// this, the mount cleanupMounts retries against stays busy
+				// for the rest of the run, not just briefly - no amount of
+				// retrying wins that race.
+				close(stopCh)
 				os.Exit(handleInterrupt(sig, run, mounted.snapshot()))
 			case <-done:
 			}
@@ -399,6 +417,7 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			CrossMounts:    false,
 			ComputeMD5:     cfg.ComputeMD5,
 			NonInteractive: true,
+			StopCh:         stopCh,
 			OnHeartbeat: func(processed int64) {
 				progress.print(doneCount+i, processed)
 			},
@@ -410,6 +429,12 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			snapCfg.AllowDuplicateName = true
 		}
 		err := RunSnapshot(snapCfg)
+		if errors.Is(err, ErrScanInterrupted) {
+			// The interrupt handler (running on its own goroutine) is
+			// already closing in on cleanupMounts + os.Exit; stop iterating
+			// instead of racing it into the next dataset's mount/scan.
+			return res, nil
+		}
 		progress.datasetDone(p.dataset)
 		if err != nil {
 			logrus.Errorf("scan of %s failed: %v", p.dataset.Name, err)

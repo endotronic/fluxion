@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,6 +52,14 @@ type SnapshotConfig struct {
 	// resumes, for callers driving many scans unattended (zfs-scan).
 	NonInteractive bool
 
+	// StopCh, if non-nil, lets a caller cancel an in-flight scan (e.g.
+	// zfs-scan reacting to SIGINT so it can safely unmount). On stop,
+	// RunSnapshot returns ErrScanInterrupted without marking the snapshot
+	// completed or failed - it's left in_progress so a later run resumes it
+	// (see ResumeFrom). Plumbed straight through to
+	// scanner.ScannerConfig.StopCh.
+	StopCh <-chan struct{}
+
 	// OnHeartbeat, if set, is called every ~30s for the duration of the scan
 	// with the number of bytes processed (hashed/recorded) so far - the same
 	// value driving this scan's own progress bar. It exists for a caller
@@ -71,6 +80,11 @@ type SnapshotConfig struct {
 	// holds that exact name.
 	AllowDuplicateName bool
 }
+
+// ErrScanInterrupted is returned by RunSnapshot when cfg.StopCh fires before
+// the scan finishes. The snapshot row is left in_progress - not completed,
+// not failed - so a later run can resume it.
+var ErrScanInterrupted = errors.New("scan interrupted before completion")
 
 func RunSnapshot(cfg SnapshotConfig) error {
 	targetDir, err := filepath.Abs(cfg.TargetDir)
@@ -309,6 +323,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		CrossMounts: cfg.CrossMounts,
 		FailOnMount: cfg.FailOnMount,
 		ComputeMD5:  cfg.ComputeMD5,
+		StopCh:      cfg.StopCh,
 		OnFileFound: func(path string, size int64) {
 			foundCount.Add(1)
 			foundBytes.Add(size)
@@ -428,17 +443,25 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		// completely silent between the "Estimated scan size" line and
 		// "Finished", which reads as a hang. Log the same status periodically
 		// instead, at a rate sane for a log file rather than a terminal.
-		//
-		// The same ticker also drives cfg.OnHeartbeat (e.g. zfs-scan's overall
-		// run progress line), so it runs regardless of quiet whenever a caller
-		// has asked for it - a TTY still gets its live per-dataset bar, but a
-		// multi-dataset run has no other periodic hook to piggyback an
-		// overall-progress line onto.
 		var heartbeat <-chan time.Time
-		if quiet || cfg.OnHeartbeat != nil {
+		if quiet {
 			hb := time.NewTicker(30 * time.Second)
 			defer hb.Stop()
 			heartbeat = hb.C
+		}
+
+		// cfg.OnHeartbeat (zfs-scan's overall run-progress line) gets its own,
+		// faster ticker, deliberately decoupled from the 30s log-heartbeat
+		// cadence above: 30s is fine for an unattended piped log, but someone
+		// watching a multi-dataset run interactively wants to actually see the
+		// overall line move, not stare at one static line for half a minute -
+		// this was reported as "no progress shown of the total scan" even
+		// though the line itself was printing, just too rarely to look alive.
+		var overallTick <-chan time.Time
+		if cfg.OnHeartbeat != nil {
+			ot := time.NewTicker(5 * time.Second)
+			defer ot.Stop()
+			overallTick = ot.C
 		}
 
 		walking := true
@@ -475,16 +498,13 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				}
 				bar.Set64(current)
 			case <-heartbeat:
-				if quiet {
-					if walking {
-						logrus.Infof("Scanning... found %d files (%s) so far", foundCount.Load(), util.FormatBytes(foundBytes.Load()))
-					} else {
-						logrus.Infof("Hashing... %d/%d files done", processedCount.Load(), foundCount.Load())
-					}
+				if walking {
+					logrus.Infof("Scanning... found %d files (%s) so far", foundCount.Load(), util.FormatBytes(foundBytes.Load()))
+				} else {
+					logrus.Infof("Hashing... %d/%d files done", processedCount.Load(), foundCount.Load())
 				}
-				if cfg.OnHeartbeat != nil {
-					cfg.OnHeartbeat(processedBytes.Load())
-				}
+			case <-overallTick:
+				cfg.OnHeartbeat(processedBytes.Load())
 			case <-done:
 				bar.Finish()
 				return
@@ -570,6 +590,13 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	}
 
 	<-done
+
+	select {
+	case <-cfg.StopCh:
+		logrus.Warnf("Scan interrupted before completion; snapshot left in-progress for a later run to resume.")
+		return ErrScanInterrupted
+	default:
+	}
 
 	totalErrors := scanErrors.Load() + writeErrors.Load()
 	if totalErrors > 0 {

@@ -257,17 +257,45 @@ still gets scanned.
   or degraded mount. Whatever dataset was mid-scan when the signal arrived is left
   `in_progress` in the DB exactly as before — the resume-by-name behavior described above is
   what makes rerunning after a `^C` actually pick it back up instead of getting stuck.
-  - **Unmount is retried, not one-shot** (`unmountWithRetry`, added 2026-08-26): up to 5
-    attempts, 1s apart (~4s worst case), before giving up and logging the mount as left
-    behind. This was a real, observed failure: a process that just finished scanning (or was
-    just `^C`'d) can still be holding the mount open for a brief moment — a walker/hasher
-    goroutine unwinding, or the kernel not yet having dropped the last open file reference —
-    so the very first `umount` right after `RunSnapshot` returns (or right after the signal
-    handler fires) can lose that race with a transient "target is busy" even though the mount
-    is genuinely about to be releasable. `cleanupMounts` is shared by normal end-of-run
-    teardown and the interrupt handler, so both get the retry for free. `unmountRetries` /
-    `unmountRetryDelay` are package-level `var`s (not `const`s) purely so tests can shrink the
-    delay instead of sleeping for real seconds.
+  - **The scan itself is cancelled before unmounting is attempted** (`StopCh`, added
+    2026-08-26, superseding an earlier retry-only fix that turned out not to be enough). A
+    first attempt at this fixed only the transient case — retrying `umount` up to 5 times,
+    1s apart — on the theory that a process which had just finished scanning could still be
+    holding the mount open for a brief moment (a walker/hasher goroutine unwinding, or the
+    kernel not yet having dropped the last open file reference). That's real, but it's not
+    what a live fleet run actually hit: on `^C`, the dataset **currently being scanned**
+    keeps scanning — `RunSnapshot` had no way to be told to stop — so its mount stays
+    genuinely busy for as long as that dataset's scan would otherwise take, not briefly.
+    5 retries over ~4s can't win a race against a scan with no bound on how long it keeps
+    running. Confirmed against a real run: `luna/historian/arctic_shift`'s scan kept
+    reporting new bytes hashed for 4+ seconds *after* the interrupt handler had already
+    started retrying its unmount, so every attempt failed identically.
+    - The actual fix threads a `StopCh <-chan struct{}` from `ZFSScanConfig` through
+      `SnapshotConfig.StopCh` into `scanner.ScannerConfig.StopCh`
+      (`internal/scanner/scanner.go`): the walker checks it before descending (returns
+      `filepath.SkipAll`) and before every send into the path-work channel (a plain send
+      there would otherwise deadlock forever once idle workers have already exited — see
+      the comment at that call site), and each worker selects on it alongside its normal
+      work-channel read. `RunZFSScan`'s interrupt handler closes this `stopCh` *before*
+      calling `cleanupMounts`, so by the time the retry loop runs, the scan is actually
+      winding down instead of still fighting for the same file descriptors — retrying is
+      now papering over a real but bounded delay (worst case roughly one in-flight file's
+      hash time; a worker doesn't abort a read mid-file) instead of an unbounded one.
+    - `RunSnapshot` returns the sentinel `ErrScanInterrupted` when `StopCh` fires, and
+      deliberately does **not** call `CompleteSnapshot` or `FailSnapshot` in that case — the
+      snapshot row is left `in_progress` so the resume-by-name path above picks it back up
+      on the next run. Marking an interrupted, partial scan as anything other than
+      `in_progress` would be exactly the false "safe" signal
+      [goals.md](goals.md)'s severity rule warns about. `RunZFSScan`'s scan loop checks for
+      this sentinel and stops iterating the remaining `toScan` datasets immediately, rather
+      than uselessly attempting (and instantly self-cancelling) each of them in turn while
+      the interrupt goroutine's cleanup is already in flight.
+    - `unmountWithRetry` (5 attempts, 1s apart, ~4s worst case) is kept as-is on top of this
+      — it still matters for the ordinary end-of-run case and for the brief post-scan window
+      the original fix targeted. `unmountRetries` / `unmountRetryDelay` are package-level
+      `var`s (not `const`s) purely so tests can shrink the delay instead of sleeping for real
+      seconds. `cleanupMounts` is shared by normal end-of-run teardown and the interrupt
+      handler, so both benefit from the retry.
 - **No progress bar in a piped/logged run** (e.g. `zfs-scan ... | tee log`): the progress
   bar writer is discarded whenever stderr isn't a TTY (see
   [architecture.md](architecture.md) "Output conventions"), and `RunSnapshot` fills that gap
@@ -278,11 +306,19 @@ still gets scanned.
   it's currently scanning; without a second line there was no way to tell how far through a
   multi-dataset run you were or estimate when it would finish. `overallProgress`
   (`internal/app/zfsscan.go`) prints `-- overall: K/N datasets done, X / Y (P%), elapsed E[,
-  ETA ~T]` at the start of each dataset, on every ~30s heartbeat while a dataset is
-  mid-scan, and again once it finishes. It's driven by the same `SnapshotConfig.OnHeartbeat`
-  callback plumbed through `RunSnapshot` for this purpose — that ticker now fires whenever
-  `OnHeartbeat` is set, not only in piped/`quiet` mode, so a TTY run still gets its live
-  per-dataset bar *and* a periodic overall line underneath it.
+  ETA ~T]` at the start of each dataset, on a periodic tick while a dataset is mid-scan, and
+  again once it finishes. It's driven by `SnapshotConfig.OnHeartbeat`, a callback plumbed
+  through `RunSnapshot` for this purpose.
+  - **The tick driving `OnHeartbeat` is a separate, faster ticker (5s) from the `quiet`
+    piped-log heartbeat (30s)**, added 2026-08-26 — they used to share one 30s ticker. On a
+    real run, a dataset interrupted only ~20s into scanning had printed exactly one overall
+    line and never got a second one, which read as "no progress shown for the total scan"
+    even though the mechanism was technically working — 30s is reasonable cadence for an
+    unattended piped log, but far too slow to look alive to someone watching a TTY. The two
+    are independent: `quiet` (piped/non-TTY stderr) still gets its `logrus.Infof` status
+    line only every 30s; `OnHeartbeat`, when set, now fires every 5s regardless of `quiet`,
+    so a TTY run gets its live per-dataset bar *and* a genuinely-updating overall line
+    underneath it.
   - **Weighted by ZFS's `used` property** (`zfsutil.Dataset.Used`, added to the `zfs list`
     columns), not a flat per-dataset count — a small quick dataset finishing shouldn't read
     as meaningful progress next to a multi-terabyte one still running. `used` is physical,

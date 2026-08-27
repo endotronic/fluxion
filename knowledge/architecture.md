@@ -47,6 +47,19 @@ streaming, and the whole snapshot is materialised in memory before analysis. Tha
 asymmetry with `diff` is deliberate but is also a scaling limit
 (see [dupes-algo.md](dupes-algo.md)).
 
+**`scanner.ScannerConfig.StopCh <-chan struct{}`** (added 2026-08-26) is the codebase's
+first cancellation seam — before this, nothing in `internal/scanner` or `internal/app` could
+be told to stop early; a scan ran to completion or the whole process was killed. Threaded
+`ZFSScanConfig`(internal, created in `RunZFSScan`) → `SnapshotConfig.StopCh` →
+`scanner.ScannerConfig.StopCh`, closed by `zfs-scan`'s SIGINT/SIGTERM handler before it
+attempts to unmount anything. The walker checks it before descending and before every send
+into the path-work channel (the latter matters: with idle workers already exited, a plain
+channel send would otherwise block forever — see the comment at that call site in
+`scanner.go`), and each worker selects on it. `RunSnapshot` returns the sentinel
+`ErrScanInterrupted` and deliberately leaves the snapshot `in_progress` (never
+`completed`/`failed`) when this fires — see [cli.md](cli.md) `## zfs-scan` for why a
+retry-only fix wasn't enough here and what this replaced.
+
 ## Streaming vs. materialising — read the store methods carefully
 
 `store.Store` offers three different ways to read files, with very different memory
@@ -94,6 +107,10 @@ paths that several inputs disagree about; that part is inherent, the slice is no
   drives the bar, logging via `logrus.Infof` ("Scanning... found N files" during the walk,
   "Hashing... N/M files done" afterward). TTY/interactive behavior is unaffected — the
   heartbeat channel stays `nil` (blocks forever in the `select`) whenever `quiet` is false.
+  `SnapshotConfig.OnHeartbeat` (zfs-scan's overall-progress hook) has run on its *own*
+  ticker, independent of this 30s one, since 2026-08-26 — a 5s tick, because 30s reads as
+  "nothing is happening" to someone watching a multi-dataset run interactively, even though
+  a piped log is fine checking in that rarely. See [cli.md](cli.md) `## zfs-scan`.
 - **`snapshot.go`'s two bars deliberately do not use `progressbar.OptionFullWidth()`** (removed
   2026-08-26). Full-width mode recomputes the bar's *content* width from the live terminal
   width on every render, but the library's own line-clearing logic tracks the **maximum**

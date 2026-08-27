@@ -5,11 +5,13 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fluxion/internal/models"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
 
 func TestRunScan(t *testing.T) {
@@ -243,5 +245,115 @@ func TestRunScan_Resume(t *testing.T) {
 
 	if fromResumeCount != 1 {
 		t.Errorf("Expected 1 result from resume, got %d", fromResumeCount)
+	}
+}
+
+// TestRunScan_StopChStopsPromptly proves closing StopCh actually unblocks a
+// walker that's stuck mid-send into a full `paths` buffer, rather than
+// deadlocking. This is the scenario that mattered for zfs-scan's SIGINT
+// handling: closing StopCh has to make an in-flight scan stand down within a
+// bounded time so a caller (zfs-scan's unmount retry) can rely on the mount
+// actually becoming idle, not race a scan that never stops.
+func TestRunScan_StopChStopsPromptly(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// NumWorkers(1) * consts.ScannerChannelBufferMultiplier(1000) = a 1000
+	// entry buffer. More files than that forces the walker to block on
+	// `paths <- path` well before it finishes, which is the only way to
+	// actually exercise the select-based deadlock avoidance around that
+	// send (a buffer that never fills wouldn't touch that code path at all).
+	const numFiles = 1500
+	for i := 0; i < numFiles; i++ {
+		p := filepath.Join(tmpDir, fmt.Sprintf("f%d", i))
+		if err := os.WriteFile(p, nil, 0644); err != nil {
+			t.Fatalf("write file %d: %v", i, err)
+		}
+	}
+
+	stopCh := make(chan struct{})
+	results := make(chan ScanResult)
+	cfg := ScannerConfig{
+		RootPath:   tmpDir,
+		SnapshotID: 4,
+		NumWorkers: 1,
+		StopCh:     stopCh,
+	}
+
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		RunScan(cfg, results)
+	}()
+
+	// Read a few results - by the time these arrive, the walker has almost
+	// certainly already filled the 1000-entry buffer and is blocked trying
+	// to send the next one, since the walker enqueues far faster than one
+	// worker can hash-and-report.
+	for i := 0; i < 5; i++ {
+		if _, ok := <-results; !ok {
+			t.Fatalf("results closed after only %d items, before StopCh was even closed", i)
+		}
+	}
+	close(stopCh)
+
+	// Drain whatever's left in flight so RunScan's own send(s) don't block
+	// on a test that stopped reading.
+	for range results {
+	}
+
+	select {
+	case <-scanDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunScan did not return within 5s of StopCh closing - likely deadlocked on a blocked paths<- send")
+	}
+}
+
+// TestRunScan_StopChAlreadyClosed proves a StopCh that's closed before
+// RunScan is even called stops the walk essentially immediately, rather than
+// scanning at least a first batch anyway.
+func TestRunScan_StopChAlreadyClosed(t *testing.T) {
+	tmpDir := t.TempDir()
+	for i := 0; i < 20; i++ {
+		p := filepath.Join(tmpDir, fmt.Sprintf("f%d", i))
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatalf("write file %d: %v", i, err)
+		}
+	}
+
+	stopCh := make(chan struct{})
+	close(stopCh)
+
+	results := make(chan ScanResult)
+	cfg := ScannerConfig{
+		RootPath:   tmpDir,
+		SnapshotID: 5,
+		NumWorkers: 2,
+		StopCh:     stopCh,
+	}
+
+	scanDone := make(chan struct{})
+	var got int
+	go func() {
+		defer close(scanDone)
+		for range results {
+			got++
+		}
+	}()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		RunScan(cfg, results)
+	}()
+
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunScan did not return within 5s with an already-closed StopCh")
+	}
+	<-scanDone
+
+	if got != 0 {
+		t.Errorf("expected 0 files processed with StopCh already closed, got %d", got)
 	}
 }

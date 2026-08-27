@@ -29,6 +29,15 @@ type ScannerConfig struct {
 	// New: MD5 Computation
 	ComputeMD5 bool
 
+	// StopCh, if non-nil, lets a caller cancel an in-flight scan: once
+	// closed, the walker stops descending (returns filepath.SkipAll) and
+	// idle workers exit, instead of running to completion. A worker already
+	// mid-file finishes hashing that one file before it notices - RunScan
+	// does not interrupt a read in progress. Left nil, a nil channel never
+	// fires in a select, so this is a no-op for every caller that doesn't
+	// need cancellation.
+	StopCh <-chan struct{}
+
 	// Callbacks
 	OnFileFound    func(path string, size int64)
 	OnWalkComplete func()
@@ -59,8 +68,16 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for path := range paths {
-				processFile(path, cfg, results)
+			for {
+				select {
+				case path, ok := <-paths:
+					if !ok {
+						return
+					}
+					processFile(path, cfg, results)
+				case <-cfg.StopCh:
+					return
+				}
 			}
 		}()
 	}
@@ -72,6 +89,12 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 
 	// Start walker
 	err = filepath.WalkDir(cfg.RootPath, func(path string, d os.DirEntry, err error) error {
+		select {
+		case <-cfg.StopCh:
+			return filepath.SkipAll
+		default:
+		}
+
 		if err != nil {
 			results <- ScanResult{Error: err}
 			return nil // Don't stop walk for individual file permission errors
@@ -124,7 +147,17 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 			if !d.Type().IsRegular() {
 				return nil
 			}
-			paths <- path
+			// Select rather than a plain send: if StopCh fires while workers
+			// have already exited (paths' buffer full, nobody left to drain
+			// it), a plain send here would block forever and this walker -
+			// running synchronously in RunScan, not its own goroutine -
+			// would never reach close(paths)/wg.Wait(), hanging the scan
+			// instead of stopping it.
+			select {
+			case paths <- path:
+			case <-cfg.StopCh:
+				return filepath.SkipAll
+			}
 		}
 		return nil
 	})
