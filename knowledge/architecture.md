@@ -134,6 +134,60 @@ paths that several inputs disagree about; that part is inherent, the slice is no
   goroutine, nothing left to race. Off a TTY this doesn't apply - `OverallLine` just gets
   logged periodically instead (previous bullet); the plain `fluxion snapshot` path
   (`OverallLine == nil`) is untouched either way. See [cli.md](cli.md) `## zfs-scan`.
+- **The `Scanning...` bar's own built-in ETA (`schollz/progressbar`'s `predictTime`) is
+  disabled and replaced with a hand-rolled one** (fixed 2026-08-27, after a real-fleet report
+  that the bracketed `[elapsed:ETA]` figure only ever showed the elapsed side moving - `ETA`
+  itself sat at a flatly wrong `0s` for over an hour on a dataset dominated by a few huge
+  files). Root cause, confirmed by direct reproduction against the vendored library: schollz
+  samples throughput over a short (sub-10s) rolling window and divides by that window's rate
+  to predict remaining time; if the window sees *zero* progress - routine here, since hashing
+  one large file produces no `processedBytes` update for the entire time it's in flight - the
+  zero-rate division overflows through a `float64`→`Duration` conversion into a large negative
+  number, and the library's own "if negative, clamp to zero" guard then displays that as `ETA
+  ~0s` for the whole stall, not as "unknown" or "long". `OptionSetPredictTime(false)` +
+  `OptionSetElapsedTime(true)` keeps the library's (correct) elapsed-time display and drops its
+  broken ETA; `estimateETA` (`internal/app/zfsscan.go`, shared with `overallProgress.line()`)
+  computes a whole-run-so-far average (`done/elapsed` since the bar's own start, guarded the
+  same way as the overall line: no estimate before 2 elapsed seconds or before any progress,
+  remaining clamped to zero if `done` overshoots the current max) and gets appended to the
+  bar's description text instead. A whole-run average can't hit the zero-rate case - elapsed
+  and done only ever grow - at the cost of reacting to a real slowdown/speedup more slowly, an
+  acceptable trade given the alternative is a number that reads as precise while sometimes
+  being outright wrong. `barMax` (a local tracking `estimatedTotal` until `bar.ChangeMax64`
+  fires, then the walk-discovered total) is threaded through alongside `barStart` so the ETA
+  always divides against the same total the bar's own percentage is drawn against. This bug is
+  independent of `dualLine`/`OverallLine` - it also affects a plain, non-`zfs-scan` `fluxion
+  snapshot` run on large files, since it's inherent to the schollz library's rate calculation,
+  not something introduced by the two-line coordination above.
+- **The `Scanning...` bar's throughput figure (`X/s`) has the same failure mode as its ETA,
+  and gets the same fix** (2026-08-27, same report - "I thought I saw a rate earlier, but now I
+  don't"). schollz's own `showBytes`-driven rate segment (inside the `(current/max, rate)`
+  parens) is computed from the identical short rolling-window `averageRate` that broke
+  `predictTime` - but instead of dividing by a zero rate and showing something wrong, the
+  library just omits the segment entirely whenever `averageRate <= 0` (`if c.showBytes &&
+  averageRate > 0 { ... }`), so the rate silently vanishes mid-scan during any stall (a large
+  file being hashed) and reappears once small-file throughput resumes. `averageRate` (the
+  `internal/app/zfsscan.go` helper `estimateETA` now calls internally) is used directly for
+  this too: a whole-run-so-far `done/elapsed` figure, appended to the bar's description
+  alongside the ETA as `(X/s avg, ETA ~Y)` - always present once there's 2s of elapsed time and
+  any progress, never blank. `OptionShowBytes(true)` is left on the bar config as before (it
+  still drives the humanized `(current/max)` byte formatting in schollz's own segment); its own
+  rate figure inside that segment is simply superseded, not actively disabled - there is no
+  public option to turn off only the rate half of `showBytes` without also losing the byte
+  formatting, so it may still opportunistically show its own (unreliable) number too on top of
+  ours. That's a minor cosmetic redundancy, not a correctness problem: ours is always accurate
+  and always present, which is what matters.
+- **"Found N/Y" (in the bar's description, during the walk phase) and "(seen/max)" (in the
+  bar's own parens) are two different counters, not a before/after of the same ratio** - easy
+  to misread as related. "Found N/Y" is the **walker's** running tally: N is the count of files
+  the directory walk has discovered so far, Y is their total size - pure enumeration progress,
+  independent of hashing. "(seen/max)" is the **bar's own** progress: `seen` is
+  `processedBytes` (bytes actually hashed and recorded to the DB so far), `max` is
+  `estimatedTotal` (the pre-scan FS-usage estimate) until the walk finishes, then
+  `bar.ChangeMax64` swaps it to the walk's actual found-total. Because hashing runs
+  concurrently with walking (a streaming pipeline, not walk-then-hash), it's normal and
+  expected for `seen` to differ from `Found`'s Y in either direction while walking is still in
+  progress.
 - **`snapshot.go`'s two bars deliberately do not use `progressbar.OptionFullWidth()`** (removed
   2026-08-26). Full-width mode recomputes the bar's *content* width from the live terminal
   width on every render, but the library's own line-clearing logic tracks the **maximum**

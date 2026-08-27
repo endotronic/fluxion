@@ -181,19 +181,62 @@ func (p *overallProgress) line(datasetsDone int, currentProcessed int64) string 
 	}
 	line += fmt.Sprintf(", elapsed %s", elapsed)
 
-	// ETA needs a nonzero rate to divide by - wait for a little elapsed time
-	// and some actual progress before estimating, rather than showing a wild
-	// swing off the first sample.
-	if p.totalBytes > 0 && done > 0 && elapsed >= 2*time.Second {
-		remaining := p.totalBytes - done
-		if remaining < 0 {
-			remaining = 0
-		}
-		rate := float64(done) / elapsed.Seconds()
-		eta := time.Duration(float64(remaining) / rate * float64(time.Second)).Round(time.Second)
+	if eta, ok := estimateETA(elapsed, done, p.totalBytes); ok {
 		line += fmt.Sprintf(", ETA ~%s", eta)
 	}
 	return line
+}
+
+// estimateETA predicts remaining time from a whole-run-so-far average rate
+// (done/elapsed), not a short rolling window - deliberately simpler than
+// schollz/progressbar's own built-in predictor, which samples throughput
+// over short (sub-10s) windows and, worse, divides by zero whenever one of
+// those windows sees no progress at all. That happens routinely here: a
+// single large file produces no progress signal (no processedBytes update)
+// for the entire time it's being hashed, so a short window can easily land
+// entirely within one multi-minute stall. schollz's zero-rate division
+// overflows through a float64->Duration conversion into a large negative
+// number, which its own "< 0 means clamp to zero" guard then displays as a
+// flatly wrong "ETA ~0s" for the rest of that stall - confirmed by direct
+// reproduction against the vendored library. A whole-run average can't hit
+// that failure mode (elapsed and done only ever grow), at the cost of
+// reacting to a real slowdown/speedup more slowly - an acceptable trade
+// given the alternative is a number that reads as more precise than it is
+// while sometimes being outright wrong.
+//
+// ok is false (no estimate) when there isn't enough signal yet: no known
+// total, no progress recorded, or under 2 elapsed seconds (too little time
+// to divide by without a wild swing off the first sample).
+func estimateETA(elapsed time.Duration, done, total int64) (eta time.Duration, ok bool) {
+	if total <= 0 {
+		return 0, false
+	}
+	rate, ok := averageRate(elapsed, done)
+	if !ok {
+		return 0, false
+	}
+	remaining := total - done
+	if remaining < 0 {
+		remaining = 0
+	}
+	return time.Duration(float64(remaining) / rate * float64(time.Second)).Round(time.Second), true
+}
+
+// averageRate returns a whole-run-so-far average throughput in bytes/second:
+// done/elapsed, guarded the same way as estimateETA (which calls this) - no
+// estimate before 2 elapsed seconds or before any progress at all, so it
+// can't return a wild swing off the first sample or a divide-by-zero. Used
+// directly (not just via estimateETA) to show a live rate figure next to the
+// "Scanning..." bar: schollz/progressbar's own rate display is driven by the
+// same short rolling-window average that made its ETA unreliable (see
+// estimateETA's doc comment) - it silently goes blank rather than showing a
+// wrong number, but "the rate disappears mid-scan" is still a worse user
+// experience than a slower-to-react but always-present whole-run average.
+func averageRate(elapsed time.Duration, done int64) (bytesPerSecond float64, ok bool) {
+	if done <= 0 || elapsed < 2*time.Second {
+		return 0, false
+	}
+	return float64(done) / elapsed.Seconds(), true
 }
 
 func (p *overallProgress) print(datasetsDone int, currentProcessed int64) {

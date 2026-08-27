@@ -507,6 +507,75 @@ func TestOverallProgress_Line(t *testing.T) {
 	})
 }
 
+func TestEstimateETA(t *testing.T) {
+	t.Run("no total: not ok", func(t *testing.T) {
+		if _, ok := estimateETA(10*time.Second, 500, 0); ok {
+			t.Error("expected ok=false when total is 0")
+		}
+	})
+
+	t.Run("no progress yet: not ok", func(t *testing.T) {
+		if _, ok := estimateETA(10*time.Second, 0, 1000); ok {
+			t.Error("expected ok=false when done is 0")
+		}
+	})
+
+	t.Run("under 2s elapsed: not ok", func(t *testing.T) {
+		if _, ok := estimateETA(time.Second, 500, 1000); ok {
+			t.Error("expected ok=false before 2s elapsed")
+		}
+	})
+
+	t.Run("done=500/1000 over 10s -> ETA ~10s", func(t *testing.T) {
+		eta, ok := estimateETA(10*time.Second, 500, 1000)
+		if !ok || eta != 10*time.Second {
+			t.Errorf("estimateETA = %v, %v, want 10s, true", eta, ok)
+		}
+	})
+
+	t.Run("done overshoots total: remaining clamped to zero", func(t *testing.T) {
+		eta, ok := estimateETA(10*time.Second, 1500, 1000)
+		if !ok || eta != 0 {
+			t.Errorf("estimateETA = %v, %v, want 0s, true", eta, ok)
+		}
+	})
+
+	t.Run("a stalled window never divides by zero: still a sane whole-run estimate", func(t *testing.T) {
+		// This is the regression case: schollz/progressbar's own predictTime
+		// samples a short rolling window and, if that window saw literally no
+		// progress (e.g. hashing one huge file with no incremental signal),
+		// divides by a zero rate - overflowing into a bogus "ETA ~0s" that
+		// doesn't move for the whole stall. estimateETA instead uses the
+		// whole-run average (done/elapsed), which stays sane through any
+		// stall as long as done and elapsed are both nonzero.
+		eta, ok := estimateETA(100*time.Second, 100, 1000)
+		if !ok || eta != 900*time.Second {
+			t.Errorf("estimateETA = %v, %v, want 900s, true", eta, ok)
+		}
+	})
+}
+
+func TestAverageRate(t *testing.T) {
+	t.Run("no progress yet: not ok", func(t *testing.T) {
+		if _, ok := averageRate(10*time.Second, 0); ok {
+			t.Error("expected ok=false when done is 0")
+		}
+	})
+
+	t.Run("under 2s elapsed: not ok", func(t *testing.T) {
+		if _, ok := averageRate(time.Second, 500); ok {
+			t.Error("expected ok=false before 2s elapsed")
+		}
+	})
+
+	t.Run("1000 bytes over 10s -> 100 B/s", func(t *testing.T) {
+		rate, ok := averageRate(10*time.Second, 1000)
+		if !ok || rate != 100 {
+			t.Errorf("averageRate = %v, %v, want 100, true", rate, ok)
+		}
+	})
+}
+
 func TestCleanupMounts_UnmountsAndRemoves(t *testing.T) {
 	fz := &fakeZFS{}
 	dirs := []string{t.TempDir(), t.TempDir()}

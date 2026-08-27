@@ -443,6 +443,20 @@ func RunSnapshot(cfg SnapshotConfig) error {
 
 	// Prepare Bar
 	// We want 2 modes: Indeterminate (while walking), then Determinate (when walk done)
+	//
+	// predictTime is deliberately off, with our own ETA computed and appended
+	// to the description text below instead (see estimateETA in zfsscan.go).
+	// schollz's built-in predictor sits below a short (sub-10s) rolling
+	// throughput window and divides by zero whenever that window sees no
+	// progress at all - which happens routinely here, since a single large
+	// file produces no processedBytes update for the entire time it's being
+	// hashed. The division overflows through a float64->Duration conversion
+	// into a large negative number, which the library's own "<0 means clamp
+	// to zero" guard then displays as a flatly wrong "ETA ~0s" for the rest
+	// of that stall - confirmed by direct reproduction against the vendored
+	// library, and matching a real report of a per-dataset ETA that never
+	// moved despite the bar's own elapsed time (which is not affected by
+	// this bug) climbing normally for over an hour.
 	bar := progressbar.NewOptions64(
 		estimatedTotal,
 		progressbar.OptionSetDescription("Scanning..."),
@@ -451,6 +465,8 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		progressbar.OptionSetWidth(15),
 		progressbar.OptionThrottle(65*time.Millisecond),
 		progressbar.OptionShowCount(),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionSetElapsedTime(true),
 		progressbar.OptionOnCompletion(func() {
 			// In dualLine mode the final newline is emitted by redraw()'s
 			// caller instead, after the last combined frame - this callback
@@ -462,6 +478,11 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		}),
 		progressbar.OptionSpinnerType(14),
 	)
+	barStart := time.Now()
+	// barMax tracks the bar's current max (see bar.ChangeMax64 below) so the
+	// ETA computed alongside it always divides against the same total the
+	// percentage/saucer are drawn against.
+	barMax := estimatedTotal
 
 	// linesReserved is how many terminal rows the previous dualLine frame
 	// occupied (0 before the first frame), so redraw() knows how far to move
@@ -555,22 +576,36 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				walkSignal = nil
 				walking = false
 				// Switch to determinate
-				bar.ChangeMax64(foundBytes.Load())
+				barMax = foundBytes.Load()
+				bar.ChangeMax64(barMax)
 			case <-ticker.C:
 				current := processedBytes.Load()
+				sinceStart := time.Since(barStart)
+
+				etaSuffix := ""
+				if rate, ok := averageRate(sinceStart, current); ok {
+					etaSuffix = fmt.Sprintf(" %s/s avg", util.FormatBytes(int64(rate)))
+				}
+				if eta, ok := estimateETA(sinceStart, current, barMax); ok {
+					etaSuffix += fmt.Sprintf(", ETA ~%s", eta)
+				}
+				if etaSuffix != "" {
+					etaSuffix = " (" + strings.TrimPrefix(etaSuffix, " ") + ")"
+				}
+
 				if walking {
 					found := foundCount.Load()
 					delta := foundCount.Load() - processedCount.Load()
-					desc := fmt.Sprintf("Scanning (Found %d/%s)...", found, util.FormatBytes(foundBytes.Load()))
+					desc := fmt.Sprintf("Scanning (Found %d/%s)...%s", found, util.FormatBytes(foundBytes.Load()), etaSuffix)
 
 					saturation := float64(delta) / totalBuffer
 					if saturation > 0.5 {
-						desc = fmt.Sprintf("Scanning (Found %d/%s) [%.0f%% Saturated]...", found, util.FormatBytes(foundBytes.Load()), saturation*100)
+						desc = fmt.Sprintf("Scanning (Found %d/%s) [%.0f%% Saturated]...%s", found, util.FormatBytes(foundBytes.Load()), saturation*100, etaSuffix)
 					}
 
 					bar.Describe(desc)
 				} else {
-					desc := fmt.Sprintf("Found (%d). Hashing (%d done)...", foundCount.Load(), processedCount.Load())
+					desc := fmt.Sprintf("Found (%d). Hashing (%d done)...%s", foundCount.Load(), processedCount.Load(), etaSuffix)
 					bar.Describe(desc)
 				}
 				bar.Set64(current)
