@@ -495,11 +495,11 @@ func TestOverallProgress_Line(t *testing.T) {
 	})
 
 	t.Run("datasetDone accumulates bytesDoneBefore", func(t *testing.T) {
-		p := newOverallProgress([]zfsutil.Dataset{{Name: "a", Used: 100}, {Name: "b", Used: 200}})
+		p := newOverallProgress([]zfsutil.Dataset{{Name: "a", Referenced: 100}, {Name: "b", Referenced: 200}})
 		if p.totalBytes != 300 {
 			t.Fatalf("totalBytes = %d, want 300", p.totalBytes)
 		}
-		p.datasetDone(zfsutil.Dataset{Name: "a", Used: 100})
+		p.datasetDone(zfsutil.Dataset{Name: "a", Referenced: 100})
 		got := p.line(1, 0)
 		if !strings.Contains(got, "33.3%") {
 			t.Errorf("line = %q, want 33.3%% after one 100/300 dataset done", got)

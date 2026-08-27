@@ -33,17 +33,32 @@ type Dataset struct {
 	Type       string // "filesystem" or "volume"
 	Mounted    bool
 
-	// Used is the dataset's `used` property in bytes: physical, on-disk space
-	// (post-compression, including data retained only by its own ZFS
-	// snapshots), not the logical size of the files it contains. It exists to
-	// weight a dataset's share of a multi-dataset zfs-scan run for an overall
-	// progress/ETA estimate - the same kind of on-disk figure RunSnapshot
-	// already uses for a single dataset's own progress bar (util.GetFSUsage),
-	// just read directly off the property instead of re-derived via statfs.
+	// Referenced is the dataset's `referenced` property in bytes: physical,
+	// on-disk space (post-compression) accessible through this dataset's own
+	// filesystem right now - not its descendants' data, and not space held
+	// only by its own ZFS snapshots. It exists to weight a dataset's share of
+	// a multi-dataset zfs-scan run for an overall progress/ETA estimate: each
+	// dataset is scanned with CrossMounts:false (children are separate
+	// mounts, never descended into), so `referenced` is what that one scan
+	// will actually walk - the same thing RunSnapshot's own per-dataset bar
+	// estimates via statfs on that one mountpoint (util.GetFSUsage).
+	//
+	// This used to read the `used` property instead, which is NOT what a
+	// single dataset's scan touches: `used` is cumulative down the tree -
+	// child datasets fold into every ancestor's `used` - so summing it across
+	// every dataset in a pool multiply-counts the same physical bytes once
+	// per level of nesting. Confirmed on a real fleet: `luna`'s `used` alone
+	// (69.7T, already the whole pool) plus its descendants' `used` values
+	// summed to a reported overall total of 205.6T against a pool that only
+	// holds 69.7T. `referenced` does not have this problem: a container
+	// dataset with no files of its own (`luna`, `luna/historian`, ...)
+	// reports a `referenced` near zero, so it contributes nothing to the
+	// total beyond what its own scan would actually find.
+	//
 	// A malformed/unparseable value is left as 0 rather than failing the
 	// whole listing - it only ever affects a progress estimate, never
 	// correctness.
-	Used int64
+	Referenced int64
 }
 
 // ListDatasets recursively lists every filesystem and volume under roots,
@@ -54,7 +69,7 @@ func ListDatasets(run Runner, roots []string) ([]Dataset, error) {
 		return nil, fmt.Errorf("no roots given")
 	}
 	args := []string{"list", "-H", "-p", "-t", "filesystem,volume",
-		"-o", "name,mountpoint,mounted,canmount,type,used", "-r"}
+		"-o", "name,mountpoint,mounted,canmount,type,referenced", "-r"}
 	args = append(args, roots...)
 
 	out, err := run("zfs", args...)
@@ -72,14 +87,14 @@ func ListDatasets(run Runner, roots []string) ([]Dataset, error) {
 		if len(fields) != 6 {
 			return nil, fmt.Errorf("unexpected `zfs list` output line: %q", line)
 		}
-		used, _ := strconv.ParseInt(fields[5], 10, 64) // 0 on parse failure; see Used's doc comment
+		referenced, _ := strconv.ParseInt(fields[5], 10, 64) // 0 on parse failure; see Referenced's doc comment
 		datasets = append(datasets, Dataset{
 			Name:       fields[0],
 			Mountpoint: fields[1],
 			Mounted:    fields[2] == "yes",
 			CanMount:   fields[3],
 			Type:       fields[4],
-			Used:       used,
+			Referenced: referenced,
 		})
 	}
 

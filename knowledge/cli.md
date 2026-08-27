@@ -364,16 +364,26 @@ still gets scanned.
     reads as dead air to someone watching a TTY, though 30s is fine for an unattended log; on
     a TTY the overall line no longer needs its own ticker at all, since dual-line mode
     redraws it together with the bar on every 100ms tick).
-  - **Weighted by ZFS's `used` property** (`zfsutil.Dataset.Used`, added to the `zfs list`
-    columns), not a flat per-dataset count — a small quick dataset finishing shouldn't read
-    as meaningful progress next to a multi-terabyte one still running. `used` is physical,
-    on-disk bytes (post-compression, snapshot-inclusive), deliberately mirroring the
-    existing convention that each dataset's own progress bar is *also* scaled against an
-    on-disk figure (`util.GetFSUsage`), while the numerator in both cases
-    (`processedBytes`) is the *logical* size of scanned files — the same pre-existing
-    logical-vs-physical mismatch, just kept consistent at both levels rather than fixed or
-    newly introduced. Expect the percentage to be an estimate, not an exact fraction,
-    especially on heavily compressed datasets.
+  - **Weighted by ZFS's `referenced` property** (`zfsutil.Dataset.Referenced`, the `zfs list`
+    column named `referenced`), not a flat per-dataset count — a small quick dataset
+    finishing shouldn't read as meaningful progress next to a multi-terabyte one still
+    running. `referenced` is physical, on-disk bytes (post-compression) reachable through
+    that dataset's own filesystem right now, deliberately mirroring the existing convention
+    that each dataset's own progress bar is *also* scaled against an on-disk figure
+    (`util.GetFSUsage`), while the numerator in both cases (`processedBytes`) is the
+    *logical* size of scanned files — the same pre-existing logical-vs-physical mismatch,
+    just kept consistent at both levels rather than fixed or newly introduced. Expect the
+    percentage to be an estimate, not an exact fraction, especially on heavily compressed
+    datasets.
+  - **This was `used` until a real-fleet run caught it as wrong (2026-08-27).** `used` is
+    cumulative down the tree — a parent's `used` already includes every descendant's usage —
+    so summing it across every `eligible` dataset (which spans both parents and children,
+    since zfs-scan scans each one independently) multiply-counted the same physical bytes
+    once per level of nesting. On the author's `luna` pool this reported an overall total of
+    205.6T against a pool that only holds 69.7T. `referenced` doesn't have that problem: a
+    container dataset with no files of its own reports it near zero, so it contributes
+    nothing to the total beyond what its own scan will actually find. See
+    `zfsutil.Dataset.Referenced`'s doc comment.
   - **The total covers every `eligible` dataset** — everything except the permanent skips
     (`excluded`, zvol, `canmount=off` without `--include-canmount-off`) — not just the
     datasets this invocation still has left to mount and scan (`toScan`). Datasets already
@@ -390,8 +400,8 @@ still gets scanned.
   - A dataset that fails still counts as "no longer remaining work" once it's done — ETA is
     about time, not success.
   - The percentage/ETA fields are omitted entirely when `totalBytes` is 0 (nothing in this
-    run reported a nonzero `used`, e.g. `zfs list` couldn't parse it — see `Used`'s doc
-    comment in `internal/zfsutil/zfsutil.go`), and ETA specifically is also withheld for the
+    run reported a nonzero `referenced`, e.g. `zfs list` couldn't parse it — see
+    `Referenced`'s doc comment in `internal/zfsutil/zfsutil.go`), and ETA specifically is also withheld for the
     first 2 elapsed seconds of the run (too little signal to divide by) and clamped to `~0s`
     rather than going negative if `done` overshoots `totalBytes` (possible precisely because
     of the logical-vs-physical mismatch above).

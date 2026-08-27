@@ -127,11 +127,20 @@ func cleanupMounts(run zfsutil.Runner, dirs []string) {
 // this there is no way to tell how far through a multi-dataset run you are
 // or estimate when it will finish.
 //
-// Datasets are weighted by their ZFS `used` property: physical, on-disk
-// bytes (post-compression, snapshot-inclusive), not the logical size of the
-// files inside them - the same kind of on-disk figure RunSnapshot's own
-// per-dataset bar is scaled against (util.GetFSUsage), just read directly
-// off the property instead of re-derived via statfs. That mismatch against
+// Datasets are weighted by their ZFS `referenced` property: physical,
+// on-disk bytes (post-compression) reachable through that dataset's own
+// filesystem, not the logical size of the files inside them - the same kind
+// of on-disk figure RunSnapshot's own per-dataset bar is scaled against
+// (util.GetFSUsage), just read directly off the property instead of
+// re-derived via statfs. `used` (cumulative down the tree) is deliberately
+// NOT used here even though it sounds like the obvious choice: it already
+// includes every descendant dataset's usage, so summing it across both a
+// parent and its children - which is exactly what this runs across, since
+// zfs-scan scans every dataset independently - multiply-counts the same
+// physical bytes once per level of nesting. `referenced` doesn't have that
+// problem: a container dataset with no files of its own reports it near
+// zero. See zfsutil.Dataset.Referenced's doc comment for the fleet reading
+// (205.6T reported vs. a 69.7T pool) that caught this. That mismatch against
 // the logical bytes-processed count fed into line() means the percentage is
 // an estimate, not an exact fraction - same caveat that already applies to
 // each individual dataset's own progress bar today.
@@ -139,13 +148,13 @@ type overallProgress struct {
 	start           time.Time
 	totalDatasets   int
 	totalBytes      int64
-	bytesDoneBefore int64 // sum of Used for datasets already finished, success or failure
+	bytesDoneBefore int64 // sum of Referenced for datasets already finished, success or failure
 }
 
 func newOverallProgress(datasets []zfsutil.Dataset) *overallProgress {
 	p := &overallProgress{start: time.Now(), totalDatasets: len(datasets)}
 	for _, ds := range datasets {
-		p.totalBytes += ds.Used
+		p.totalBytes += ds.Referenced
 	}
 	return p
 }
@@ -153,7 +162,7 @@ func newOverallProgress(datasets []zfsutil.Dataset) *overallProgress {
 // datasetDone records that one dataset has finished, successfully or not -
 // either way it no longer counts as remaining work.
 func (p *overallProgress) datasetDone(ds zfsutil.Dataset) {
-	p.bytesDoneBefore += ds.Used
+	p.bytesDoneBefore += ds.Referenced
 }
 
 // line renders the current overall-progress line. datasetsDone is how many

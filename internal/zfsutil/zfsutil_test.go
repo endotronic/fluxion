@@ -6,7 +6,9 @@ import (
 )
 
 func fakeListOutput() string {
-	// Deliberately out of name order, to prove ListDatasets sorts.
+	// Deliberately out of name order, to prove ListDatasets sorts. Last
+	// column is `referenced`, not `used` - see Dataset.Referenced's doc
+	// comment for why.
 	rows := [][6]string{
 		{"luna/kevin/archives", "/luna/kevin/archives", "yes", "on", "filesystem", "1073741824"},
 		{"luna", "/luna", "yes", "on", "filesystem", "5368709120"},
@@ -47,8 +49,8 @@ func TestListDatasets_ParsesAndSorts(t *testing.T) {
 	if datasets[0].Mounted != true || datasets[0].CanMount != "on" || datasets[0].Type != "filesystem" {
 		t.Errorf("luna: unexpected fields %+v", datasets[0])
 	}
-	if datasets[0].Used != 5368709120 {
-		t.Errorf("luna: Used = %d, want 5368709120", datasets[0].Used)
+	if datasets[0].Referenced != 5368709120 {
+		t.Errorf("luna: Referenced = %d, want 5368709120", datasets[0].Referenced)
 	}
 
 	found := false
