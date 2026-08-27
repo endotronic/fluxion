@@ -257,6 +257,17 @@ still gets scanned.
   or degraded mount. Whatever dataset was mid-scan when the signal arrived is left
   `in_progress` in the DB exactly as before — the resume-by-name behavior described above is
   what makes rerunning after a `^C` actually pick it back up instead of getting stuck.
+  - **Unmount is retried, not one-shot** (`unmountWithRetry`, added 2026-08-26): up to 5
+    attempts, 1s apart (~4s worst case), before giving up and logging the mount as left
+    behind. This was a real, observed failure: a process that just finished scanning (or was
+    just `^C`'d) can still be holding the mount open for a brief moment — a walker/hasher
+    goroutine unwinding, or the kernel not yet having dropped the last open file reference —
+    so the very first `umount` right after `RunSnapshot` returns (or right after the signal
+    handler fires) can lose that race with a transient "target is busy" even though the mount
+    is genuinely about to be releasable. `cleanupMounts` is shared by normal end-of-run
+    teardown and the interrupt handler, so both get the retry for free. `unmountRetries` /
+    `unmountRetryDelay` are package-level `var`s (not `const`s) purely so tests can shrink the
+    delay instead of sleeping for real seconds.
 - **No progress bar in a piped/logged run** (e.g. `zfs-scan ... | tee log`): the progress
   bar writer is discarded whenever stderr isn't a TTY (see
   [architecture.md](architecture.md) "Output conventions"), and `RunSnapshot` fills that gap
@@ -282,9 +293,19 @@ still gets scanned.
     logical-vs-physical mismatch, just kept consistent at both levels rather than fixed or
     newly introduced. Expect the percentage to be an estimate, not an exact fraction,
     especially on heavily compressed datasets.
-  - The total only covers datasets actually being attempted this run (`toScan`), not every
-    dataset `zfs list` enumerated — one skipped for `canmount=off`, excluded, etc. never
-    counts against the denominator.
+  - **The total covers every `eligible` dataset** — everything except the permanent skips
+    (`excluded`, zvol, `canmount=off` without `--include-canmount-off`) — not just the
+    datasets this invocation still has left to mount and scan (`toScan`). Datasets already
+    `completed`, or blocked by a prior `failed` snapshot, are folded into the "done" side of
+    `K/N` and `X/Y` bytes *before* the scan loop even starts, via a `doneCount` offset and
+    `progress.datasetDone` calls made during the initial DB-status pass. This was a fix
+    (2026-08-26) for the original version, which scoped totals to `toScan` only — on a
+    resumed/repeated run against a mostly-already-scanned root, that made the overall line
+    show a misleadingly small denominator (and no visible progress at all) instead of an
+    honest "how far through this whole root" figure. It's also why issue reports like "no
+    progress shown for the total scan" on a run with many already-`completed` datasets are
+    now addressed: those datasets show up in the very first overall line, not just as
+    individual `skip` entries.
   - A dataset that fails still counts as "no longer remaining work" once it's done — ETA is
     about time, not success.
   - The percentage/ETA fields are omitted entirely when `totalBytes` is 0 (nothing in this

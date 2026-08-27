@@ -14,6 +14,15 @@ import (
 	"fluxion/internal/zfsutil"
 )
 
+// TestMain shrinks unmountWithRetry's delay for the whole package's test run
+// so a test that deliberately always fails unmount (e.g.
+// TestCleanupMounts_UnmountFailureLeavesDirBehind) doesn't actually spend
+// several real seconds asleep.
+func TestMain(m *testing.M) {
+	unmountRetryDelay = time.Millisecond
+	os.Exit(m.Run())
+}
+
 // fakeZFS backs a small in-memory dataset table with a Runner, so
 // RunZFSScan's orchestration can be tested without a real `zfs` binary or
 // root (there is neither in this project's build environment).
@@ -519,8 +528,10 @@ func TestCleanupMounts_UnmountsAndRemoves(t *testing.T) {
 }
 
 func TestCleanupMounts_UnmountFailureLeavesDirBehind(t *testing.T) {
+	var umountCalls int
 	run := func(name string, args ...string) (string, error) {
 		if name == "umount" {
+			umountCalls++
 			return "umount: target is busy", fmt.Errorf("exit status 1")
 		}
 		return "", nil
@@ -531,6 +542,33 @@ func TestCleanupMounts_UnmountFailureLeavesDirBehind(t *testing.T) {
 
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("dir should be left behind (not removed) when unmount fails: stat err = %v", err)
+	}
+	if umountCalls != unmountRetries {
+		t.Errorf("umount attempts = %d, want %d (exhausting all retries before giving up)", umountCalls, unmountRetries)
+	}
+}
+
+// TestUnmountWithRetry_SucceedsAfterTransientBusy proves a still-busy mount
+// (e.g. right after a scan process exits or is interrupted) gets retried
+// rather than immediately reported as a failure.
+func TestUnmountWithRetry_SucceedsAfterTransientBusy(t *testing.T) {
+	var umountCalls int
+	run := func(name string, args ...string) (string, error) {
+		if name != "umount" {
+			return "", nil
+		}
+		umountCalls++
+		if umountCalls < 3 {
+			return "umount: target is busy", fmt.Errorf("exit status 1")
+		}
+		return "", nil
+	}
+
+	if err := unmountWithRetry(run, "/tmp/whatever"); err != nil {
+		t.Fatalf("unmountWithRetry: %v", err)
+	}
+	if umountCalls != 3 {
+		t.Errorf("umount attempts = %d, want 3 (fail, fail, succeed)", umountCalls)
 	}
 }
 

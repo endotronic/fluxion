@@ -71,13 +71,43 @@ func (t *mountTracker) snapshot() []string {
 	return append([]string(nil), t.dirs...)
 }
 
+// unmountRetries/unmountRetryDelay bound how long unmountWithRetry waits out
+// a transiently busy mount. Package vars (not consts) so tests can shrink
+// the delay instead of actually sleeping several seconds per case.
+var (
+	unmountRetries    = 5
+	unmountRetryDelay = time.Second
+)
+
+// unmountWithRetry retries a still-"target is busy" unmount a few times over
+// a few seconds before giving up. A scan process that just finished (or was
+// just interrupted mid-scan) can hold the mount open for a brief moment
+// after RunSnapshot returns - a walker/hasher goroutine still unwinding, or
+// the kernel not yet having dropped the last open file reference - and
+// umount's EBUSY in that window is transient, not a real conflict. This was
+// a real, observed failure: the very first unmount attempt right after a
+// SIGINT lost the race and left the mount (and its temp directory) behind
+// every time.
+func unmountWithRetry(run zfsutil.Runner, dir string) error {
+	var err error
+	for attempt := 0; attempt < unmountRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(unmountRetryDelay)
+		}
+		if err = zfsutil.UnmountPath(run, dir); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
 // cleanupMounts unmounts and removes every directory in dirs, best-effort:
-// a failure on one is logged and does not stop the rest. Shared by normal
-// end-of-run teardown and by the interrupt handler, so both behave
-// identically.
+// a failure on one (after retrying) is logged and does not stop the rest.
+// Shared by normal end-of-run teardown and by the interrupt handler, so both
+// behave identically.
 func cleanupMounts(run zfsutil.Runner, dirs []string) {
 	for _, dir := range dirs {
-		if err := zfsutil.UnmountPath(run, dir); err != nil {
+		if err := unmountWithRetry(run, dir); err != nil {
 			logrus.Warnf("failed to unmount %s (left mounted): %v", dir, err)
 			continue
 		}
@@ -254,27 +284,50 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 		mountpoint string
 		resumeFrom bool // an in-progress snapshot for this dataset should be resumed rather than started fresh
 	}
-	var toScan []planned
 
+	// First pass: split off the datasets that will never be scanned by this
+	// command at all (excluded, a zvol, or a container dataset) from the
+	// ones that are eligible to count as "this pool's work" - whether
+	// already done, blocked by a prior failure, or still to be mounted and
+	// scanned below. eligible is what overallProgress is weighted against,
+	// so a re-run against an already-mostly-scanned root reports honest
+	// overall progress from the very first line instead of only ever
+	// showing progress on whatever happens to be left this invocation.
+	var eligible []zfsutil.Dataset
 	for _, ds := range datasets {
-		if excluded(ds.Name, cfg.ExcludeDatasets) {
+		switch {
+		case excluded(ds.Name, cfg.ExcludeDatasets):
 			fmt.Printf("  skip  %-55s excluded\n", ds.Name)
 			res.Skipped = append(res.Skipped, ds.Name)
-			continue
-		}
-		if ds.Type == "volume" {
+		case ds.Type == "volume":
 			fmt.Printf("  skip  %-55s not a filesystem (zvol)\n", ds.Name)
 			res.Skipped = append(res.Skipped, ds.Name)
-			continue
-		}
-		if ds.CanMount == "off" && !cfg.IncludeCanMountOff {
+		case ds.CanMount == "off" && !cfg.IncludeCanMountOff:
 			fmt.Printf("  skip  %-55s canmount=off (use --include-canmount-off to scan it anyway)\n", ds.Name)
 			res.Skipped = append(res.Skipped, ds.Name)
-			continue
+		default:
+			eligible = append(eligible, ds)
 		}
+	}
 
+	if cfg.DryRun {
+		for _, ds := range eligible {
+			if ds.Mounted {
+				fmt.Printf("  plan  %-55s already mounted (mountpoint=%s); mount a second, isolated copy at a temporary location + scan\n", ds.Name, ds.Mountpoint)
+			} else {
+				fmt.Printf("  plan  %-55s mount at temporary location + scan\n", ds.Name)
+			}
+		}
+		return res, nil
+	}
+
+	progress := newOverallProgress(eligible)
+	doneCount := 0 // datasets already accounted for in progress before the scan loop below starts
+
+	var toScan []planned
+	for _, ds := range eligible {
 		resumeFrom := false
-		if !cfg.DryRun && dbStore != nil {
+		if dbStore != nil {
 			existing, _ := dbStore.FindSnapshot(ds.Name)
 			if existing != nil {
 				if cfg.ForceNew {
@@ -284,11 +337,15 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 					case models.StatusCompleted:
 						fmt.Printf("  skip  %-55s already scanned (snapshot #%d)\n", ds.Name, existing.ID)
 						res.AlreadyDone = append(res.AlreadyDone, ds.Name)
+						progress.datasetDone(ds)
+						doneCount++
 						continue
 					case models.StatusFailed:
 						fmt.Printf("  skip  %-55s previous scan failed (snapshot #%d) - delete it to retry\n", ds.Name, existing.ID)
 						res.Failed = append(res.Failed, ds.Name)
 						res.HadFailures = true
+						progress.datasetDone(ds)
+						doneCount++
 						continue
 					default:
 						// in_progress: resume it by name, rather than by
@@ -302,16 +359,6 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			}
 		}
 
-		if cfg.DryRun {
-			if ds.Mounted {
-				fmt.Printf("  plan  %-55s already mounted (mountpoint=%s); mount a second, isolated copy at a temporary location + scan\n", ds.Name, ds.Mountpoint)
-			} else {
-				fmt.Printf("  plan  %-55s mount at temporary location + scan\n", ds.Name)
-			}
-			toScan = append(toScan, planned{dataset: ds})
-			continue
-		}
-
 		if ds.Mounted {
 			logrus.Infof("%s is already mounted (mountpoint=%s); mounting an additional, isolated copy for this scan so nothing shadowed by a nested mount is missed", ds.Name, ds.Mountpoint)
 		}
@@ -322,6 +369,8 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			fmt.Printf("  fail  %-55s could not create temp mount dir: %v\n", ds.Name, err)
 			res.Failed = append(res.Failed, ds.Name)
 			res.HadFailures = true
+			progress.datasetDone(ds)
+			doneCount++
 			continue
 		}
 		if err := zfsutil.MountAt(run, ds.Name, dir); err != nil {
@@ -330,6 +379,8 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			fmt.Printf("  fail  %-55s mount failed: %v\n", ds.Name, err)
 			res.Failed = append(res.Failed, ds.Name)
 			res.HadFailures = true
+			progress.datasetDone(ds)
+			doneCount++
 			continue
 		}
 		mounted.add(dir)
@@ -337,19 +388,9 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 		toScan = append(toScan, planned{dataset: ds, mountpoint: dir, resumeFrom: resumeFrom})
 	}
 
-	if cfg.DryRun {
-		return res, nil
-	}
-
-	var scanDatasets []zfsutil.Dataset
-	for _, p := range toScan {
-		scanDatasets = append(scanDatasets, p.dataset)
-	}
-	progress := newOverallProgress(scanDatasets)
-
 	for i, p := range toScan {
 		fmt.Printf("\n=== %s (%s) ===\n", p.dataset.Name, p.mountpoint)
-		progress.print(i, 0)
+		progress.print(doneCount+i, 0)
 		snapCfg := SnapshotConfig{
 			TargetDir:      p.mountpoint,
 			DBPath:         cfg.DBPath,
@@ -359,7 +400,7 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			ComputeMD5:     cfg.ComputeMD5,
 			NonInteractive: true,
 			OnHeartbeat: func(processed int64) {
-				progress.print(i, processed)
+				progress.print(doneCount+i, processed)
 			},
 		}
 		if p.resumeFrom {
@@ -377,7 +418,7 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 		} else {
 			res.Scanned = append(res.Scanned, p.dataset.Name)
 		}
-		progress.print(i+1, 0)
+		progress.print(doneCount+i+1, 0)
 	}
 
 	// Unmount everything we mounted, by path rather than dataset name. A

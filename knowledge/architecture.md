@@ -94,6 +94,23 @@ paths that several inputs disagree about; that part is inherent, the slice is no
   drives the bar, logging via `logrus.Infof` ("Scanning... found N files" during the walk,
   "Hashing... N/M files done" afterward). TTY/interactive behavior is unaffected — the
   heartbeat channel stays `nil` (blocks forever in the `select`) whenever `quiet` is false.
+- **`snapshot.go`'s two bars deliberately do not use `progressbar.OptionFullWidth()`** (removed
+  2026-08-26). Full-width mode recomputes the bar's *content* width from the live terminal
+  width on every render, but the library's own line-clearing logic tracks the **maximum**
+  content width ever rendered (`state.maxLineWidth`, unexported — never shrinks) and blindly
+  overwrites with that many spaces before redrawing. Shrinking the terminal after the bar has
+  rendered at a wider size makes that clear-string itself wrap onto a second terminal row; the
+  trailing `\r` then only returns to the start of *that* row, not the bar's original line, so
+  every subsequent redraw drifts and the terminal fills with corrupted, duplicated bar
+  fragments until the process exits or the window is widened back out. This was reproduced
+  live during a `zfs-scan` run under `sudo` — resizing the terminal mid-scan wedged the
+  display this way. There is no public API to reset `maxLineWidth` without also resetting the
+  bar's counters (`Reset()`), so the fix is to not let content width track terminal width at
+  all: both bars now render at their original fixed `OptionSetWidth` (10/15) regardless of
+  terminal size, which keeps `maxLineWidth` essentially constant and starves the bug of the
+  width delta it needs. A fixed-width bar just looks fixed-width now instead of stretching to
+  fill the terminal - a real but minor cosmetic regression traded for not corrupting the
+  terminal on resize.
 - Some errors go through `logrus.Errorf`, some through `fmt.Printf`, some are returned.
   `app/diff.go` does all three within the same function.
 

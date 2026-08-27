@@ -184,7 +184,6 @@ func RunSnapshot(cfg SnapshotConfig) error {
 					}
 				}),
 				progressbar.OptionSpinnerType(14),
-				progressbar.OptionFullWidth(),
 				progressbar.OptionSetRenderBlankState(true),
 			)
 
@@ -414,7 +413,6 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			}
 		}),
 		progressbar.OptionSpinnerType(14),
-		progressbar.OptionFullWidth(),
 	)
 
 	// UI Loop
