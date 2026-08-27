@@ -493,7 +493,9 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	// of that stall - confirmed by direct reproduction against the vendored
 	// library, and matching a real report of a per-dataset ETA that never
 	// moved despite the bar's own elapsed time (which is not affected by
-	// this bug) climbing normally for over an hour.
+	// this bug) climbing normally for over an hour. Elapsed time itself is
+	// also computed and displayed ourselves rather than via schollz's own
+	// bracket - see OptionSetElapsedTime(false) below.
 	bar := progressbar.NewOptions64(
 		estimatedTotal,
 		progressbar.OptionSetDescription("Scanning..."),
@@ -503,7 +505,14 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		progressbar.OptionThrottle(65*time.Millisecond),
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetPredictTime(false),
-		progressbar.OptionSetElapsedTime(true),
+		// Elapsed time is also computed and appended ourselves, alongside
+		// rate/ETA below, rather than left to schollz's own [elapsed]
+		// bracket: schollz formats it with time.Duration.String(), which
+		// doesn't zero-pad minutes/seconds (5s -> 15s -> 1m05s), so the
+		// digit count under the same character position changes tick to
+		// tick on a redrawn-in-place line - see formatDuration in
+		// zfsscan.go.
+		progressbar.OptionSetElapsedTime(false),
 		progressbar.OptionOnCompletion(func() {
 			// In dualLine mode the final newline is emitted by redraw()'s
 			// caller instead, after the last combined frame - this callback
@@ -644,16 +653,14 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				current := processedBytes.Load()
 				sinceStart := time.Since(barStart)
 
-				etaSuffix := ""
+				etaSuffix := fmt.Sprintf("elapsed %s", formatDuration(sinceStart))
 				if rate, ok := averageRate(sinceStart, current); ok {
-					etaSuffix = fmt.Sprintf(" %s/s avg", util.FormatBytes(int64(rate)))
+					etaSuffix += fmt.Sprintf(", %s/s avg", util.FormatBytes(int64(rate)))
 				}
 				if eta, ok := estimateETA(sinceStart, current, barMax); ok {
-					etaSuffix += fmt.Sprintf(", ETA ~%s", eta)
+					etaSuffix += fmt.Sprintf(", ETA ~%s", formatDuration(eta))
 				}
-				if etaSuffix != "" {
-					etaSuffix = " (" + strings.TrimPrefix(etaSuffix, " ") + ")"
-				}
+				etaSuffix = " (" + etaSuffix + ")"
 
 				if walking {
 					found := foundCount.Load()

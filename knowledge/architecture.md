@@ -145,8 +145,9 @@ paths that several inputs disagree about; that part is inherent, the slice is no
   zero-rate division overflows through a `float64`→`Duration` conversion into a large negative
   number, and the library's own "if negative, clamp to zero" guard then displays that as `ETA
   ~0s` for the whole stall, not as "unknown" or "long". `OptionSetPredictTime(false)` +
-  `OptionSetElapsedTime(true)` keeps the library's (correct) elapsed-time display and drops its
-  broken ETA; `estimateETA` (`internal/app/zfsscan.go`, shared with `overallProgress.line()`)
+  `OptionSetElapsedTime(false)` drops both of the library's own time displays -
+  `OptionSetElapsedTime` was left on briefly, but see the zero-padding bullet below for why it
+  too got replaced with a hand-rolled equivalent; `estimateETA` (`internal/app/zfsscan.go`, shared with `overallProgress.line()`)
   computes a whole-run-so-far average (`done/elapsed` since the bar's own start, guarded the
   same way as the overall line: no estimate before 2 elapsed seconds or before any progress,
   remaining clamped to zero if `done` overshoots the current max) and gets appended to the
@@ -227,6 +228,24 @@ paths that several inputs disagree about; that part is inherent, the slice is no
   `redraw()` needs further changes, re-verify empirically against a real terminal (e.g. via
   `tmux new-session -d -x <cols> -y <rows>` + `tmux capture-pane`), not just by re-reading the
   escape sequences - this bug looked correct on paper at every step until it was actually run.
+- **All elapsed/ETA durations shown by `zfs-scan` and `snapshot` go through
+  `formatDuration` (`internal/app/zfsscan.go`), not `time.Duration.String()`** (fixed
+  2026-08-27, real-fleet report: "for times like 4h5m8s please use 4h05m08s so that it
+  doesn't 'flap' as the minute and seconds values switch between single and double
+  digits"). `time.Duration.String()`'s minute/second field width changes as the value
+  crosses 10 (`4h5m8s` → `4h5m18s` → ... → `4h15m0s`), which on a redrawn-in-place
+  progress line reads as the digits jumping sideways every tick, not just changing value.
+  `formatDuration` renders the same largest-unit-first shape but always zero-pads minutes
+  and seconds once a larger unit is present (`4h05m08s`, `5m08s`), while still omitting a
+  genuinely-zero larger unit (`45s`, not `0h00m45s`) - the width per displayed unit is now
+  fixed, only the leading unit ever appears/disappears. This is also why
+  `OptionSetElapsedTime` is off (previous bullet): schollz's own elapsed bracket uses the
+  same unpadded `Duration.String()` and would flap the same way. Elapsed time is instead
+  computed and displayed by our own code at every call site - `overallProgress.line()` and
+  the bar description's `etaSuffix` in `snapshot.go` - both via `formatDuration`, so there
+  is exactly one duration-formatting path for anything shown on a live-redrawn line. Any
+  future duration display added to a redrawn line should reuse `formatDuration` rather than
+  reintroducing the raw `%s`/`.String()` flap.
 - **`snapshot.go`'s two bars deliberately do not use `progressbar.OptionFullWidth()`** (removed
   2026-08-26). Full-width mode recomputes the bar's *content* width from the live terminal
   width on every render, but the library's own line-clearing logic tracks the **maximum**

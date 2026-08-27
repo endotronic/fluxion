@@ -507,6 +507,31 @@ func TestOverallProgress_Line(t *testing.T) {
 	})
 }
 
+func TestFormatDuration(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{8 * time.Second, "8s"},
+		{9500 * time.Millisecond, "10s"}, // rounds to the nearest second first
+		{45 * time.Second, "45s"},
+		{59*time.Second + 600*time.Millisecond, "1m00s"}, // rounds up across the minute boundary
+		{5*time.Minute + 8*time.Second, "5m08s"},
+		{59*time.Minute + 59*time.Second, "59m59s"},
+		{time.Hour, "1h00m00s"},
+		{4*time.Hour + 5*time.Minute + 8*time.Second, "4h05m08s"},
+		{-3 * time.Second, "0s"}, // negative durations shouldn't happen, but must not render garbage
+	}
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			if got := formatDuration(tc.d); got != tc.want {
+				t.Errorf("formatDuration(%v) = %q, want %q", tc.d, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEstimateETA(t *testing.T) {
 	t.Run("no total: not ok", func(t *testing.T) {
 		if _, ok := estimateETA(10*time.Second, 500, 0); ok {

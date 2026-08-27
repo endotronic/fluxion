@@ -179,12 +179,40 @@ func (p *overallProgress) line(datasetsDone int, currentProcessed int64) string 
 		pct := float64(done) / float64(p.totalBytes) * 100
 		line += fmt.Sprintf(", %s / %s (%.1f%%)", util.FormatBytes(done), util.FormatBytes(p.totalBytes), pct)
 	}
-	line += fmt.Sprintf(", elapsed %s", elapsed)
+	line += fmt.Sprintf(", elapsed %s", formatDuration(elapsed))
 
 	if eta, ok := estimateETA(elapsed, done, p.totalBytes); ok {
-		line += fmt.Sprintf(", ETA ~%s", eta)
+		line += fmt.Sprintf(", ETA ~%s", formatDuration(eta))
 	}
 	return line
+}
+
+// formatDuration renders d the way time.Duration.String() does (largest unit
+// first, smaller units only when nonzero) except minutes and seconds are
+// always zero-padded to 2 digits once a larger unit is shown - "4h05m08s",
+// not "4h5m8s". time.Duration.String()'s minute/second digit count changes
+// as the value crosses 10 (5s -> 15s -> ... rolling into 1m05s), which reads
+// as the display "flapping" on a redrawn-in-place progress line where the
+// same character position holds a different digit every tick. d is rounded
+// to the nearest second first, so this is only meant for the second-or-finer
+// granularity durations already used for ETA/elapsed display in this file -
+// not sub-second durations, which fall through to the "Ns" case as 0s.
+func formatDuration(d time.Duration) string {
+	total := int64(d.Round(time.Second) / time.Second)
+	if total < 0 {
+		total = 0
+	}
+	h := total / 3600
+	m := (total % 3600) / 60
+	s := total % 60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
+	case m > 0:
+		return fmt.Sprintf("%dm%02ds", m, s)
+	default:
+		return fmt.Sprintf("%ds", s)
+	}
 }
 
 // estimateETA predicts remaining time from a whole-run-so-far average rate
