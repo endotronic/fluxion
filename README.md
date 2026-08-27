@@ -77,9 +77,10 @@ This produces the `fluxion` binary.
     *   `--md5`: Also compute MD5 alongside SHA-1.
     *   `--dry-run`: Print the full per-dataset plan with no mounting, scanning, or DB writes.
     *   `--include-canmount-off`: Also mount and scan `canmount=off` datasets instead of skipping them.
+    *   `--new`: Start a fresh snapshot for every dataset, ignoring any completed/failed/in-progress snapshot already recorded under its name. The old snapshot is kept as history, not deleted.
     *   `--exclude-dataset <name>`: Skip a dataset (and its children). Can be used multiple times.
 
-    Requires root to mount/read most real-world datasets. Run with `--dry-run` first — mounting a dataset makes it accessible to other processes on the host for the scan's duration.
+    Requires root to mount/read most real-world datasets. Run with `--dry-run` first — mounting a dataset makes it accessible to other processes on the host for the scan's duration. `^C`/`SIGTERM` unmount and clean up whatever's currently mounted before exiting rather than leaving it orphaned; a dataset interrupted mid-scan resumes correctly on the next run.
 
 *   **`merge` (`m`)**: Merge multiple snapshots into a single new snapshot.
     ```bash

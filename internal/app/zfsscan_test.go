@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"syscall"
 	"testing"
+	"time"
 
+	"fluxion/internal/models"
 	"fluxion/internal/store/sqlite"
 	"fluxion/internal/zfsutil"
 )
@@ -284,5 +287,206 @@ func TestRunZFSScan_DryRunTouchesNothing(t *testing.T) {
 	}
 	if len(snaps) != 0 {
 		t.Errorf("dry-run must not write to the DB, found %d snapshots", len(snaps))
+	}
+}
+
+// TestRunZFSScan_ResumesInterruptedInProgressSnapshot proves the fix for a bug
+// where an interrupted zfs-scan dataset could never be retried: RunZFSScan
+// now looks the stale in_progress row up by dataset name (not by this run's
+// brand-new, always-different temp mount path) and passes it to RunSnapshot
+// as ResumeFrom, so the scan resumes the existing snapshot row instead of
+// colliding with it.
+func TestRunZFSScan_ResumesInterruptedInProgressSnapshot(t *testing.T) {
+	dbPath, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	s, err := sqlite.NewSqliteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a prior zfs-scan run that was killed mid-dataset: a snapshot
+	// row already exists, named exactly after the dataset (zfs-scan's
+	// naming convention), still in_progress, recorded against that earlier
+	// run's own temp mount path - which no longer exists by the time this
+	// run starts.
+	oldSnap, err := s.CreateSnapshot("/tmp/fluxion-zfsscan-stale", "pool/interrupted", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	fz := &fakeZFS{
+		rows: [][5]string{
+			{"pool/interrupted", "/pool/interrupted", "no", "on", "filesystem"},
+		},
+	}
+
+	res, err := RunZFSScan(ZFSScanConfig{DBPath: dbPath, Roots: []string{"pool"}, Threads: 1, Runner: fz.runner()})
+	if err != nil {
+		t.Fatalf("RunZFSScan: %v", err)
+	}
+	if len(res.Failed) != 0 {
+		t.Fatalf("an interrupted-then-rerun dataset should resume, not fail; Failed = %v", res.Failed)
+	}
+	if len(res.Scanned) != 1 || res.Scanned[0] != "pool/interrupted" {
+		t.Errorf("Scanned = %v, want [pool/interrupted]", res.Scanned)
+	}
+
+	s, err = sqlite.NewSqliteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.FindSnapshot("pool/interrupted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != oldSnap.ID {
+		t.Errorf("expected the stale in_progress snapshot #%d to be resumed in place, got a different snapshot #%d instead", oldSnap.ID, got.ID)
+	}
+	if got.Status != models.StatusCompleted {
+		t.Errorf("resumed snapshot status = %s, want completed", got.Status)
+	}
+}
+
+// TestRunZFSScan_ForceNewIgnoresPriorState covers --new: a completed, a
+// failed, and a still-in_progress prior snapshot for three different
+// datasets should all be bypassed (mounted and scanned fresh) rather than
+// skipped/blocked/silently resumed, and the old rows should survive as
+// history under a second row with the same name.
+func TestRunZFSScan_ForceNewIgnoresPriorState(t *testing.T) {
+	dbPath, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	s, err := sqlite.NewSqliteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedOld, err := s.CreateSnapshot("/old/completed", "pool/completed", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteSnapshot(completedOld.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	failedOld, err := s.CreateSnapshot("/old/failed", "pool/failed", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailSnapshot(failedOld.ID, time.Now(), 1); err != nil {
+		t.Fatal(err)
+	}
+	inProgressOld, err := s.CreateSnapshot("/old/in_progress", "pool/in_progress", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	fz := &fakeZFS{
+		rows: [][5]string{
+			{"pool/completed", "/pool/completed", "no", "on", "filesystem"},
+			{"pool/failed", "/pool/failed", "no", "on", "filesystem"},
+			{"pool/in_progress", "/pool/in_progress", "no", "on", "filesystem"},
+		},
+	}
+
+	res, err := RunZFSScan(ZFSScanConfig{DBPath: dbPath, Roots: []string{"pool"}, Threads: 1, Runner: fz.runner(), ForceNew: true})
+	if err != nil {
+		t.Fatalf("RunZFSScan with ForceNew: %v", err)
+	}
+
+	wantScanned := []string{"pool/completed", "pool/failed", "pool/in_progress"}
+	sort.Strings(res.Scanned)
+	if fmt.Sprint(res.Scanned) != fmt.Sprint(wantScanned) {
+		t.Errorf("Scanned = %v, want %v", res.Scanned, wantScanned)
+	}
+	if len(res.AlreadyDone) != 0 || len(res.Skipped) != 0 || len(res.Failed) != 0 {
+		t.Errorf("ForceNew should bypass every prior-state check; AlreadyDone=%v Skipped=%v Failed=%v", res.AlreadyDone, res.Skipped, res.Failed)
+	}
+
+	s, err = sqlite.NewSqliteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for name, oldID := range map[string]int64{
+		"pool/completed":   completedOld.ID,
+		"pool/failed":      failedOld.ID,
+		"pool/in_progress": inProgressOld.ID,
+	} {
+		got, err := s.FindSnapshot(name)
+		if err != nil {
+			t.Fatalf("FindSnapshot(%s): %v", name, err)
+		}
+		if got.ID == oldID {
+			t.Errorf("%s: expected a new snapshot row distinct from the old one (#%d), FindSnapshot still resolves to it", name, oldID)
+		}
+		if got.Status != models.StatusCompleted {
+			t.Errorf("%s: new snapshot status = %s, want completed", name, got.Status)
+		}
+	}
+
+	// The old rows must still exist, as history - not overwritten or deleted.
+	snaps, err := s.ListSnapshots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 6 {
+		t.Errorf("expected 6 total snapshot rows (3 old + 3 new), got %d", len(snaps))
+	}
+}
+
+func TestCleanupMounts_UnmountsAndRemoves(t *testing.T) {
+	fz := &fakeZFS{}
+	dirs := []string{t.TempDir(), t.TempDir()}
+
+	cleanupMounts(fz.runner(), dirs)
+
+	gotUnmount := append([]string(nil), fz.unmountCalls...)
+	sort.Strings(gotUnmount)
+	wantUnmount := append([]string(nil), dirs...)
+	sort.Strings(wantUnmount)
+	if fmt.Sprint(gotUnmount) != fmt.Sprint(wantUnmount) {
+		t.Errorf("unmountCalls = %v, want %v", gotUnmount, wantUnmount)
+	}
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed after cleanup, stat err = %v", dir, err)
+		}
+	}
+}
+
+func TestCleanupMounts_UnmountFailureLeavesDirBehind(t *testing.T) {
+	run := func(name string, args ...string) (string, error) {
+		if name == "umount" {
+			return "umount: target is busy", fmt.Errorf("exit status 1")
+		}
+		return "", nil
+	}
+	dir := t.TempDir()
+
+	cleanupMounts(run, []string{dir})
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("dir should be left behind (not removed) when unmount fails: stat err = %v", err)
+	}
+}
+
+func TestHandleInterrupt_ExitCodeAndCleanup(t *testing.T) {
+	fz := &fakeZFS{}
+	dir := t.TempDir()
+
+	code := handleInterrupt(syscall.SIGINT, fz.runner(), []string{dir})
+	if code != 130 {
+		t.Errorf("exit code = %d, want 130 (128 + SIGINT)", code)
+	}
+	if len(fz.unmountCalls) != 1 || fz.unmountCalls[0] != dir {
+		t.Errorf("unmountCalls = %v, want [%s]", fz.unmountCalls, dir)
+	}
+
+	code = handleInterrupt(syscall.SIGTERM, fz.runner(), nil)
+	if code != 143 {
+		t.Errorf("exit code = %d, want 143 (128 + SIGTERM)", code)
 	}
 }

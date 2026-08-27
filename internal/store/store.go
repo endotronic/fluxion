@@ -12,6 +12,11 @@ type Store interface {
 	ListSnapshots() ([]*models.Snapshot, error)
 	CompleteSnapshot(id int64, finishedAt time.Time) error
 	FailSnapshot(id int64, finishedAt time.Time, errorCount int64) error
+
+	// RenameSnapshot changes a snapshot's name in place. snapshots.name is
+	// unique in the schema, so this exists to free up a name that a new
+	// snapshot is about to claim (see zfs-scan's --new).
+	RenameSnapshot(id int64, newName string) error
 	AddFile(f *models.FileRecord) error
 	BatchAddFiles(files []*models.FileRecord) error
 	GetFileCount(snapshotID int64) (int64, error)

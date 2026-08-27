@@ -34,22 +34,34 @@ func progressWriter(quiet bool) io.Writer {
 }
 
 type SnapshotConfig struct {
-	TargetDir    string
-	DBPath       string
-	Name         string
-	Threads      int
-	ForceNew     bool
-	ResumeFrom   string
-	Hostname     string
-	CrossMounts  bool
-	FailOnMount  bool
-	ComputeMD5   bool
+	TargetDir      string
+	DBPath         string
+	Name           string
+	Threads        int
+	ForceNew       bool
+	ResumeFrom     string
+	Hostname       string
+	CrossMounts    bool
+	FailOnMount    bool
+	ComputeMD5     bool
 	SkipEstimation bool
-	EstimateOnly bool
+	EstimateOnly   bool
 
 	// NonInteractive skips the implicit in-progress resume prompt and always
 	// resumes, for callers driving many scans unattended (zfs-scan).
 	NonInteractive bool
+
+	// AllowDuplicateName lets a new snapshot be created under a name that's
+	// already used by an earlier snapshot in this DB. snapshots.name is
+	// unique in the schema, so instead of failing with "already exists",
+	// the existing row holding that name is renamed out of the way (kept as
+	// history, not deleted) before the new one is created under it. Only
+	// meaningful when Name is set explicitly (see explicitName below) and
+	// mode ends up "new" - e.g. zfs-scan's --new, which always names a
+	// dataset's snapshot after the dataset itself and needs to be able to
+	// start over even when a completed/failed/in-progress snapshot already
+	// holds that exact name.
+	AllowDuplicateName bool
 }
 
 func RunSnapshot(cfg SnapshotConfig) error {
@@ -77,7 +89,6 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	}
 	defer dbStore.Close()
 
-
 	var snapshotID int64
 
 	var resumeMap map[string]models.FileRecord
@@ -90,11 +101,11 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		if err != nil {
 			return fmt.Errorf("could not find snapshot '%s' to resume: %w", cfg.ResumeFrom, err)
 		}
-		
+
 		if lastSnap.Status == models.StatusFailed {
 			return fmt.Errorf("cannot resume failed snapshot '%s'", lastSnap.Name)
 		}
-		
+
 		if lastSnap.Status == models.StatusCompleted {
 			logrus.Warnf("Snapshot '%s' is already completed.", lastSnap.Name)
 			fmt.Print("Do you want to re-scan and add to it? (y/N): ")
@@ -116,7 +127,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 
 	if lastSnap != nil {
 		doResume := false
-		
+
 		// 1. Explicit Resume?
 		if cfg.ResumeFrom != "" {
 			doResume = true
@@ -142,7 +153,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			mode = "resume"
 			snapshotID = lastSnap.ID
 			logrus.Info("Resuming snapshot...")
-			
+
 			// Get total files for progress bar
 			totalFiles, err := dbStore.GetFileCount(snapshotID)
 			if err != nil {
@@ -168,13 +179,13 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				progressbar.OptionFullWidth(),
 				progressbar.OptionSetRenderBlankState(true),
 			)
-			
+
 			if totalFiles > 0 {
 				logrus.Infof("Loading %d existing files...", totalFiles)
 			} else {
 				logrus.Info("Loading existing map...")
 			}
-			
+
 			resumeMap, err = dbStore.GetFilesForSnapshot(snapshotID, func(count int) {
 				if bar != nil {
 					bar.Set(count)
@@ -206,14 +217,27 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		}
 		baseName = fmt.Sprintf("%s_%s", base, time.Now().Format("2006-01-02"))
 	}
-	
+
 	// Resolve final name
 	finalName := baseName
 	if mode == "new" {
+		// AllowDuplicateName: baseName is about to be reused (zfs-scan's
+		// --new re-scanning a dataset it already has history for, always
+		// under that dataset's exact name). snapshots.name is unique in the
+		// schema, so whatever currently holds that name has to be renamed
+		// out of the way first - it's kept as history, not deleted, but the
+		// name is what FindSnapshot/GetLastSnapshot resolve by, and the new
+		// scan should be what they find from here on.
+		if cfg.AllowDuplicateName && explicitName {
+			if existing, _ := dbStore.FindSnapshot(baseName); existing != nil {
+				supersededName := fmt.Sprintf("%s_superseded_%d", baseName, existing.ID)
+				if err := dbStore.RenameSnapshot(existing.ID, supersededName); err != nil {
+					return fmt.Errorf("error renaming previous snapshot '%s' out of the way: %w", baseName, err)
+				}
+			}
+		}
+
 		var err error
-		// We need to access the helper function. It is currently in main.go.
-		// We should move getUniqueSnapshotName to here or a helper file in app.
-		// For now, I'll inline/copy logical equivalent or create a helper in app package.
 		finalName, err = getUniqueSnapshotName(dbStore, baseName, explicitName)
 		if err != nil {
 			return fmt.Errorf("error resolving snapshot name: %w", err)
@@ -242,7 +266,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 
 	// Run Scan
 	results := make(chan scanner.ScanResult, cfg.Threads)
-	
+
 	// Progress Reporting
 	var foundCount atomic.Int64
 	var foundBytes atomic.Int64
@@ -266,14 +290,14 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			errSamples = append(errSamples, err.Error())
 		}
 	}
-	
+
 	walkDone := make(chan bool)
 	done := make(chan bool)
-	
+
 	scanConfig := scanner.ScannerConfig{
-		RootPath:   targetDir,
-		SnapshotID: snapshotID,
-		NumWorkers: cfg.Threads,
+		RootPath:    targetDir,
+		SnapshotID:  snapshotID,
+		NumWorkers:  cfg.Threads,
 		ResumeMap:   resumeMap,
 		CrossMounts: cfg.CrossMounts,
 		FailOnMount: cfg.FailOnMount,
@@ -295,7 +319,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	var subMounts []string
 
 	isMount, _ := util.IsMountPoint(targetDir)
-	if !isMount && cfg.EstimateOnly{
+	if !isMount && cfg.EstimateOnly {
 		return fmt.Errorf("Cannot estimate size for non-mount point: %s", targetDir)
 	}
 
@@ -327,7 +351,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		} else {
 			fmt.Println("Cross-mounts: DISABLED (single filesystem)")
 		}
-		
+
 		var alreadyScanned int64
 		if mode == "resume" {
 			var err error
@@ -343,11 +367,11 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		}
 
 		// We don't have total capacity here easily from GetFSUsage helper return (it returns used, totalCapacity).
-		// Note: util.GetFSUsage returns (used, totalCapacity). 
+		// Note: util.GetFSUsage returns (used, totalCapacity).
 		// My earlier edit to RunSnapshot only captured `used`.
 		// I need to adjust the call above to capture `totalCapacity` if I want to show it.
 		// For now, let's just show the estimated scan size (Used space).
-		
+
 		fmt.Println("----------------------------------------------------------------")
 		fmt.Printf("Total Estimate:   %s\n", util.FormatBytes(estimatedTotal))
 		if mode == "resume" {
@@ -362,7 +386,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				fmt.Printf("  - %s\n", m)
 			}
 		}
-		
+
 		return nil
 	}
 
@@ -386,7 +410,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	)
 
 	// UI Loop
-	totalBuffer := float64(scanConfig.NumWorkers*consts.ScannerChannelBufferMultiplier)
+	totalBuffer := float64(scanConfig.NumWorkers * consts.ScannerChannelBufferMultiplier)
 	uiDone := make(chan bool)
 	go func() {
 		defer close(uiDone)
@@ -516,7 +540,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	scanner.RunScan(scanConfig, results)
 
 	logrus.Infof("Scan duration: %v", time.Since(start))
-	
+
 	// Permission Warning Check
 	if estimatedTotal > 0 {
 		finalBytes := foundBytes.Load()
@@ -529,7 +553,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	}
 
 	<-done
-	
+
 	totalErrors := scanErrors.Load() + writeErrors.Load()
 	if totalErrors > 0 {
 		errSamplesMu.Lock()
@@ -561,4 +585,3 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	logrus.Infof("Finished. Total duration: %v", time.Since(start))
 	return nil
 }
-

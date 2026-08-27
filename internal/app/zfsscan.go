@@ -3,7 +3,10 @@ package app
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 
 	"fluxion/internal/models"
 	"fluxion/internal/store"
@@ -21,6 +24,11 @@ type ZFSScanConfig struct {
 	DryRun             bool
 	ExcludeDatasets    []string
 	IncludeCanMountOff bool // also mount+scan canmount=off datasets, instead of skipping them
+
+	// ForceNew starts a brand-new snapshot for every dataset, ignoring any
+	// completed, failed, or in-progress snapshot already recorded under that
+	// dataset's name - the old row is kept as history, not overwritten.
+	ForceNew bool
 
 	// Runner is injected so tests can substitute a fake `zfs`/`mount`; nil
 	// means the real thing.
@@ -40,6 +48,58 @@ type ZFSScanResult struct {
 	HadFailures bool
 }
 
+// mountTracker records which temporary directories are currently mounted, so
+// the interrupt handler (running on its own goroutine) can see an accurate,
+// race-free snapshot of what needs unmounting no matter where in the run a
+// signal arrives.
+type mountTracker struct {
+	mu   sync.Mutex
+	dirs []string
+}
+
+func (t *mountTracker) add(dir string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.dirs = append(t.dirs, dir)
+}
+
+func (t *mountTracker) snapshot() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.dirs...)
+}
+
+// cleanupMounts unmounts and removes every directory in dirs, best-effort:
+// a failure on one is logged and does not stop the rest. Shared by normal
+// end-of-run teardown and by the interrupt handler, so both behave
+// identically.
+func cleanupMounts(run zfsutil.Runner, dirs []string) {
+	for _, dir := range dirs {
+		if err := zfsutil.UnmountPath(run, dir); err != nil {
+			logrus.Warnf("failed to unmount %s (left mounted): %v", dir, err)
+			continue
+		}
+		// Only remove the directory itself (never RemoveAll) - if unmount
+		// somehow left content behind, os.Remove fails safely on a
+		// non-empty directory instead of deleting anything inside it.
+		if err := os.Remove(dir); err != nil {
+			logrus.Warnf("failed to remove temporary mount directory %s: %v", dir, err)
+		}
+	}
+}
+
+// handleInterrupt runs the same cleanup as normal end-of-run teardown against
+// whatever's mounted at the moment of interruption, and returns the
+// conventional 128+signal exit code for the caller to exit with.
+func handleInterrupt(sig os.Signal, run zfsutil.Runner, dirs []string) int {
+	logrus.Warnf("received %s - unmounting %d temporary mount(s) before exiting...", sig, len(dirs))
+	cleanupMounts(run, dirs)
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return 1
+}
+
 // RunZFSScan enumerates every dataset under cfg.Roots and scans each into its
 // own Fluxion snapshot (named after the dataset) with cross-mounts disabled.
 //
@@ -52,7 +112,8 @@ type ZFSScanResult struct {
 // wherever a child dataset happens to be mounted in the live tree (which
 // would otherwise shadow them). It also means the scanner's mount-boundary
 // logic never has to reason about the fleet's normal mount layout at all.
-// Every mount this run creates is torn down afterward.
+// Every mount this run creates is torn down afterward - including on
+// SIGINT/SIGTERM, see the interrupt handler installed below.
 //
 // It does not read ZFS's own snapshot history - see knowledge/fleet.md
 // "Verdict: do NOT build per-snapshot scanning". This only drives repeated,
@@ -86,12 +147,42 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 		defer dbStore.Close()
 	}
 
+	var mounted mountTracker
+
+	// Interrupt handling: a real run can hold open temporary mounts for
+	// hours (every dataset is mounted upfront, scanned in turn, then all
+	// unmounted at the end - see below). Without this, ^C or a `kill` mid-run
+	// leaves those mounts and their temp directories orphaned, since Go runs
+	// no cleanup on an unhandled SIGINT/SIGTERM. A second signal while
+	// cleanup is in flight forces an immediate exit, in case `umount` itself
+	// is stuck on a wedged mount.
+	if !cfg.DryRun {
+		sigCh := make(chan os.Signal, 2)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(sigCh)
+
+		done := make(chan struct{})
+		defer close(done)
+
+		go func() {
+			select {
+			case sig := <-sigCh:
+				go func() {
+					<-sigCh
+					os.Exit(1)
+				}()
+				os.Exit(handleInterrupt(sig, run, mounted.snapshot()))
+			case <-done:
+			}
+		}()
+	}
+
 	type planned struct {
 		dataset    zfsutil.Dataset
 		mountpoint string
+		resumeFrom bool // an in-progress snapshot for this dataset should be resumed rather than started fresh
 	}
 	var toScan []planned
-	var mountedDirs []string // temp dirs we mounted, for teardown
 
 	for _, ds := range datasets {
 		if excluded(ds.Name, cfg.ExcludeDatasets) {
@@ -110,21 +201,32 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			continue
 		}
 
+		resumeFrom := false
 		if !cfg.DryRun && dbStore != nil {
 			existing, _ := dbStore.FindSnapshot(ds.Name)
 			if existing != nil {
-				switch existing.Status {
-				case models.StatusCompleted:
-					fmt.Printf("  skip  %-55s already scanned (snapshot #%d)\n", ds.Name, existing.ID)
-					res.AlreadyDone = append(res.AlreadyDone, ds.Name)
-					continue
-				case models.StatusFailed:
-					fmt.Printf("  skip  %-55s previous scan failed (snapshot #%d) - delete it to retry\n", ds.Name, existing.ID)
-					res.Failed = append(res.Failed, ds.Name)
-					res.HadFailures = true
-					continue
+				if cfg.ForceNew {
+					fmt.Printf("  new   %-55s --new: starting a fresh snapshot (previous #%d, %s, kept as history)\n", ds.Name, existing.ID, existing.Status)
+				} else {
+					switch existing.Status {
+					case models.StatusCompleted:
+						fmt.Printf("  skip  %-55s already scanned (snapshot #%d)\n", ds.Name, existing.ID)
+						res.AlreadyDone = append(res.AlreadyDone, ds.Name)
+						continue
+					case models.StatusFailed:
+						fmt.Printf("  skip  %-55s previous scan failed (snapshot #%d) - delete it to retry\n", ds.Name, existing.ID)
+						res.Failed = append(res.Failed, ds.Name)
+						res.HadFailures = true
+						continue
+					default:
+						// in_progress: resume it by name, rather than by
+						// this run's target dir - each run mounts a brand
+						// new temp directory (see below), so a path-based
+						// resume lookup would never find a snapshot from an
+						// earlier, interrupted run.
+						resumeFrom = true
+					}
 				}
-				// in_progress: fall through, RunSnapshot will resume it.
 			}
 		}
 
@@ -158,9 +260,9 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			res.HadFailures = true
 			continue
 		}
-		mountedDirs = append(mountedDirs, dir)
+		mounted.add(dir)
 
-		toScan = append(toScan, planned{dataset: ds, mountpoint: dir})
+		toScan = append(toScan, planned{dataset: ds, mountpoint: dir, resumeFrom: resumeFrom})
 	}
 
 	if cfg.DryRun {
@@ -169,7 +271,7 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 
 	for _, p := range toScan {
 		fmt.Printf("\n=== %s (%s) ===\n", p.dataset.Name, p.mountpoint)
-		err := RunSnapshot(SnapshotConfig{
+		snapCfg := SnapshotConfig{
 			TargetDir:      p.mountpoint,
 			DBPath:         cfg.DBPath,
 			Name:           p.dataset.Name,
@@ -177,7 +279,14 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			CrossMounts:    false,
 			ComputeMD5:     cfg.ComputeMD5,
 			NonInteractive: true,
-		})
+		}
+		if p.resumeFrom {
+			snapCfg.ResumeFrom = p.dataset.Name
+		}
+		if cfg.ForceNew {
+			snapCfg.AllowDuplicateName = true
+		}
+		err := RunSnapshot(snapCfg)
 		if err != nil {
 			logrus.Errorf("scan of %s failed: %v", p.dataset.Name, err)
 			res.Failed = append(res.Failed, p.dataset.Name)
@@ -194,18 +303,7 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 	// path we mounted has no such ambiguity. Order doesn't matter: every
 	// mount here is its own freshly created, empty directory, never nested
 	// inside another one of them.
-	for _, dir := range mountedDirs {
-		if err := zfsutil.UnmountPath(run, dir); err != nil {
-			logrus.Warnf("failed to unmount %s (left mounted): %v", dir, err)
-			continue
-		}
-		// Only remove the directory itself (never RemoveAll) - if unmount
-		// somehow left content behind, os.Remove fails safely on a
-		// non-empty directory instead of deleting anything inside it.
-		if err := os.Remove(dir); err != nil {
-			logrus.Warnf("failed to remove temporary mount directory %s: %v", dir, err)
-		}
-	}
+	cleanupMounts(run, mounted.snapshot())
 
 	printZFSScanSummary(res)
 	return res, nil

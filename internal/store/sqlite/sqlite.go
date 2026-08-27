@@ -203,6 +203,11 @@ func (s *SqliteStore) FailSnapshot(id int64, finishedAt time.Time, errorCount in
 	return s.finishSnapshot(id, models.StatusFailed, finishedAt, errorCount)
 }
 
+func (s *SqliteStore) RenameSnapshot(id int64, newName string) error {
+	_, err := s.db.Exec(`UPDATE snapshots SET name = ? WHERE id = ?`, newName, id)
+	return err
+}
+
 func (s *SqliteStore) DeleteSnapshot(id int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {

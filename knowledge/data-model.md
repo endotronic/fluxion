@@ -116,7 +116,11 @@ CreateSnapshot()  ──▶  in_progress  ──▶  CompleteSnapshot()  ──�
   filter tombstones, so a deleted snapshot can be resolved by name/ID and then presents as
   an empty snapshot — a diff against it reports everything as removed.
 - Names are unique. `getUniqueSnapshotName` (`internal/app/helpers.go`) resolves
-  collisions by appending an incrementing suffix.
+  collisions by appending an incrementing suffix. `Store.RenameSnapshot(id, newName)` is the
+  other way a name changes: it's how `RunSnapshot`'s `AllowDuplicateName` option (only set by
+  zfs-scan's `--new`) reuses a name that's already taken — the existing row, whatever its
+  status, is renamed to `<name>_superseded_<old id>` to free the name up, rather than being
+  overwritten or deleted. The unique index still holds; nothing bypasses it.
 
 ## Snapshot identity and lookup
 

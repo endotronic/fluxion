@@ -7,6 +7,7 @@ import (
 	"fluxion/internal/store"
 )
 
+// getUniqueSnapshotName resolves the name a new snapshot row should use.
 func getUniqueSnapshotName(s store.Store, baseName string, exact bool) (string, error) {
 	if exact {
 		snap, _ := s.FindSnapshot(baseName)
@@ -40,4 +41,3 @@ func getUniqueSnapshotName(s store.Store, baseName string, exact bool) (string, 
 
 	return "", fmt.Errorf("could not generate unique name for %s", baseName)
 }
-

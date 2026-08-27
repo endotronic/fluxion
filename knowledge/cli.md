@@ -149,7 +149,7 @@ fluxion c --db f.db artemis_deprecated luna_kevin && zfs destroy artemis/depreca
 
 ```
 fluxion zs --db <db> [--threads N] [--md5] [--dry-run]
-          [--include-canmount-off]
+          [--include-canmount-off] [--new]
           [--exclude-dataset NAME]... <pool-or-dataset>...
 ```
 
@@ -201,6 +201,19 @@ as already done, making re-runs of the same root idempotent and cheap — that D
 happens *before* any mount attempt, so a re-run mounts nothing for datasets it's already
 scanned.
 
+**A dataset interrupted mid-scan (`in_progress`) is resumed by name, not by mount path, and
+this only works because `RunZFSScan` passes `ResumeFrom: <dataset name>` into `RunSnapshot`
+explicitly.** Every zfs-scan invocation mounts each dataset at a brand-new
+`os.MkdirTemp` path, so `RunSnapshot`'s own implicit-resume detection — which looks up
+`GetLastSnapshot(TargetDir)` by root path — can never find a snapshot left `in_progress` by
+an earlier, interrupted run; that row was recorded against a temp path that no longer
+exists. Without the explicit `ResumeFrom`, a rerun falls through to "start new" and then
+fails outright on the name collision (`getUniqueSnapshotName`'s exact-name check). This was
+a real, confirmed bug until this was added — an interrupted dataset was permanently stuck,
+failing identically on every rerun. Resuming by name is correct because zfs-scan always
+names a dataset's snapshot after the dataset itself, which is stable across runs even though
+the mount path isn't.
+
 Counted as **failures** (`Failed`, and the run's exit code): a mount that errors (permission,
 degraded pool, or any other `mount -t zfs -o zfsutil` failure — including for a dataset
 that's already mounted elsewhere and perfectly healthy there), a scan error, or a dataset
@@ -226,9 +239,24 @@ still gets scanned.
   for every dataset works for these too. Off by default because `canmount=off` is normal for
   purely organizational parent datasets with no files of their own; opt in when a fleet has
   `canmount=off` datasets that do hold real content worth scanning.
-- No signal handling: a `SIGINT`/`SIGTERM` mid-run can leave zfs-scan's temporary mounts in
-  place. Left as a known, accepted limitation — cosmetic, not data risk, and never touches
-  the dataset's pre-existing mount (see the by-path unmount point above).
+- `--new` starts a completely fresh snapshot for every dataset, ignoring any
+  `completed`/`failed`/`in_progress` snapshot already recorded under its name — the usual
+  skip/resume/blocked-by-failure logic above is bypassed entirely. Because `snapshots.name`
+  is unique in the schema, the *existing* row (whatever its status) is renamed to
+  `<name>_superseded_<old id>` before the new one is created under the clean name — kept as
+  history, not deleted or overwritten. `FindSnapshot`/`GetLastSnapshot` name lookups only
+  ever see the newest generation from then on; the superseded row is still reachable by ID
+  or by its renamed value. Running `--new` again re-supersedes whatever currently holds the
+  name, so repeated `--new` runs just keep growing the history chain.
+- `SIGINT`/`SIGTERM` mid-run trigger cleanup instead of leaving mounts orphaned: a handler
+  installed for the whole run (skipped for `--dry-run`, which never mounts anything) logs a
+  warning, unmounts and removes every temporary directory currently mounted (the same
+  `cleanupMounts` helper normal end-of-run teardown uses), and exits with the conventional
+  `128 + signal number` (130 for `SIGINT`, 143 for `SIGTERM`). A **second** signal while
+  cleanup is in flight force-exits immediately, in case `umount` itself is stuck on a wedged
+  or degraded mount. Whatever dataset was mid-scan when the signal arrived is left
+  `in_progress` in the DB exactly as before — the resume-by-name behavior described above is
+  what makes rerunning after a `^C` actually pick it back up instead of getting stuck.
 - **No progress bar in a piped/logged run** (e.g. `zfs-scan ... | tee log`): the progress
   bar writer is discarded whenever stderr isn't a TTY (see
   [architecture.md](architecture.md) "Output conventions"), and `RunSnapshot` fills that gap
