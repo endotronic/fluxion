@@ -7,17 +7,17 @@ import (
 
 func fakeListOutput() string {
 	// Deliberately out of name order, to prove ListDatasets sorts.
-	rows := [][5]string{
-		{"luna/kevin/archives", "/luna/kevin/archives", "yes", "on", "filesystem"},
-		{"luna", "/luna", "yes", "on", "filesystem"},
-		{"luna/proxmox", "none", "no", "off", "filesystem"},
-		{"luna/proxmox/vm-302-disk-0", "-", "no", "-", "volume"},
-		{"luna/kevin", "/luna/kevin", "no", "on", "filesystem"},
-		{"luna/legacy-mount", "legacy", "no", "on", "filesystem"},
+	rows := [][6]string{
+		{"luna/kevin/archives", "/luna/kevin/archives", "yes", "on", "filesystem", "1073741824"},
+		{"luna", "/luna", "yes", "on", "filesystem", "5368709120"},
+		{"luna/proxmox", "none", "no", "off", "filesystem", "0"},
+		{"luna/proxmox/vm-302-disk-0", "-", "no", "-", "volume", "17179869184"},
+		{"luna/kevin", "/luna/kevin", "no", "on", "filesystem", "2147483648"},
+		{"luna/legacy-mount", "legacy", "no", "on", "filesystem", "0"},
 	}
 	var out string
 	for _, r := range rows {
-		out += fmt.Sprintf("%s\t%s\t%s\t%s\t%s\n", r[0], r[1], r[2], r[3], r[4])
+		out += fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\n", r[0], r[1], r[2], r[3], r[4], r[5])
 	}
 	return out
 }
@@ -46,6 +46,9 @@ func TestListDatasets_ParsesAndSorts(t *testing.T) {
 
 	if datasets[0].Mounted != true || datasets[0].CanMount != "on" || datasets[0].Type != "filesystem" {
 		t.Errorf("luna: unexpected fields %+v", datasets[0])
+	}
+	if datasets[0].Used != 5368709120 {
+		t.Errorf("luna: Used = %d, want 5368709120", datasets[0].Used)
 	}
 
 	found := false

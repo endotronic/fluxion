@@ -7,10 +7,12 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"fluxion/internal/models"
 	"fluxion/internal/store"
 	"fluxion/internal/store/sqlite"
+	"fluxion/internal/util"
 	"fluxion/internal/zfsutil"
 
 	"github.com/sirupsen/logrus"
@@ -86,6 +88,76 @@ func cleanupMounts(run zfsutil.Runner, dirs []string) {
 			logrus.Warnf("failed to remove temporary mount directory %s: %v", dir, err)
 		}
 	}
+}
+
+// overallProgress prints run-wide progress across every dataset in a
+// zfs-scan run, on its own line - each dataset's own progress bar/heartbeat
+// (inside RunSnapshot) only ever knows about that one dataset, so without
+// this there is no way to tell how far through a multi-dataset run you are
+// or estimate when it will finish.
+//
+// Datasets are weighted by their ZFS `used` property: physical, on-disk
+// bytes (post-compression, snapshot-inclusive), not the logical size of the
+// files inside them - the same kind of on-disk figure RunSnapshot's own
+// per-dataset bar is scaled against (util.GetFSUsage), just read directly
+// off the property instead of re-derived via statfs. That mismatch against
+// the logical bytes-processed count fed into line() means the percentage is
+// an estimate, not an exact fraction - same caveat that already applies to
+// each individual dataset's own progress bar today.
+type overallProgress struct {
+	start           time.Time
+	totalDatasets   int
+	totalBytes      int64
+	bytesDoneBefore int64 // sum of Used for datasets already finished, success or failure
+}
+
+func newOverallProgress(datasets []zfsutil.Dataset) *overallProgress {
+	p := &overallProgress{start: time.Now(), totalDatasets: len(datasets)}
+	for _, ds := range datasets {
+		p.totalBytes += ds.Used
+	}
+	return p
+}
+
+// datasetDone records that one dataset has finished, successfully or not -
+// either way it no longer counts as remaining work.
+func (p *overallProgress) datasetDone(ds zfsutil.Dataset) {
+	p.bytesDoneBefore += ds.Used
+}
+
+// line renders the current overall-progress line. datasetsDone is how many
+// datasets have finished so far (not counting whichever is currently being
+// scanned, if any); currentProcessed is the bytes hashed/recorded so far for
+// the in-progress dataset (0 between datasets, or when its size couldn't be
+// weighted against the run total).
+func (p *overallProgress) line(datasetsDone int, currentProcessed int64) string {
+	done := p.bytesDoneBefore + currentProcessed
+	elapsed := time.Since(p.start).Round(time.Second)
+
+	line := fmt.Sprintf("-- overall: %d/%d datasets done", datasetsDone, p.totalDatasets)
+	if p.totalBytes > 0 {
+		pct := float64(done) / float64(p.totalBytes) * 100
+		line += fmt.Sprintf(", %s / %s (%.1f%%)", util.FormatBytes(done), util.FormatBytes(p.totalBytes), pct)
+	}
+	line += fmt.Sprintf(", elapsed %s", elapsed)
+
+	// ETA needs a nonzero rate to divide by - wait for a little elapsed time
+	// and some actual progress before estimating, rather than showing a wild
+	// swing off the first sample.
+	if p.totalBytes > 0 && done > 0 && elapsed >= 2*time.Second {
+		remaining := p.totalBytes - done
+		if remaining < 0 {
+			remaining = 0
+		}
+		rate := float64(done) / elapsed.Seconds()
+		eta := time.Duration(float64(remaining) / rate * float64(time.Second)).Round(time.Second)
+		line += fmt.Sprintf(", ETA ~%s", eta)
+	}
+	return line
+}
+
+func (p *overallProgress) print(datasetsDone int, currentProcessed int64) {
+	fmt.Println(p.line(datasetsDone, currentProcessed))
 }
 
 // handleInterrupt runs the same cleanup as normal end-of-run teardown against
@@ -269,8 +341,15 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 		return res, nil
 	}
 
+	var scanDatasets []zfsutil.Dataset
 	for _, p := range toScan {
+		scanDatasets = append(scanDatasets, p.dataset)
+	}
+	progress := newOverallProgress(scanDatasets)
+
+	for i, p := range toScan {
 		fmt.Printf("\n=== %s (%s) ===\n", p.dataset.Name, p.mountpoint)
+		progress.print(i, 0)
 		snapCfg := SnapshotConfig{
 			TargetDir:      p.mountpoint,
 			DBPath:         cfg.DBPath,
@@ -279,6 +358,9 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			CrossMounts:    false,
 			ComputeMD5:     cfg.ComputeMD5,
 			NonInteractive: true,
+			OnHeartbeat: func(processed int64) {
+				progress.print(i, processed)
+			},
 		}
 		if p.resumeFrom {
 			snapCfg.ResumeFrom = p.dataset.Name
@@ -287,6 +369,7 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			snapCfg.AllowDuplicateName = true
 		}
 		err := RunSnapshot(snapCfg)
+		progress.datasetDone(p.dataset)
 		if err != nil {
 			logrus.Errorf("scan of %s failed: %v", p.dataset.Name, err)
 			res.Failed = append(res.Failed, p.dataset.Name)
@@ -294,6 +377,7 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 		} else {
 			res.Scanned = append(res.Scanned, p.dataset.Name)
 		}
+		progress.print(i+1, 0)
 	}
 
 	// Unmount everything we mounted, by path rather than dataset name. A

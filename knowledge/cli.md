@@ -262,6 +262,37 @@ still gets scanned.
   [architecture.md](architecture.md) "Output conventions"), and `RunSnapshot` fills that gap
   with a periodic `logrus.Infof` heartbeat every 30s instead — expect status lines, not a
   redrawing bar, when this command's output is redirected.
+- **A run-wide overall-progress line, printed on its own, separate from each dataset's own
+  progress bar/heartbeat.** `RunSnapshot`'s own bar only ever knows about the one dataset
+  it's currently scanning; without a second line there was no way to tell how far through a
+  multi-dataset run you were or estimate when it would finish. `overallProgress`
+  (`internal/app/zfsscan.go`) prints `-- overall: K/N datasets done, X / Y (P%), elapsed E[,
+  ETA ~T]` at the start of each dataset, on every ~30s heartbeat while a dataset is
+  mid-scan, and again once it finishes. It's driven by the same `SnapshotConfig.OnHeartbeat`
+  callback plumbed through `RunSnapshot` for this purpose — that ticker now fires whenever
+  `OnHeartbeat` is set, not only in piped/`quiet` mode, so a TTY run still gets its live
+  per-dataset bar *and* a periodic overall line underneath it.
+  - **Weighted by ZFS's `used` property** (`zfsutil.Dataset.Used`, added to the `zfs list`
+    columns), not a flat per-dataset count — a small quick dataset finishing shouldn't read
+    as meaningful progress next to a multi-terabyte one still running. `used` is physical,
+    on-disk bytes (post-compression, snapshot-inclusive), deliberately mirroring the
+    existing convention that each dataset's own progress bar is *also* scaled against an
+    on-disk figure (`util.GetFSUsage`), while the numerator in both cases
+    (`processedBytes`) is the *logical* size of scanned files — the same pre-existing
+    logical-vs-physical mismatch, just kept consistent at both levels rather than fixed or
+    newly introduced. Expect the percentage to be an estimate, not an exact fraction,
+    especially on heavily compressed datasets.
+  - The total only covers datasets actually being attempted this run (`toScan`), not every
+    dataset `zfs list` enumerated — one skipped for `canmount=off`, excluded, etc. never
+    counts against the denominator.
+  - A dataset that fails still counts as "no longer remaining work" once it's done — ETA is
+    about time, not success.
+  - The percentage/ETA fields are omitted entirely when `totalBytes` is 0 (nothing in this
+    run reported a nonzero `used`, e.g. `zfs list` couldn't parse it — see `Used`'s doc
+    comment in `internal/zfsutil/zfsutil.go`), and ETA specifically is also withheld for the
+    first 2 elapsed seconds of the run (too little signal to divide by) and clamped to `~0s`
+    rather than going negative if `done` overshoots `totalBytes` (possible precisely because
+    of the logical-vs-physical mismatch above).
 
 Exit status: **0** = every dataset scanned or expectedly skipped, **1** = at least one
 dataset failed (mount/scan error, or blocked by a prior failed snapshot) — same discipline

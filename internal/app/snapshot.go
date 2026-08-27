@@ -51,6 +51,14 @@ type SnapshotConfig struct {
 	// resumes, for callers driving many scans unattended (zfs-scan).
 	NonInteractive bool
 
+	// OnHeartbeat, if set, is called every ~30s for the duration of the scan
+	// with the number of bytes processed (hashed/recorded) so far - the same
+	// value driving this scan's own progress bar. It exists for a caller
+	// running several scans in sequence (zfs-scan) to print its own,
+	// run-wide progress on top of this one dataset's, since nothing else
+	// gives it a periodic hook into an in-progress RunSnapshot call.
+	OnHeartbeat func(processedBytes int64)
+
 	// AllowDuplicateName lets a new snapshot be created under a name that's
 	// already used by an earlier snapshot in this DB. snapshots.name is
 	// unique in the schema, so instead of failing with "already exists",
@@ -422,8 +430,14 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		// completely silent between the "Estimated scan size" line and
 		// "Finished", which reads as a hang. Log the same status periodically
 		// instead, at a rate sane for a log file rather than a terminal.
+		//
+		// The same ticker also drives cfg.OnHeartbeat (e.g. zfs-scan's overall
+		// run progress line), so it runs regardless of quiet whenever a caller
+		// has asked for it - a TTY still gets its live per-dataset bar, but a
+		// multi-dataset run has no other periodic hook to piggyback an
+		// overall-progress line onto.
 		var heartbeat <-chan time.Time
-		if quiet {
+		if quiet || cfg.OnHeartbeat != nil {
 			hb := time.NewTicker(30 * time.Second)
 			defer hb.Stop()
 			heartbeat = hb.C
@@ -463,10 +477,15 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				}
 				bar.Set64(current)
 			case <-heartbeat:
-				if walking {
-					logrus.Infof("Scanning... found %d files (%s) so far", foundCount.Load(), util.FormatBytes(foundBytes.Load()))
-				} else {
-					logrus.Infof("Hashing... %d/%d files done", processedCount.Load(), foundCount.Load())
+				if quiet {
+					if walking {
+						logrus.Infof("Scanning... found %d files (%s) so far", foundCount.Load(), util.FormatBytes(foundBytes.Load()))
+					} else {
+						logrus.Infof("Hashing... %d/%d files done", processedCount.Load(), foundCount.Load())
+					}
+				}
+				if cfg.OnHeartbeat != nil {
+					cfg.OnHeartbeat(processedBytes.Load())
 				}
 			case <-done:
 				bar.Finish()

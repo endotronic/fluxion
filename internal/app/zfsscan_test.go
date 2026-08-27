@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ import (
 // RunZFSScan's orchestration can be tested without a real `zfs` binary or
 // root (there is neither in this project's build environment).
 type fakeZFS struct {
-	rows         [][5]string // name, mountpoint, mounted, canmount, type
+	rows         [][6]string // name, mountpoint, mounted, canmount, type, used
 	failMountFor map[string]bool
 	mountCalls   []string          // dataset names successfully mounted via MountAt
 	unmountCalls []string          // paths successfully unmounted via UnmountPath
@@ -34,7 +35,7 @@ func (f *fakeZFS) runner() zfsutil.Runner {
 				f.listCalls++
 				var out string
 				for _, r := range f.rows {
-					out += fmt.Sprintf("%s\t%s\t%s\t%s\t%s\n", r[0], r[1], r[2], r[3], r[4])
+					out += fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\n", r[0], r[1], r[2], r[3], r[4], r[5])
 				}
 				return out, nil
 			default:
@@ -78,14 +79,14 @@ func TestRunZFSScan_MountsScansAndUnmounts(t *testing.T) {
 	defer cleanup()
 
 	fz := &fakeZFS{
-		rows: [][5]string{
-			{"pool", "/pool", "yes", "on", "filesystem"},                        // already mounted elsewhere
-			{"pool/needs_mount", "/pool/needs_mount", "no", "on", "filesystem"}, // not currently mounted
-			{"pool/container", "/pool/container", "no", "off", "filesystem"},    // canmount=off
-			{"pool/vol", "-", "no", "-", "volume"},                              // zvol
-			{"pool/mount_fails", "/some/path", "no", "on", "filesystem"},        // our mount fails
-			{"pool/legacy_unmounted", "legacy", "no", "on", "filesystem"},       // no live legacy mount, mounted fresh anyway
-			{"pool/no_mountpoint", "none", "no", "on", "filesystem"},            // no mountpoint property, mounted fresh anyway
+		rows: [][6]string{
+			{"pool", "/pool", "yes", "on", "filesystem", "0"},                        // already mounted elsewhere
+			{"pool/needs_mount", "/pool/needs_mount", "no", "on", "filesystem", "0"}, // not currently mounted
+			{"pool/container", "/pool/container", "no", "off", "filesystem", "0"},    // canmount=off
+			{"pool/vol", "-", "no", "-", "volume", "0"},                              // zvol
+			{"pool/mount_fails", "/some/path", "no", "on", "filesystem", "0"},        // our mount fails
+			{"pool/legacy_unmounted", "legacy", "no", "on", "filesystem", "0"},       // no live legacy mount, mounted fresh anyway
+			{"pool/no_mountpoint", "none", "no", "on", "filesystem", "0"},            // no mountpoint property, mounted fresh anyway
 		},
 		failMountFor: map[string]bool{"pool/mount_fails": true},
 	}
@@ -160,8 +161,8 @@ func TestRunZFSScan_MountFailureIsAFailureNotASkip(t *testing.T) {
 	// Even a dataset that's already mounted at its usual location still
 	// gets a fresh mount attempt, which can still fail.
 	fz := &fakeZFS{
-		rows: [][5]string{
-			{"pool/already_mounted", "/pool/already_mounted", "yes", "on", "filesystem"},
+		rows: [][6]string{
+			{"pool/already_mounted", "/pool/already_mounted", "yes", "on", "filesystem", "0"},
 		},
 		failMountFor: map[string]bool{"pool/already_mounted": true},
 	}
@@ -187,8 +188,8 @@ func TestRunZFSScan_IncludeCanMountOff(t *testing.T) {
 	defer cleanup()
 
 	fz := &fakeZFS{
-		rows: [][5]string{
-			{"pool/container", "/pool/container", "no", "off", "filesystem"},
+		rows: [][6]string{
+			{"pool/container", "/pool/container", "no", "off", "filesystem", "0"},
 		},
 	}
 
@@ -225,8 +226,8 @@ func TestRunZFSScan_RerunIsIdempotent(t *testing.T) {
 	defer cleanup()
 
 	fz := &fakeZFS{
-		rows: [][5]string{
-			{"pool", "/pool", "yes", "on", "filesystem"},
+		rows: [][6]string{
+			{"pool", "/pool", "yes", "on", "filesystem", "0"},
 		},
 	}
 
@@ -259,9 +260,9 @@ func TestRunZFSScan_DryRunTouchesNothing(t *testing.T) {
 	defer cleanup()
 
 	fz := &fakeZFS{
-		rows: [][5]string{
-			{"pool", "/pool", "no", "on", "filesystem"},
-			{"pool/no_mountpoint", "none", "no", "on", "filesystem"},
+		rows: [][6]string{
+			{"pool", "/pool", "no", "on", "filesystem", "0"},
+			{"pool/no_mountpoint", "none", "no", "on", "filesystem", "0"},
 		},
 	}
 
@@ -316,8 +317,8 @@ func TestRunZFSScan_ResumesInterruptedInProgressSnapshot(t *testing.T) {
 	s.Close()
 
 	fz := &fakeZFS{
-		rows: [][5]string{
-			{"pool/interrupted", "/pool/interrupted", "no", "on", "filesystem"},
+		rows: [][6]string{
+			{"pool/interrupted", "/pool/interrupted", "no", "on", "filesystem", "0"},
 		},
 	}
 
@@ -383,10 +384,10 @@ func TestRunZFSScan_ForceNewIgnoresPriorState(t *testing.T) {
 	s.Close()
 
 	fz := &fakeZFS{
-		rows: [][5]string{
-			{"pool/completed", "/pool/completed", "no", "on", "filesystem"},
-			{"pool/failed", "/pool/failed", "no", "on", "filesystem"},
-			{"pool/in_progress", "/pool/in_progress", "no", "on", "filesystem"},
+		rows: [][6]string{
+			{"pool/completed", "/pool/completed", "no", "on", "filesystem", "0"},
+			{"pool/failed", "/pool/failed", "no", "on", "filesystem", "0"},
+			{"pool/in_progress", "/pool/in_progress", "no", "on", "filesystem", "0"},
 		},
 	}
 
@@ -435,6 +436,66 @@ func TestRunZFSScan_ForceNewIgnoresPriorState(t *testing.T) {
 	if len(snaps) != 6 {
 		t.Errorf("expected 6 total snapshot rows (3 old + 3 new), got %d", len(snaps))
 	}
+}
+
+// TestOverallProgress_Line exercises overallProgress.line()'s math directly,
+// rather than only indirectly through a full RunZFSScan run - in particular
+// the percentage/ETA guard conditions (zero totalBytes, too-early-to-estimate,
+// and done overshooting totalBytes).
+func TestOverallProgress_Line(t *testing.T) {
+	t.Run("zero totalBytes: no percentage or ETA, just dataset counts", func(t *testing.T) {
+		p := &overallProgress{start: time.Now(), totalDatasets: 3}
+		got := p.line(1, 0)
+		if !strings.Contains(got, "1/3 datasets done") {
+			t.Errorf("line = %q, want dataset counts", got)
+		}
+		if strings.Contains(got, "%") || strings.Contains(got, "ETA") {
+			t.Errorf("line = %q, should have no percentage or ETA when totalBytes is 0", got)
+		}
+	})
+
+	t.Run("too early to estimate: no ETA before 2s elapsed", func(t *testing.T) {
+		p := &overallProgress{start: time.Now(), totalDatasets: 2, totalBytes: 1000}
+		got := p.line(0, 500)
+		if !strings.Contains(got, "50.0%") {
+			t.Errorf("line = %q, want a 50.0%% figure", got)
+		}
+		if strings.Contains(got, "ETA") {
+			t.Errorf("line = %q, should have no ETA before 2s elapsed", got)
+		}
+	})
+
+	t.Run("normal case: computable ETA", func(t *testing.T) {
+		p := &overallProgress{start: time.Now().Add(-10 * time.Second), totalDatasets: 2, totalBytes: 1000}
+		got := p.line(0, 500)
+		if !strings.Contains(got, "50.0%") {
+			t.Errorf("line = %q, want a 50.0%% figure", got)
+		}
+		// done=500 over elapsed~10s -> rate ~50/s -> remaining 500 -> ETA ~10s.
+		if !strings.Contains(got, "ETA ~10s") {
+			t.Errorf("line = %q, want ETA ~10s", got)
+		}
+	})
+
+	t.Run("done overshoots totalBytes: remaining clamped to zero", func(t *testing.T) {
+		p := &overallProgress{start: time.Now().Add(-10 * time.Second), totalDatasets: 1, totalBytes: 1000}
+		got := p.line(0, 1500)
+		if !strings.Contains(got, "ETA ~0s") {
+			t.Errorf("line = %q, want ETA ~0s when done overshoots totalBytes", got)
+		}
+	})
+
+	t.Run("datasetDone accumulates bytesDoneBefore", func(t *testing.T) {
+		p := newOverallProgress([]zfsutil.Dataset{{Name: "a", Used: 100}, {Name: "b", Used: 200}})
+		if p.totalBytes != 300 {
+			t.Fatalf("totalBytes = %d, want 300", p.totalBytes)
+		}
+		p.datasetDone(zfsutil.Dataset{Name: "a", Used: 100})
+		got := p.line(1, 0)
+		if !strings.Contains(got, "33.3%") {
+			t.Errorf("line = %q, want 33.3%% after one 100/300 dataset done", got)
+		}
+	})
 }
 
 func TestCleanupMounts_UnmountsAndRemoves(t *testing.T) {

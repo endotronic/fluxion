@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -31,6 +32,18 @@ type Dataset struct {
 	CanMount   string // "on", "off", "noauto"
 	Type       string // "filesystem" or "volume"
 	Mounted    bool
+
+	// Used is the dataset's `used` property in bytes: physical, on-disk space
+	// (post-compression, including data retained only by its own ZFS
+	// snapshots), not the logical size of the files it contains. It exists to
+	// weight a dataset's share of a multi-dataset zfs-scan run for an overall
+	// progress/ETA estimate - the same kind of on-disk figure RunSnapshot
+	// already uses for a single dataset's own progress bar (util.GetFSUsage),
+	// just read directly off the property instead of re-derived via statfs.
+	// A malformed/unparseable value is left as 0 rather than failing the
+	// whole listing - it only ever affects a progress estimate, never
+	// correctness.
+	Used int64
 }
 
 // ListDatasets recursively lists every filesystem and volume under roots,
@@ -41,7 +54,7 @@ func ListDatasets(run Runner, roots []string) ([]Dataset, error) {
 		return nil, fmt.Errorf("no roots given")
 	}
 	args := []string{"list", "-H", "-p", "-t", "filesystem,volume",
-		"-o", "name,mountpoint,mounted,canmount,type", "-r"}
+		"-o", "name,mountpoint,mounted,canmount,type,used", "-r"}
 	args = append(args, roots...)
 
 	out, err := run("zfs", args...)
@@ -56,15 +69,17 @@ func ListDatasets(run Runner, roots []string) ([]Dataset, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 5 {
+		if len(fields) != 6 {
 			return nil, fmt.Errorf("unexpected `zfs list` output line: %q", line)
 		}
+		used, _ := strconv.ParseInt(fields[5], 10, 64) // 0 on parse failure; see Used's doc comment
 		datasets = append(datasets, Dataset{
 			Name:       fields[0],
 			Mountpoint: fields[1],
 			Mounted:    fields[2] == "yes",
 			CanMount:   fields[3],
 			Type:       fields[4],
+			Used:       used,
 		})
 	}
 
