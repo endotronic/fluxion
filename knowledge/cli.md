@@ -296,6 +296,27 @@ still gets scanned.
       `var`s (not `const`s) purely so tests can shrink the delay instead of sleeping for real
       seconds. `cleanupMounts` is shared by normal end-of-run teardown and the interrupt
       handler, so both benefit from the retry.
+    - **`StopCh` alone was still only probabilistically prompt, not deterministically so**
+      (found 2026-08-26, from a report that a scan kept visibly hashing new files for ~39s
+      after `^C`, with the terminal scrolling a new line every ~5s throughout — the second
+      symptom turned out to be the display bug described below, but the first sent a real
+      look at this). Each worker's loop was `select { case path := <-paths: ...; case
+      <-cfg.StopCh: return }`. Once the walker has raced ahead and filled the `paths` buffer
+      (`NumWorkers * consts.ScannerChannelBufferMultiplier`, easily thousands of entries),
+      that `select` has *two* ready cases as soon as `StopCh` closes — Go picks between
+      multiple ready cases uniformly at random, not in source order — so a worker only gave
+      up after happening to win that coin flip, rather than noticing `StopCh` on its very
+      next loop iteration. In expectation this only costs a couple of extra files per worker
+      (geometric with p=0.5), which is why it's an unlikely full explanation for a
+      continuous, 39-second-long burst of new activity — but it was still a real gap between
+      the code and its own doc comment's claim ("stops within roughly one in-flight file's
+      hash time"). Fixed by checking `StopCh` in its own non-blocking `select` *ahead of* the
+      blocking one, every loop iteration, so it wins deterministically the moment it's
+      closed: a worker now finishes at most the one file already in flight (if any) and no
+      more, never a random slice of the queued backlog. See
+      `TestRunScan_StopChStopsPromptly` in `internal/scanner/scanner_test.go`, which asserts
+      an upper bound on files processed after `close(stopCh)`, not just that `RunScan`
+      eventually returns.
 - **No progress bar in a piped/logged run** (e.g. `zfs-scan ... | tee log`): the progress
   bar writer is discarded whenever stderr isn't a TTY (see
   [architecture.md](architecture.md) "Output conventions"), and `RunSnapshot` fills that gap
@@ -305,20 +326,44 @@ still gets scanned.
   progress bar/heartbeat.** `RunSnapshot`'s own bar only ever knows about the one dataset
   it's currently scanning; without a second line there was no way to tell how far through a
   multi-dataset run you were or estimate when it would finish. `overallProgress`
-  (`internal/app/zfsscan.go`) prints `-- overall: K/N datasets done, X / Y (P%), elapsed E[,
-  ETA ~T]` at the start of each dataset, on a periodic tick while a dataset is mid-scan, and
-  again once it finishes. It's driven by `SnapshotConfig.OnHeartbeat`, a callback plumbed
-  through `RunSnapshot` for this purpose.
-  - **The tick driving `OnHeartbeat` is a separate, faster ticker (5s) from the `quiet`
-    piped-log heartbeat (30s)**, added 2026-08-26 — they used to share one 30s ticker. On a
-    real run, a dataset interrupted only ~20s into scanning had printed exactly one overall
-    line and never got a second one, which read as "no progress shown for the total scan"
-    even though the mechanism was technically working — 30s is reasonable cadence for an
-    unattended piped log, but far too slow to look alive to someone watching a TTY. The two
-    are independent: `quiet` (piped/non-TTY stderr) still gets its `logrus.Infof` status
-    line only every 30s; `OnHeartbeat`, when set, now fires every 5s regardless of `quiet`,
-    so a TTY run gets its live per-dataset bar *and* a genuinely-updating overall line
-    underneath it.
+  (`internal/app/zfsscan.go`) renders `-- overall: K/N datasets done, X / Y (P%), elapsed E[,
+  ETA ~T]` at the start of each dataset, repeatedly while a dataset is mid-scan, and again
+  once it finishes. It's driven by `SnapshotConfig.OverallLine func(processedBytes int64)
+  string`, a pure text-producing callback plumbed through `RunSnapshot` for this purpose —
+  see below for why it deliberately has no printing side effects of its own.
+  - **On a TTY, this line and the dataset's own bar are rendered together as one
+    cursor-coordinated two-line block, redrawn in place** (`internal/app/snapshot.go`'s UI
+    loop, `redraw()`/`dualLine`/`linesReserved`; fixed 2026-08-26). Before this, they were
+    two independently-scheduled, independently-streamed writes: the bar wrote `\r`-prefixed,
+    newline-less redraws to **stderr**, while the overall line was a plain `fmt.Println` to
+    **stdout** on its own 5s ticker. Two file descriptors landing on the same terminal have
+    no cursor coordination between them — the overall line's text appeared wherever the
+    bar's cursor happened to be (visually glued onto the tail of the bar, e.g.
+    `...15h1m34s]-- overall: 3/27 datasets done...`), and because it always carried a hard
+    newline, it permanently ended that terminal row every time it fired — forcing the bar to
+    start over on a fresh line for its next redraw instead of updating in place. This read as
+    "creating a newline at a consistent interval" and, together with the *next* bar redraw
+    line, as the scan "still going" even when it may already have stopped. The fix: when
+    `OverallLine` is set and stderr is a TTY (`dualLine`), the bar's own writer is set to
+    `io.Discard` — it never writes anywhere on its own — and the single UI goroutine that
+    already owns the bar's state instead reads it back out via `bar.String()` (the bar
+    library's "current rendered text, nothing written" accessor) and draws both lines
+    together on every 100ms tick: move the cursor up `linesReserved-1` rows, `\r`, erase to
+    end of screen (`\x1b[J`, so a frame shorter than the last one can't leave stale
+    characters), write the bar line, `\n`, write the overall line, no trailing newline. Since
+    there is now exactly one writer for that whole region, on one goroutine, there is nothing
+    left to race. A final redraw plus one real `\n` on completion leaves both lines in
+    scrollback exactly once. This ANSI dance only happens when `dualLine` is true; the plain
+    `fluxion snapshot` single-bar path (`OverallLine == nil`) is completely untouched.
+  - **Off a TTY (piped/logged), `OverallLine`'s text is logged via a plain `fmt.Println` on
+    its own 5s ticker instead** — the ANSI cursor management above would just be unreadable
+    noise in a piped log, and there's no bar to coordinate with anyway (its writer is
+    already discarded whenever stderr isn't a terminal, same as always). This 5s cadence is
+    deliberately separate from the `quiet` piped-log heartbeat's 30s cadence (that split was
+    the fix for an earlier, distinct complaint — "no progress shown of the total scan" — 30s
+    reads as dead air to someone watching a TTY, though 30s is fine for an unattended log; on
+    a TTY the overall line no longer needs its own ticker at all, since dual-line mode
+    redraws it together with the bar on every 100ms tick).
   - **Weighted by ZFS's `used` property** (`zfsutil.Dataset.Used`, added to the `zfs list`
     columns), not a flat per-dataset count — a small quick dataset finishing shouldn't read
     as meaningful progress next to a multi-terabyte one still running. `used` is physical,

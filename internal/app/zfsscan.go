@@ -418,8 +418,8 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			ComputeMD5:     cfg.ComputeMD5,
 			NonInteractive: true,
 			StopCh:         stopCh,
-			OnHeartbeat: func(processed int64) {
-				progress.print(doneCount+i, processed)
+			OverallLine: func(processed int64) string {
+				return progress.line(doneCount+i, processed)
 			},
 		}
 		if p.resumeFrom {

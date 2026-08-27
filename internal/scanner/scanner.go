@@ -69,6 +69,21 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 		go func() {
 			defer wg.Done()
 			for {
+				// Checked on its own, ahead of the blocking select below: once
+				// the walker has raced far enough ahead to fill `paths` (up to
+				// NumWorkers*ScannerChannelBufferMultiplier entries), a select
+				// with both `paths` and StopCh ready picks between them
+				// uniformly at random per iteration, so a worker would keep
+				// draining that backlog for a while after StopCh closes instead
+				// of noticing it right away. This priority check makes StopCh
+				// win deterministically as soon as the worker loops back for
+				// its next file, so it only ever finishes the one file already
+				// in flight (if any) before stopping.
+				select {
+				case <-cfg.StopCh:
+					return
+				default:
+				}
 				select {
 				case path, ok := <-paths:
 					if !ok {

@@ -60,13 +60,29 @@ type SnapshotConfig struct {
 	// scanner.ScannerConfig.StopCh.
 	StopCh <-chan struct{}
 
-	// OnHeartbeat, if set, is called every ~30s for the duration of the scan
+	// OverallLine, if set, is called repeatedly for the duration of the scan
 	// with the number of bytes processed (hashed/recorded) so far - the same
-	// value driving this scan's own progress bar. It exists for a caller
-	// running several scans in sequence (zfs-scan) to print its own,
-	// run-wide progress on top of this one dataset's, since nothing else
-	// gives it a periodic hook into an in-progress RunSnapshot call.
-	OnHeartbeat func(processedBytes int64)
+	// value driving this scan's own progress bar - and must return the
+	// current run-wide status text to display (no printing side effects: it
+	// is a pure text producer). It exists for a caller running several scans
+	// in sequence (zfs-scan) to show its own, run-wide progress alongside
+	// this one dataset's, since nothing else gives it a periodic hook into
+	// an in-progress RunSnapshot call.
+	//
+	// On an interactive terminal this scan's own bar and OverallLine's text
+	// are rendered together as a coordinated two-line, in-place-updating
+	// block (see the UI loop below) - they used to be two independently
+	// scheduled, independently streamed writes (the bar to stderr via \r,
+	// OverallLine's old equivalent to stdout via a plain Println), which had
+	// no cursor coordination: the two writes landed on whatever the
+	// terminal's cursor position happened to be, visually gluing OverallLine
+	// onto the tail of the bar's redraw and forcing a new permanent
+	// scrollback line every time OverallLine printed, instead of a clean
+	// second status line. When stderr isn't a terminal (piped/non-TTY, the
+	// same `quiet` gate the bar itself uses), OverallLine's text is logged
+	// periodically via logrus instead - the ANSI cursor tricks the TTY case
+	// needs would just be unreadable noise in a piped log.
+	OverallLine func(processedBytes int64) string
 
 	// AllowDuplicateName lets a new snapshot be created under a name that's
 	// already used by an earlier snapshot in this DB. snapshots.name is
@@ -412,23 +428,82 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		return nil
 	}
 
+	// dualLine is true when this scan needs to show a second, run-wide status
+	// line (zfs-scan) alongside its own bar, on a real terminal. When it's
+	// true the bar itself is never allowed to write on its own (writer is
+	// io.Discard below); the UI loop reads its rendered text back out via
+	// bar.String() and draws both lines together each tick - see redraw()
+	// below for why that coordination is necessary.
+	dualLine := cfg.OverallLine != nil && !quiet
+
+	barWriter := progressWriter(quiet)
+	if dualLine {
+		barWriter = io.Discard
+	}
+
 	// Prepare Bar
 	// We want 2 modes: Indeterminate (while walking), then Determinate (when walk done)
 	bar := progressbar.NewOptions64(
 		estimatedTotal,
 		progressbar.OptionSetDescription("Scanning..."),
-		progressbar.OptionSetWriter(progressWriter(quiet)),
+		progressbar.OptionSetWriter(barWriter),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetWidth(15),
 		progressbar.OptionThrottle(65*time.Millisecond),
 		progressbar.OptionShowCount(),
 		progressbar.OptionOnCompletion(func() {
-			if !quiet {
+			// In dualLine mode the final newline is emitted by redraw()'s
+			// caller instead, after the last combined frame - this callback
+			// firing too would land a stray newline mid-frame, ahead of our
+			// own cursor-coordinated output.
+			if !quiet && !dualLine {
 				fmt.Fprint(os.Stderr, "\n")
 			}
 		}),
 		progressbar.OptionSpinnerType(14),
 	)
+
+	// linesReserved is how many terminal rows the previous dualLine frame
+	// occupied (0 before the first frame), so redraw() knows how far to move
+	// the cursor back up before overwriting. Only touched from the UI
+	// goroutine below.
+	linesReserved := 0
+
+	// redraw draws the bar's current text and OverallLine's current text as
+	// one coordinated two-line block, in place. This exists because the bar
+	// (stderr, \r-redrawn, no trailing newline) and OverallLine's old
+	// equivalent (stdout, fmt.Println, a hard newline every call) used to be
+	// two independent writers with no cursor coordination: both land on the
+	// same physical terminal regardless of which file descriptor they went
+	// through, so OverallLine's text appeared wherever the bar's cursor
+	// happened to be - visually glued onto the tail of the bar's line - and
+	// the newline it always carried then permanently ended that terminal
+	// row, forcing every subsequent bar redraw onto a fresh line instead of
+	// updating in place. Owning both lines from this single goroutine, using
+	// bar.String() (the bar's rendered text with nothing written anywhere)
+	// instead of letting the bar write itself, removes the coordination
+	// problem entirely: there is exactly one writer for this whole region.
+	redraw := func() {
+		barLine := strings.TrimPrefix(bar.String(), "\r")
+		overallLine := cfg.OverallLine(processedBytes.Load())
+
+		var b strings.Builder
+		if linesReserved > 0 {
+			if linesReserved > 1 {
+				fmt.Fprintf(&b, "\x1b[%dA", linesReserved-1)
+			}
+			// \r homes the cursor to column 0; \x1b[J erases from there to
+			// the end of the screen, so a frame shorter than the previous
+			// one (e.g. a narrower description) can't leave stale trailing
+			// characters behind.
+			b.WriteString("\r\x1b[J")
+		}
+		b.WriteString(barLine)
+		b.WriteString("\n")
+		b.WriteString(overallLine)
+		fmt.Fprint(os.Stderr, b.String())
+		linesReserved = 2
+	}
 
 	// UI Loop
 	totalBuffer := float64(scanConfig.NumWorkers * consts.ScannerChannelBufferMultiplier)
@@ -450,15 +525,17 @@ func RunSnapshot(cfg SnapshotConfig) error {
 			heartbeat = hb.C
 		}
 
-		// cfg.OnHeartbeat (zfs-scan's overall run-progress line) gets its own,
-		// faster ticker, deliberately decoupled from the 30s log-heartbeat
-		// cadence above: 30s is fine for an unattended piped log, but someone
-		// watching a multi-dataset run interactively wants to actually see the
-		// overall line move, not stare at one static line for half a minute -
-		// this was reported as "no progress shown of the total scan" even
-		// though the line itself was printing, just too rarely to look alive.
+		// cfg.OverallLine (zfs-scan's run-wide progress) gets its own ticker
+		// only for the quiet/piped case, logged via logrus at a faster
+		// cadence than the 30s heartbeat above - 30s is fine for an
+		// unattended piped log, but someone watching a multi-dataset run
+		// interactively wants to see the overall figure move, not stare at
+		// one static line for half a minute (this was reported as "no
+		// progress shown of the total scan"). On a real terminal (dualLine)
+		// this isn't needed: the 100ms ticker case below redraws OverallLine
+		// together with the bar on every tick instead.
 		var overallTick <-chan time.Time
-		if cfg.OnHeartbeat != nil {
+		if cfg.OverallLine != nil && quiet {
 			ot := time.NewTicker(5 * time.Second)
 			defer ot.Stop()
 			overallTick = ot.C
@@ -497,6 +574,9 @@ func RunSnapshot(cfg SnapshotConfig) error {
 					bar.Describe(desc)
 				}
 				bar.Set64(current)
+				if dualLine {
+					redraw()
+				}
 			case <-heartbeat:
 				if walking {
 					logrus.Infof("Scanning... found %d files (%s) so far", foundCount.Load(), util.FormatBytes(foundBytes.Load()))
@@ -504,9 +584,13 @@ func RunSnapshot(cfg SnapshotConfig) error {
 					logrus.Infof("Hashing... %d/%d files done", processedCount.Load(), foundCount.Load())
 				}
 			case <-overallTick:
-				cfg.OnHeartbeat(processedBytes.Load())
+				fmt.Println(cfg.OverallLine(processedBytes.Load()))
 			case <-done:
 				bar.Finish()
+				if dualLine {
+					redraw()
+					fmt.Fprint(os.Stderr, "\n")
+				}
 				return
 			}
 		}

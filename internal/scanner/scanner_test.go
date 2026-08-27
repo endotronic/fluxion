@@ -250,10 +250,18 @@ func TestRunScan_Resume(t *testing.T) {
 
 // TestRunScan_StopChStopsPromptly proves closing StopCh actually unblocks a
 // walker that's stuck mid-send into a full `paths` buffer, rather than
-// deadlocking. This is the scenario that mattered for zfs-scan's SIGINT
-// handling: closing StopCh has to make an in-flight scan stand down within a
-// bounded time so a caller (zfs-scan's unmount retry) can rely on the mount
-// actually becoming idle, not race a scan that never stops.
+// deadlocking, AND that a worker stops after at most the one file it already
+// had in hand rather than continuing to drain whatever the walker had queued
+// up ahead of it. The latter used to be probabilistic, not guaranteed: a
+// `select` with both `paths` (non-empty) and StopCh (closed) ready picks
+// between them uniformly at random each iteration, so a worker only gave up
+// after happening to win that coin flip, which - across a large queued
+// backlog - could let real, visible scanning work continue for a while after
+// StopCh closed instead of stopping essentially immediately. This is the
+// scenario that mattered for zfs-scan's SIGINT handling: closing StopCh has
+// to make an in-flight scan stand down within a bounded time so a caller
+// (zfs-scan's unmount retry) can rely on the mount actually becoming idle,
+// not race a scan that never stops.
 func TestRunScan_StopChStopsPromptly(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -262,6 +270,9 @@ func TestRunScan_StopChStopsPromptly(t *testing.T) {
 	// `paths <- path` well before it finishes, which is the only way to
 	// actually exercise the select-based deadlock avoidance around that
 	// send (a buffer that never fills wouldn't touch that code path at all).
+	// It also means the buffer is holding hundreds of already-queued paths
+	// by the time StopCh closes below - the scenario the random-choice bug
+	// needed to show up in.
 	const numFiles = 1500
 	for i := 0; i < numFiles; i++ {
 		p := filepath.Join(tmpDir, fmt.Sprintf("f%d", i))
@@ -289,16 +300,28 @@ func TestRunScan_StopChStopsPromptly(t *testing.T) {
 	// certainly already filled the 1000-entry buffer and is blocked trying
 	// to send the next one, since the walker enqueues far faster than one
 	// worker can hash-and-report.
-	for i := 0; i < 5; i++ {
+	const readBeforeStop = 5
+	got := 0
+	for i := 0; i < readBeforeStop; i++ {
 		if _, ok := <-results; !ok {
 			t.Fatalf("results closed after only %d items, before StopCh was even closed", i)
 		}
+		got++
 	}
 	close(stopCh)
 
-	// Drain whatever's left in flight so RunScan's own send(s) don't block
-	// on a test that stopped reading.
+	// Drain whatever's left in flight so RunScan's own send(s) don't block on
+	// a test that stopped reading, while counting it - with the deterministic
+	// priority check, the single worker here can process at most one more
+	// file after StopCh closes (whichever it already won the race for right
+	// as the close happened), not a random slice of the ~1000-deep backlog.
 	for range results {
+		got++
+	}
+
+	const maxAfterStop = 3 // readBeforeStop + generous slack for the one in-flight file
+	if got > readBeforeStop+maxAfterStop {
+		t.Errorf("processed %d files total (%d read before close) - StopCh should stop the worker after at most one more in-flight file, not let it keep draining the queued backlog", got, readBeforeStop)
 	}
 
 	select {

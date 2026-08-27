@@ -55,7 +55,12 @@ be told to stop early; a scan ran to completion or the whole process was killed.
 attempts to unmount anything. The walker checks it before descending and before every send
 into the path-work channel (the latter matters: with idle workers already exited, a plain
 channel send would otherwise block forever — see the comment at that call site in
-`scanner.go`), and each worker selects on it. `RunSnapshot` returns the sentinel
+`scanner.go`), and each worker checks it in its own non-blocking `select` *ahead of* the
+blocking receive on the path channel, every loop iteration — not just as one of two cases in
+a single `select`, which would let Go's uniform-random tie-breaking between ready cases
+leave a worker draining an already-queued backlog for a while instead of stopping on its
+next iteration (found 2026-08-26; see [cli.md](cli.md) `## zfs-scan` for the report that
+surfaced it). `RunSnapshot` returns the sentinel
 `ErrScanInterrupted` and deliberately leaves the snapshot `in_progress` (never
 `completed`/`failed`) when this fires — see [cli.md](cli.md) `## zfs-scan` for why a
 retry-only fix wasn't enough here and what this replaced.
@@ -107,10 +112,28 @@ paths that several inputs disagree about; that part is inherent, the slice is no
   drives the bar, logging via `logrus.Infof` ("Scanning... found N files" during the walk,
   "Hashing... N/M files done" afterward). TTY/interactive behavior is unaffected — the
   heartbeat channel stays `nil` (blocks forever in the `select`) whenever `quiet` is false.
-  `SnapshotConfig.OnHeartbeat` (zfs-scan's overall-progress hook) has run on its *own*
-  ticker, independent of this 30s one, since 2026-08-26 — a 5s tick, because 30s reads as
-  "nothing is happening" to someone watching a multi-dataset run interactively, even though
-  a piped log is fine checking in that rarely. See [cli.md](cli.md) `## zfs-scan`.
+  `SnapshotConfig.OverallLine` (zfs-scan's overall-progress hook, a pure `func(int64) string`
+  - no printing side effects) is logged on its *own*, faster 5s ticker when stderr isn't a
+  TTY, independent of this 30s heartbeat - 30s reads as "nothing is happening" to someone
+  watching a multi-dataset run interactively, even though a piped log is fine checking in
+  that rarely. On a real TTY it doesn't need its own ticker at all: see the next bullet.
+  See [cli.md](cli.md) `## zfs-scan`.
+- **The bar and `OverallLine` are rendered as one coordinated two-line block on a TTY, not
+  two independent writers** (fixed 2026-08-26, after a report that the two visibly collided:
+  the overall line's text landing glued onto the tail of the bar's `\r`-redrawn line, and a
+  new permanent scrollback line appearing every 5s instead of a clean in-place second line).
+  The root cause was two uncoordinated writers landing on the same terminal - the bar wrote
+  newline-less `\r` redraws to stderr, `OverallLine`'s old equivalent was a plain
+  `fmt.Println` to stdout on its own ticker; different file descriptors don't imply
+  independent cursor state on a shared terminal. The fix (`internal/app/snapshot.go`,
+  `dualLine`/`redraw()`/`linesReserved`): when `OverallLine != nil` and stderr is a TTY, the
+  bar's writer becomes `io.Discard` (it never writes itself) and the UI goroutine instead
+  pulls its rendered text via `bar.String()` and draws both lines together every 100ms tick,
+  using `\x1b[J` (erase to end of screen) plus a cursor-up before each rewrite so the block
+  always redraws in place regardless of the previous frame's length. One writer, one
+  goroutine, nothing left to race. Off a TTY this doesn't apply - `OverallLine` just gets
+  logged periodically instead (previous bullet); the plain `fluxion snapshot` path
+  (`OverallLine == nil`) is untouched either way. See [cli.md](cli.md) `## zfs-scan`.
 - **`snapshot.go`'s two bars deliberately do not use `progressbar.OptionFullWidth()`** (removed
   2026-08-26). Full-width mode recomputes the bar's *content* width from the live terminal
   width on every render, but the library's own line-clearing logic tracks the **maximum**
