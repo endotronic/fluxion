@@ -558,6 +558,7 @@ func runCoverage(args []string) {
 	minSizePtr := cmd.String("min-size", "0", "Skip files smaller than this (e.g. 1M); they are not checked and not counted as covered")
 	limitPtr := cmd.Int("limit", app.DefaultCoverageLimit, "Maximum entries to list; totals are always complete (0 = list all)")
 	byDirPtr := cmd.Bool("by-dir", false, "List one line per containing directory instead of one per file")
+	rollupPtr := cmd.Bool("rollup", false, "Recursive covered/not-covered/no-hash counts per directory, collapsing fully-homogeneous subtrees (mutually exclusive with --by-dir)")
 
 	var excludes arrayFlags
 	cmd.Var(&excludes, "exclude", "Path to exclude (can be repeated)")
@@ -587,6 +588,7 @@ func runCoverage(args []string) {
 		MinSize:        minSize,
 		Limit:          *limitPtr,
 		ByDir:          *byDirPtr,
+		Rollup:         *rollupPtr,
 		Excludes:       excludes,
 	})
 	if err != nil {

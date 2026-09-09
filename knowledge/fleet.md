@@ -188,6 +188,39 @@ be, because of the following.
 2. `artemis/deprecated` vs luna. This is where the terabytes are.
 3. The stale replicas, `kevin/photos` and `kevin/images`.
 
+## `zfs-scan` coverage is not self-verifying — cross-check before trusting a comparison
+
+Found 2026-09-08, comparing a real `zfs-scan` DB (`luna-md5.db`, 27 snapshots, one per
+dataset under whatever root(s) that run was pointed at) against the author's pre-Fluxion
+full-tree `/luna` baseline from 2025-12-24 (see [goals.md](goals.md) "Lineage" for where
+that baseline lives). **35% of the baseline's 49.7M files — `luna/historian/minio` (12.8M
+files), `luna/kevin/amcrest` (3.5M), `luna/kevin/dropbox` (537K), `luna/kevin/media`
+(607K) — had no corresponding snapshot in `luna-md5.db` at all.** These are real, live
+datasets (confirmed via `mount`/NFS exports, `luna/historian/minio` alone is 16 TB), simply
+never included in whatever root(s) that particular `zfs-scan` invocation was given.
+
+Nothing in the tool flags this. `list` just shows however many snapshot rows exist, with no
+way to tell "this is every dataset under the pool" from "this is every dataset someone
+remembered to scan." Run `coverage` or `diff` against a baseline that covers more ground
+than the current scan, and every file under the unscanned dataset looks identical to a
+**deleted** file — there is no third state for "not compared." At fleet scale this is not
+a cosmetic gap: pointing `coverage --by-dir` at a candidate with a 12.8M-file unscanned
+subtree produced multiple GB of `--by-dir` output (one line per leaf directory under an
+S3/MinIO-style hashed-bucket tree) before being killed, because *every single file* under
+it registered as uncovered.
+
+**Before trusting any `coverage`/`diff` result against a baseline that predates or spans
+more than the current `zfs-scan` run: diff the two *sets of top-level directory names*
+first**, not just the files. A cheap SQL check does it — group the baseline's paths by
+first (or first two) path component(s) under the scan root and compare that list of names
+against the current snapshot names. Any baseline directory with no matching current
+snapshot is a scan-coverage gap, not evidence of deletion; `--exclude` it explicitly from
+the comparison and report its size separately. This is the practical, non-code-level
+consequence of the "no metadata-only scan mode" and "nothing records device/host
+provenance" gaps already listed below — there is also currently nothing that records
+*which roots a given zfs-scan run covered*, so that has to be reconstructed by hand from
+whatever `--exclude-dataset` flags and root arguments were actually used.
+
 ## Gaps this fleet exposes in the tool
 
 Recorded as design pressure, not yet as issues in [known-issues.md](known-issues.md):

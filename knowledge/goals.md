@@ -63,6 +63,13 @@ text files and has been in real use for years verifying backups. That history is
   (see [cli.md](cli.md) for the exact format).
 - Legacy-imported snapshots have **no SHA-1 and no mtime** — only MD5 and (optionally)
   sizes. Any code touching hashes must cope with a snapshot that has only one algorithm.
+- The author's real archive of these lives at `/mnt/luna/kevin/archives/file_records/` on
+  the fleet ([fleet.md](fleet.md)) — one directory per scan date/label, going back years.
+  Most hold only the flat-file pair; a few from the cgo→pure-Go transition period (around
+  2025-12) hold an actual pre-migration Fluxion `.db` alongside them. This is why `--md5`
+  is not a legacy-only curiosity: it is what makes a *current* scan diffable against that
+  entire history, and any "how has this tree drifted" question against an old baseline
+  should look there first rather than assuming no baseline exists.
 
 ## Non-goals (as the code currently stands)
 

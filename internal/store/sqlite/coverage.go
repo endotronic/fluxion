@@ -96,6 +96,70 @@ func (s *SqliteStore) IterateUncovered(candidateID int64, keeperIDs []int64, has
 	return rows.Err()
 }
 
+// IterateWithCoverage streams every file of candidateID, in path order, each
+// tagged with its CoverageStatus against keeperIDs.
+//
+// Unlike IterateUncovered, this does not let SQLite filter rows out: `--rollup`
+// needs the covered files too, to report what a directory retained and not just
+// what it lost. The per-row cost is identical to IterateUncovered's (the same
+// correlated NOT EXISTS, still served by the partial hash index) - it is simply
+// no longer used to decide filtering, so every candidate row now pays it rather
+// than only the ones that failed it.
+func (s *SqliteStore) IterateWithCoverage(candidateID int64, keeperIDs []int64, hashType string, minSize int64, onFile func(models.FileRecord, models.CoverageStatus) error) error {
+	col, err := hashColumn(hashType)
+	if err != nil {
+		return err
+	}
+	if len(keeperIDs) == 0 {
+		return fmt.Errorf("at least one snapshot to check against is required")
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keeperIDs)), ",")
+
+	query := fmt.Sprintf(`
+		SELECT f.path, f.filename, f.size_bytes, f.sha1, f.md5,
+		  CASE
+		    WHEN f.%[1]s = '' THEN 'no-hash'
+		    WHEN NOT EXISTS (
+		      SELECT 1 FROM files g
+		      WHERE g.%[1]s = f.%[1]s AND g.%[1]s != '' AND g.snapshot_id IN (%[2]s)
+		    ) THEN 'uncovered'
+		    ELSE 'covered'
+		  END AS status
+		FROM files f
+		WHERE f.snapshot_id = ?
+		  AND f.size_bytes >= ?
+		ORDER BY f.path`, col, placeholders)
+
+	// Bind order must match placeholder order left-to-right in the query text:
+	// the CASE expression's keeperIDs IN-list comes before the WHERE clause's
+	// snapshot_id/min_size, unlike IterateUncovered where WHERE comes first.
+	args := make([]any, 0, len(keeperIDs)+2)
+	for _, id := range keeperIDs {
+		args = append(args, id)
+	}
+	args = append(args, candidateID, minSize)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var f models.FileRecord
+		var status string
+		f.SnapshotID = candidateID
+		if err := rows.Scan(&f.Path, &f.Filename, &f.SizeBytes, &f.SHA1, &f.MD5, &status); err != nil {
+			return err
+		}
+		if err := onFile(f, models.CoverageStatus(status)); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // ExplainUncovered returns SQLite's query plan for the IterateUncovered query.
 // It exists so a test can assert the plan stays a pair of index lookups: a
 // regression to a table scan or a temp b-tree sort is invisible on small

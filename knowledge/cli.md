@@ -106,7 +106,7 @@ compiled as given, with no `(?i)`.
 ## coverage
 
 ```
-fluxion c --db <db> [--min-size 1M] [--limit N] [--by-dir]
+fluxion c --db <db> [--min-size 1M] [--limit N] [--by-dir | --rollup]
          [-e|--exclude PATH]... <candidate> <keeper>...
 ```
 
@@ -135,8 +135,65 @@ with no unified tree, no merkle hashes, and no move/copy matching. See
   always count everything.
 - `--by-dir` aggregates the listing to one line per containing directory, streamed — use it
   when a whole subtree is missing and the per-file list would be noise.
+- `--rollup` (added 2026-09-09, mutually exclusive with `--by-dir`) reports **recursive**
+  covered/not-covered/no-hash counts per directory, collapsing any subtree that is entirely
+  one verdict into a single line instead of drilling into it — "was this whole tree
+  retained, lost, or a mix, at a glance," which `--by-dir` alone can't answer since it only
+  ever lists the uncovered leaf directories and says nothing about what a directory *did*
+  retain. Implementation notes (`internal/app/coverage.go`'s `rollupFrame`/`runCoverageRollup`,
+  `sqlite/coverage.go`'s `IterateWithCoverage`):
+  - Unlike the default/`--by-dir` query, it does **not** let SQL filter to uncovered rows —
+    `--rollup` needs the covered ones too, so it touches every candidate row rather than
+    only the ones that failed the hash check. The per-row cost (the same correlated `NOT
+    EXISTS` against the partial hash index) is identical either way; this just stops
+    discarding the "covered" verdict, so expect roughly the same wall-clock as `--by-dir`
+    over the same candidate, not something worse.
+  - Memory is `O(tree depth)`, not `O(files)` or `O(directories)`: exactly one open
+    `rollupFrame` per directory on the current DFS path, closed and folded into its parent
+    as soon as a row no longer nests under it. This is the same streaming-accumulator design
+    [diff-memory.md](diff-memory.md)'s phase 2 describes for making `diff` itself
+    memory-bounded, applied here for coverage's three-way status instead of diff's five-way
+    one. Confirmed collapsing to one line held at 1,158,320 files under a single fully-covered
+    dataset (`luna/mike/archives`), not just on toy input.
+  - It relies on `ORDER BY f.path` giving every subtree **contiguous** rows (true under plain
+    byte-wise sort — diff-memory.md's "Fact 2"), but does **not** need DFS-safe ordering the
+    way `diff`'s move/copy matching does: a recursive count rollup never has to relate a leaf
+    file to a same-named directory (`diff`'s `FileTwin` problem), only to notice when one
+    directory's rows have ended, and subtree contiguity is all that requires.
+  - Collapse rule: a directory collapses to one line only when **homogeneous** (100%
+    covered, or 100% not-covered-and/or-no-hash). A **mixed** directory never collapses — it
+    prints its own summary line and recurses into its children, so the mix is always
+    traceable to exactly where it lives. Only homogeneously-*covered* children get merged
+    into a `(+ N subdirectories, M files, fully covered)` note under a mixed parent; a
+    homogeneously-*not-covered* child is never merged this way, on purpose — collapsing bad
+    news the same way covered news is collapsed could hide a real loss under a large mixed
+    ancestor, which is exactly the failure [goals.md](goals.md)'s severity rule forbids.
+  - `no-hash` gets its own bucket throughout (never folded into "not covered" silently),
+    matching the same reasoning `IterateUncovered`'s doc comment already gives.
+  - **No output cap yet** (`--limit` is not consulted in this mode) — deliberately deferred.
+    A real dataset already demonstrates why one will eventually be needed: `luna/kevin/photos/immich`'s
+    hashed-bucket upload directories are almost all genuinely mixed (one covered original,
+    one not-covered derivative, per bucket), so the "merge boring-covered siblings" rule
+    can't help there and a `--rollup` run over it produced 9,451 lines. Something
+    `diff`'s `--max-lines`-style budget for the "mixed, keep recursing" case is the likely
+    fix, not yet built.
 - Incomplete (`in_progress` / `failed`) snapshots are warned about on stderr but still used;
   an incomplete *keeper* is the dangerous direction and is called out as such.
+- **`--exclude` only suppresses candidate files that are *already uncovered* — it does not
+  subtract a whole excluded subtree from the totals.** `IterateUncovered`
+  (`sqlite/coverage.go`) runs the `NOT EXISTS` hash check first; `app/coverage.go`'s
+  `isExcluded` check only ever sees rows that already failed it, so a file under an
+  excluded prefix whose content happens to also exist among the keepers (a duplicate, a
+  common zero-byte file, genuinely identical content) is still silently counted as
+  `covered`, never as `excluded`. Confirmed 2026-09-08 excluding four known-unscanned
+  dataset trees (~17.5M files) from a fleet-scale comparison: the `excluded` total came out
+  ~875K lower than the trees' actual file count, entirely accounted for by coincidental
+  hash matches. This is the right behavior for the tool's actual question ("would deleting
+  the candidate lose anything") but means **`excluded` is not a substitute for a separate
+  count of the excluded prefix's true size** — get that from `size` or a direct query
+  against the source snapshot if you need to report it. See [fleet.md](fleet.md) for why
+  excluding a whole unscanned dataset from a comparison is often necessary in the first
+  place.
 
 Exit status is meaningful: **0** = fully covered, **2** = something would be lost, **1** =
 error. This is the only command that can be used as a shell predicate:

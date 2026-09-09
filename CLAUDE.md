@@ -13,6 +13,20 @@ theoretical. The command built for that job is `coverage` (not `diff`): it compa
 content only, ignores paths, runs in flat memory, and exits 2 when something would be
 lost.
 
+**Legacy format lineage.** Before Fluxion existed, the author ran a homegrown script
+(`dupe-finder`) that hashed a tree with MD5 and wrote two parallel flat files: a
+double-space-separated `MD5HEX  utf-8  BASE64_PATH` hashes file, and a companion sizes
+file keyed the same way, so arbitrary bytes in filenames survived. `--md5`,
+`import-legacy`, and `export-legacy` exist purely so a modern SHA-1 snapshot can still be
+compared against that history (hash negotiation falls back to MD5 when SHA-1 isn't shared
+— see `knowledge/data-model.md`). Legacy-imported snapshots carry **MD5 only, no SHA-1,
+no mtime**. Years of these flat files, plus a few actual pre-Fluxion `.db` files from the
+transition period, are archived at `/mnt/luna/kevin/archives/file_records/<date-or-label>/`
+on the real fleet (see `knowledge/fleet.md`) — that is the place to look for a historical
+baseline to diff or check coverage against. See `knowledge/goals.md` ("Lineage") for why
+MD5 support is permanent rather than a deprecation candidate, and `knowledge/cli.md` for
+the exact file format and both commands' flags.
+
 Go 1.25.5, module `fluxion` (imports are `fluxion/internal/...`). **Pure Go — no C
 compiler needed**; the SQLite driver is `modernc.org/sqlite`. It was `mattn/go-sqlite3`
 (cgo) until 2026-08-23, so an old checkout or an old binary may still fail at runtime with
@@ -35,7 +49,7 @@ from the code alone.
 | File | Read it when… |
 |---|---|
 | `knowledge/goals.md` | you need to make any judgement call. Defines what the tool is for and the **severity rule** (a false "unchanged/present" answer can lose the user data; over-reporting only costs reading time) that should decide every trade-off. Also covers lineage from the author's Python `dupe-finder` and the explicit non-goals. |
-| `knowledge/fleet.md` | **read this early — it is why the project matters right now.** The author's real target: ~185T across four ZFS hosts at 94–96% full, with multi-terabyte trees named `deprecated`/`copy`/`backup` that are *presumed* deletable and need Fluxion to prove it. Covers the fleet inventory, the sibling planning project in `../scratch`, how to scan ZFS safely, and **why per-snapshot ZFS scanning is deliberately not being built**. |
+| `knowledge/fleet.md` | **read this early — it is why the project matters right now.** The author's real target: ~185T across four ZFS hosts at 94–96% full, with multi-terabyte trees named `deprecated`/`copy`/`backup` that are *presumed* deletable and need Fluxion to prove it. Covers the fleet inventory, the sibling planning project in `../scratch`, how to scan ZFS safely, **why per-snapshot ZFS scanning is deliberately not being built**, and why a `zfs-scan` DB's dataset coverage must be cross-checked against a baseline before trusting `coverage`/`diff` against it. |
 | `knowledge/architecture.md` | you are adding a command, moving code between packages, or touching output/error handling. Covers the `cmd → app → store/algorithms` layering, the two testability seams (`store.Store`, `diff.FileIterator`), which store methods stream vs. materialise, and the inconsistent stdout/stderr conventions. |
 | `knowledge/diff-algo.md` | **before touching `internal/diff` or `internal/app/diff.go` — this is the highest-risk code in the project.** Explains the unified two-snapshot tree, the ten-stage pipeline, `FileTwin` and the presence flags, the synthetic "merkle" directory hashes and their two failure modes, the `propagateStatus` rollup precedence, move/copy matching and consumption rules, the hidden-move-source fixed point, and the collapsing logic — plus what the property test asserts and the defects still open. |
 | `knowledge/diff-memory.md` | `diff` runs out of RAM, or you are touching how the tree is built or held. Records where the measured ~1 KiB/node goes, why compaction alone cannot reach a 1 GB ceiling, and the six-phase plan to replace the in-memory tree with a DFS stream plus external sorts — including why the `coverage` command was built first instead. |
@@ -67,3 +81,13 @@ for intent; `knowledge/` is the source of truth for how things actually behave t
   Added/Removed directory line does not contradict the snapshots*. **Run it before the
   golden tests when changing `internal/diff`:** golden output tells you something changed,
   the property test tells you whether the change loses data.
+- **Comparing a legacy full-tree baseline against a `zfs-scan` DB is a two-step job, not
+  one `coverage` call.** First diff the two sides' top-level directory names against each
+  other — a `zfs-scan` run's dataset coverage is whatever roots it happened to be pointed
+  at, not provably "the whole pool," and an unscanned dataset looks identical to a deleted
+  one to both `diff` and `coverage`. `--exclude` the gaps and report their size separately
+  before running the real comparison, or `--by-dir` output can explode into millions of
+  lines of false "removed" content. See `knowledge/fleet.md` for a worked example (35% of
+  a 49.7M-file baseline fell into this trap) and `knowledge/build.md` for how to actually
+  get a fleet-size `import-legacy` flat file into a DB without a multi-hour run or a RAM
+  blowout.

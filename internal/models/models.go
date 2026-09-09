@@ -41,3 +41,13 @@ type FileRecord struct {
 	SHA1       string
 	MD5        string
 }
+
+// CoverageStatus classifies one candidate file against a keeper set: does its
+// content exist elsewhere, is it absent, or can it not be compared at all.
+type CoverageStatus string
+
+const (
+	CoverageCovered   CoverageStatus = "covered"
+	CoverageUncovered CoverageStatus = "uncovered"
+	CoverageNoHash    CoverageStatus = "no-hash"
+)

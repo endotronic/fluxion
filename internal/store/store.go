@@ -35,6 +35,12 @@ type Store interface {
 	// requested type are yielded as well, with an empty hash: they cannot be
 	// compared and must never be reported as covered.
 	IterateUncovered(candidateID int64, keeperIDs []int64, hashType string, minSize int64, onFile func(models.FileRecord) error) error
+
+	// IterateWithCoverage streams every file of candidateID, in path order,
+	// each tagged with its CoverageStatus - covered, uncovered, or no-hash.
+	// Unlike IterateUncovered it does not filter, so `--rollup` can report what
+	// a directory retained as well as what it lost.
+	IterateWithCoverage(candidateID int64, keeperIDs []int64, hashType string, minSize int64, onFile func(models.FileRecord, models.CoverageStatus) error) error
 	DeleteSnapshot(id int64) error
 	Close() error
 }
