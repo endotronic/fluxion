@@ -124,45 +124,50 @@ status-dependent: `Removed`/`Modified` resolve against `rootA`, everything else 
 
 ## Stage 4: the "merkle" hashes — read this carefully
 
-Directory hashes are **not cryptographic digests**. `computeMerkleHashes` builds a
-concatenated string:
+Directory hashes are **not cryptographic digests** of file content — they are a digest
+*over the child list*, used to tell "these two directories hold the same names mapped to
+the same hashes" apart from "they don't."
 
-```go
-for _, child := range node.Children {
-    computeMerkleHashes(child)                                  // post-order
-    if child.HashA != "" { hashesA = append(hashesA, child.Name+":"+child.HashA) }
-    if child.HashB != "" { hashesB = append(hashesB, child.Name+":"+child.HashB) }
-}
-sort.Strings(hashesA)
-node.HashA = strings.Join(hashesA, ",")
-```
+**Fixed 2026-09-09 (Phase 0 of [diff-memory.md](diff-memory.md)'s memory plan).**
+`computeMerkleHashes` used to build a concatenated string — a directory containing `a`
+(hash `AA`) and `b` (hash `BB`) got the literal string `"a:AA,b:BB"`, sorted for
+order-independence and joined with `,`. It worked (equal content produced equal strings)
+but had two real defects, both now fixed by `digestEntries` hashing the sorted,
+length-prefixed child list with SHA-1 instead of concatenating it:
 
-So a directory containing `a`(hash `AA`) and `b`(hash `BB`) gets the *literal string*
-`"a:AA,b:BB"`. Sorting makes it order-independent, which is correct and necessary. A
-`FileTwin` contributes a second entry tagged `name:file:hash`, so a directory and a file
-of the same name cannot produce the same entry. The same walk sets `DirA`/`DirB` from the
-children's `presentInA()`/`presentInB()`.
+**1. It was not injective (collision) — now fixed.** `:` and `,` are legal filename
+characters and were not escaped, so a directory containing one file literally named
+`a:AA,b` with hash `BB` produced `"a:AA,b:BB"` — byte-identical to the two-file directory
+above. Two structurally different directories then compared equal, and one could be
+reported as a move/copy of the other. Verified experimentally at the time; a
+*false-unchanged* class bug, top severity per [goals.md](goals.md). Explicit
+length-prefixing (a 4-byte big-endian length before every name and every hash, plus a
+1-byte host/twin tag) means no separator byte is ever interpreted as content, so this
+class of collision can no longer occur.
 
-It works — equal content produces equal strings — but it has two real defects:
+**2. It was O(total subtree bytes) per node — now fixed.** The root's hash string used to
+contain every file's hash. Measured on a synthetic depth-5 / 4096-file tree: 1,336,663
+bytes of `HashA` across the tree, largest single directory string 196,603 bytes — roughly
+326 B/file, growing with depth. `digestEntries` returns a fixed 20-byte SHA-1 digest
+regardless of subtree size. Leaf hashes were also switched from 40/32-char hex text to raw
+decoded bytes (`compactHash`, called once in `insertNode`) for the same reason at the leaf
+level.
 
-**1. It is not injective (collision).** `:` and `,` are legal filename characters and are
-not escaped. A directory containing one file literally named `a:AA,b` with hash `BB`
-produces `"a:AA,b:BB"` — byte-identical to the two-file directory above. Two structurally
-different directories then compare equal, and one can be reported as a move/copy of the
-other. Verified experimentally. Exotic, but it is a *false-unchanged* class bug, which
-[goals.md](goals.md) ranks as top severity.
-
-**2. It is O(total subtree bytes) per node.** The root's hash string contains every file's
-hash. Measured on a synthetic depth-5 / 4096-file tree: **1,336,663 bytes** of `HashA`
-across the tree, largest single directory string **196,603 bytes** — roughly 326 B/file,
-growing with depth. On a real multi-million-file tree the hash strings alone dominate
-memory, and every map insert and comparison in `detectMovesCopies` hashes those long
-strings.
-
-Both are fixed by the same one-line-ish change: hash the sorted, length-delimited child
-list with SHA-1 and store the digest. That makes directory hashes fixed-width (20 bytes)
-and injective. It changes no semantics — nothing outside this package interprets a
-directory hash. **This is the single highest-value change available in this package.**
+**Measured effect** (`TestMemory_TwoIdenticalSnapshots`, `internal/diff/memory_test.go`):
+retained heap for two identical 200,000-file snapshots dropped from the ~200 MiB
+[diff-memory.md](diff-memory.md) measured under the old scheme to **72.8 MiB** — a real
+2.75x, short of that document's ~5x estimate (`Node` struct/map overhead untouched by this
+change is a larger fraction of the remainder than the estimate assumed) but a genuine,
+tested reduction with **zero semantic change**: nothing outside this package ever reads a
+`HashA`/`HashB` value directly (`DiffResult` carries no hash field, confirmed by grep;
+`app/diff.go` never touches `HashA`/`HashB`), so the digest's exact byte content doesn't
+matter to anything except `==` comparison and map-keying, both unaffected by switching from
+hex text to raw bytes or from a joined string to a digest. Validated against 400,000
+property-test seeds (both the plain and line-budget-1 runs) with zero failures, plus the
+full existing golden-test suite unchanged, before being reverted to the routine 5,000-seed
+count — see [diff-memory.md](diff-memory.md) for what's next (Phases 1-5, the actual
+`O(1)`-memory external-sort rewrite, which this change is a prerequisite for but does not
+attempt).
 
 ## Stages 5/7/8: `propagateStatus` — the rollup rules
 
@@ -358,18 +363,23 @@ handled by stage 8 running *after* collection rather than before it.
 
 Full details in [known-issues.md](known-issues.md).
 
-### Merkle collisions and merkle bloat
+### Merkle collisions and merkle bloat — FIXED 2026-09-09
 
-See stage 4 above. Still open, and still the single highest-value change available in this
-package: a real digest fixes a false-unchanged bug and the dominant memory cost together.
+See stage 4 above. Was the single highest-value change available in this package; now
+built (`digestEntries`/`compactHash`), measured (200 MiB → 72.8 MiB retained heap on the
+200,000-file case), and validated against 400,000 property-test seeds.
 
-### Memory
+### Memory — reduced, not solved
 
-Two identical 200,000-file snapshots: **200 MiB retained heap**, 398 MiB total allocated —
-about 1 KiB per file, most of it merkle strings and `Node` overhead. ROADMAP 0.8.11 claims
-"memory use optimization for diff"; that optimisation was on the *store* side (streaming
-iterators), and the tree itself is still fully materialised. Fixing the merkle scheme is
-also the largest single win here.
+Two identical 200,000-file snapshots now retain **72.8 MiB** (was 200 MiB — see stage 4).
+The tree is still fully materialised — `Node` struct/map overhead and the `Path`/`Name`
+strings stored per node are untouched by the digest fix — so this is a constant-factor
+win, not the `O(1)`-memory fix. ROADMAP 0.8.11 claims "memory use optimization for diff";
+that optimisation was on the *store* side (streaming iterators), and the tree itself is
+still fully materialised. [diff-memory.md](diff-memory.md)'s Phases 1-5 (external
+sort-based streaming, replacing the tree with a DFS stream) are what actually removes the
+`O(files)` scaling, and remain unbuilt — `coverage` is still the command to reach for at
+fleet scale, per [fleet.md](fleet.md).
 
 ## Testing notes
 

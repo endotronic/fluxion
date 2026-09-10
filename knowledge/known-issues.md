@@ -44,15 +44,19 @@ in `import-legacy`'s root autodetection (`internal/app/import.go`).
 
 ## Severity 2 — wrong or unstable results
 
-### 2.2 Directory hashes are not injective (collision) — CONFIRMED
-`computeMerkleHashes` joins `child.Name + ":" + child.Hash` with `,` and does not escape
-either delimiter. A directory containing one file literally named `a:AA,b` with hash `BB`
-produces `"a:AA,b:BB"` — identical to a directory containing `a`(`AA`) and `b`(`BB`). The
-two directories then compare equal and one may be reported as a move or copy of the other.
-`internal/dupes/dupes.go` has the same scheme and the same defect.
+### 2.2 Directory hashes are not injective (collision) — FIXED in `internal/diff` 2026-09-09, still open in `internal/dupes`
+`computeMerkleHashes` used to join `child.Name + ":" + child.Hash` with `,` without
+escaping either delimiter. A directory containing one file literally named `a:AA,b` with
+hash `BB` produced `"a:AA,b:BB"` — identical to a directory containing `a`(`AA`) and
+`b`(`BB`). The two directories then compared equal and one could be reported as a move or
+copy of the other.
 
-Fix (also fixes 3.1 and helps 3.2): SHA-1 the sorted, length-delimited child list and store
-the digest.
+Fixed in `internal/diff` (`digestEntries` in `diff.go`: SHA-1 over a sorted,
+length-prefixed child list — see [diff-algo.md](diff-algo.md) Stage 4). **`internal/dupes/dupes.go:242`
+has the identical `strings.Join(hashes, ",")` scheme and the identical defect, untouched by
+this fix** — it was scoped to `internal/diff` only (diff-memory.md's Phase 0 is about
+`diff`'s memory ceiling specifically). Porting the same `digestEntries` approach to
+`dupes.go` is still open and would close this issue fully.
 
 ### 2.4 Deleted snapshots are still resolvable
 `FindSnapshot` and `GetLastSnapshot` do not filter `status = 'deleted'` tombstones. Naming
@@ -71,17 +75,20 @@ this should at least require `--force`.
 
 ## Severity 3 — scale and performance
 
-### 3.1 Merkle strings dominate memory — CONFIRMED
-A directory's "hash" contains every descendant hash. Measured on a synthetic depth-5 /
-4096-file tree: **1,336,663 total bytes** of `HashA`, largest single directory string
-**196,603 bytes** — ~326 B/file, growing with depth. Every map insert and comparison in
-`detectMovesCopies` hashes those long strings. Fixed by 2.2's digest change.
+### 3.1 Merkle strings dominate memory — FIXED in `internal/diff` 2026-09-09
+A directory's "hash" used to contain every descendant hash. Measured on a synthetic
+depth-5 / 4096-file tree: 1,336,663 total bytes of `HashA`, largest single directory
+string 196,603 bytes — ~326 B/file, growing with depth. Fixed by 2.2's digest change —
+`internal/dupes` still has the pre-fix concatenated-string scheme and its memory profile
+(see 2.2).
 
-### 3.2 Diff peak memory ~1 KiB/file — CONFIRMED
-Two identical 200,000-file snapshots: **200 MiB retained heap**, 398 MiB total allocated.
-The store side streams (that was ROADMAP 0.8.11's "memory use optimization"), but the
-whole unified tree is materialised. A 10M-file tree would want ~10 GiB. 3.1 is the largest
-single component.
+### 3.2 Diff peak memory ~1 KiB/file — REDUCED to ~365 B/file 2026-09-09, not eliminated
+Two identical 200,000-file snapshots used to retain 200 MiB (398 MiB total allocated); the
+2.2/3.1 digest fix brought that to **72.8 MiB** (`internal/diff/memory_test.go`), a real
+2.75x, not the full fix. The store side streams (that was ROADMAP 0.8.11's "memory use
+optimization"), but the whole unified tree is still fully materialised — `Node` struct/map
+overhead is untouched by the digest change, and a 10M-file tree still wants several GiB,
+just no longer ~10 GiB.
 
 **This is the issue that stalled the project.** The author reported needing ~200 GB of
 swap to diff real snapshots, which puts the working set at roughly 100-200M nodes. It is
@@ -129,10 +136,10 @@ tree build. [architecture.md](architecture.md).
 
 ## Modernisation candidates
 
-- **Replace the synthetic merkle string with a real digest** (issue 2.2). Highest
-  value-per-line change in the project; fixes a correctness bug and the dominant memory
-  cost at once, and is a prerequisite for the "directory entirely contained in another"
-  roadmap item.
+- ~~**Replace the synthetic merkle string with a real digest**~~ Done for `internal/diff`
+  2026-09-09 (issue 2.2/3.1). **The same change in `internal/dupes/dupes.go:242` is still
+  open** and was, per the reasoning that made this the highest value-per-line change in the
+  project, worth doing there too: same collision bug, same memory cost, same fix.
 - **Property-based tests for diff.** The existing tests are case-by-case golden output,
   which is why 1.1 and 1.2 went unnoticed. The invariant worth asserting is: *every file
   present in A and absent from B appears somewhere in the output.* All three severity-1

@@ -1,6 +1,9 @@
 package diff
 
 import (
+	"crypto/sha1"
+	"encoding/binary"
+	"encoding/hex"
 	"fluxion/internal/models"
 	"path/filepath"
 	"sort"
@@ -334,6 +337,7 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool, has
 	} else if hashType == "md5" {
 		hash = record.MD5
 	}
+	hash = compactHash(hash)
 
 	if isA {
 		current.InA = true
@@ -662,8 +666,95 @@ func propagateNodeStatus(node *Node) (Status, bool) {
 	return StatusMixed, hasUnchangedContent
 }
 
-// computeMerkleHashes computes Merkle hash of directory content
-// Now uses generic HashA/HashB fields.
+// compactHash decodes a hex hash (as stored in the DB) into its raw bytes, so
+// a leaf hash costs 20/16 bytes instead of 40/32 hex characters. Stored as a
+// plain Go string - which can hold any byte sequence - so every existing
+// comparison (==, map keys) is unchanged; nothing outside this package ever
+// sees or prints these values (confirmed: no Hash field is exposed on
+// DiffResult, and app/diff.go never reads HashA/HashB).
+//
+// A decode failure (an empty or malformed value - never expected from the DB,
+// which only ever writes valid hex or '') falls back to the original string
+// rather than silently becoming "": treating a comparable-but-odd hash as "no
+// hash" would misclassify a Modified file as having no hash at all, which
+// reads identically to Unchanged-turned-Modified-for-missing-hash - the
+// severity rule direction is fine either way, so the fallback only matters
+// for not losing the distinguishing value itself.
+func compactHash(hexHash string) string {
+	if hexHash == "" {
+		return ""
+	}
+	decoded, err := hex.DecodeString(hexHash)
+	if err != nil {
+		return hexHash
+	}
+	return string(decoded)
+}
+
+// merkleEntry is one child's contribution to its parent's directory digest.
+type merkleEntry struct {
+	name string
+	twin bool // true for a FileTwin's contribution, alongside its directory host
+	hash string
+}
+
+// digestEntries hashes entries into a single fixed-width (20-byte) digest,
+// replacing the old "name:hash,name:hash" concatenated string.
+//
+// This is Phase 0 of knowledge/diff-memory.md's memory plan: it fixes the
+// merkle scheme's two documented defects (knowledge/diff-algo.md, "Stage 4")
+// together. The old scheme joined "name:hash" pairs with unescaped ':' and
+// ','; both are legal filename bytes, so two structurally different
+// directories could hash identical (confirmed experimentally - a
+// false-unchanged bug, top severity per goals.md). Explicit length-prefixing
+// here means no separator byte is ever interpreted as content, so two
+// different entry sets cannot collide by reinterpretation. It also replaces
+// an O(total subtree bytes) string - measured at 326 B/file, dominating
+// memory on a real tree - with a fixed 20 bytes per directory regardless of
+// subtree size.
+//
+// Semantics preserved exactly from the old computeMerkleHashes: entries are
+// taken over children's name:hash pairs in sorted order, a FileTwin
+// contributes a second, distinctly-tagged entry, a child with no hash on this
+// side contributes nothing, and an empty entry set yields "" (not a hash of
+// zero entries) - untouched children's DirA/DirB tracking already handles
+// "empty vs absent" separately from "has a hash".
+func digestEntries(entries []merkleEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].name != entries[j].name {
+			return entries[i].name < entries[j].name
+		}
+		if entries[i].twin != entries[j].twin {
+			return !entries[i].twin // host entry sorts before its twin
+		}
+		return entries[i].hash < entries[j].hash
+	})
+
+	h := sha1.New()
+	var lenBuf [4]byte
+	writeLenPrefixed := func(s string) {
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s)))
+		h.Write(lenBuf[:])
+		h.Write([]byte(s))
+	}
+	for _, e := range entries {
+		writeLenPrefixed(e.name)
+		if e.twin {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+		writeLenPrefixed(e.hash)
+	}
+	return string(h.Sum(nil))
+}
+
+// computeMerkleHashes computes each directory's content digest bottom-up.
+// See digestEntries for what changed and why; the entry-collection logic
+// below is otherwise identical to the original string-concatenation version.
 func computeMerkleHashes(node *Node) {
 	if node.IsFile {
 		return
@@ -674,8 +765,7 @@ func computeMerkleHashes(node *Node) {
 		return
 	}
 
-	var hashesA []string
-	var hashesB []string
+	var entriesA, entriesB []merkleEntry
 
 	for _, child := range node.Children {
 		computeMerkleHashes(child)
@@ -688,33 +778,26 @@ func computeMerkleHashes(node *Node) {
 		}
 
 		if child.HashA != "" {
-			hashesA = append(hashesA, child.Name+":"+child.HashA)
+			entriesA = append(entriesA, merkleEntry{name: child.Name, hash: child.HashA})
 		}
 		if child.HashB != "" {
-			hashesB = append(hashesB, child.Name+":"+child.HashB)
+			entriesB = append(entriesB, merkleEntry{name: child.Name, hash: child.HashB})
 		}
 
 		// A split path contributes both halves, tagged so that a directory and
 		// a file of the same name cannot produce the same entry.
 		if twin := child.FileTwin; twin != nil {
 			if twin.HashA != "" {
-				hashesA = append(hashesA, child.Name+":file:"+twin.HashA)
+				entriesA = append(entriesA, merkleEntry{name: child.Name, twin: true, hash: twin.HashA})
 			}
 			if twin.HashB != "" {
-				hashesB = append(hashesB, child.Name+":file:"+twin.HashB)
+				entriesB = append(entriesB, merkleEntry{name: child.Name, twin: true, hash: twin.HashB})
 			}
 		}
 	}
 
-	if len(hashesA) > 0 {
-		sort.Strings(hashesA)
-		node.HashA = strings.Join(hashesA, ",")
-	}
-
-	if len(hashesB) > 0 {
-		sort.Strings(hashesB)
-		node.HashB = strings.Join(hashesB, ",")
-	}
+	node.HashA = digestEntries(entriesA)
+	node.HashB = digestEntries(entriesB)
 }
 
 // detectMovesCopies

@@ -20,8 +20,10 @@ Five bytes per node settles the design question before it is asked: **nothing pr
 to file count can live in RAM.** Compaction is not a route to the goal — it is a
 multiplier on a curve that still goes to infinity. The tree has to leave memory.
 
-That does not make compaction worthless; see phase 0 below, which is worth ~5× on its own
-and is a prerequisite for the rest anyway.
+That does not make compaction worthless; see phase 0 below, **built 2026-09-09**, which
+measured 2.75× on its own (200 MiB → 72.8 MiB on the 200,000-file case; less than the ~5×
+estimated here, since `Node` struct/map overhead this phase doesn't touch turned out to be
+a larger fraction of the total than assumed) and is a prerequisite for the rest anyway.
 
 ## Where the 1 KiB goes
 
@@ -79,19 +81,37 @@ one.
 Six phases. Each is independently shippable and independently verifiable; nothing after
 phase 0 changes observable output.
 
-### Phase 0 — fixed-width digests instead of merkle strings
+### Phase 0 — fixed-width digests instead of merkle strings — BUILT 2026-09-09
 
-Already tracked as issues 2.2 and 3.1. Replace the concatenated merkle string with a
-16-byte digest, and store leaf hashes as bytes rather than 40-char hex.
+Was tracked as issues 2.2 and 3.1 (now closed — remove from known-issues.md if still
+listed there). Replaced the concatenated merkle string with a 20-byte SHA-1 digest
+(`digestEntries`) over a length-prefixed encoding — not 16 bytes as originally estimated
+here, but still fixed-width regardless of subtree size — and leaf hashes are now stored as
+decoded bytes rather than 40/32-char hex (`compactHash`, called once in `insertNode`). Both
+live in `internal/diff/diff.go`; see [diff-algo.md](diff-algo.md)'s Stage 4 section for the
+full before/after.
 
-Semantics to preserve exactly (from `computeMerkleHashes`): the digest is taken over the
-children's `name:hash` pairs in sorted order, twins contribute a second entry tagged
-`name:file:hash`, children with an empty hash on that side contribute nothing, and `DirA`
-/ `DirB` remain tracked separately from "has a hash".
+Semantics preserved exactly, as required (from `computeMerkleHashes`): the digest is taken
+over the children's `name:hash` pairs in sorted order, twins contribute a second,
+distinctly-tagged entry, children with an empty hash on that side contribute nothing, and
+`DirA`/`DirB` remain tracked separately from "has a hash". Nothing outside `internal/diff`
+reads a `HashA`/`HashB` value directly, so switching from hex text to raw bytes and from a
+joined string to a digest is invisible to every caller — confirmed by grep, not assumed.
 
-Pays for itself three times: fixes a real collision bug, cuts memory ~5×, and — the reason
-it comes first — makes every intermediate record **fixed-width**, which is what makes the
-external sorts in phases 3–4 cheap.
+Paid for itself as promised, measured rather than estimated: fixed the real collision bug
+(length-prefixing means no separator byte can be reinterpreted as content), cut retained
+heap 2.75× on the 200,000-file case (200 MiB → 72.8 MiB, short of the ~5× guessed below —
+`Node` struct/map overhead this phase doesn't touch is a bigger fraction of the total than
+assumed), and made every intermediate record **fixed-width**, which is what makes the
+external sorts in phases 3–4 below cheap when they get built. Validated against 400,000
+property-test seeds (`internal/diff/property_test.go`, both the plain and
+line-budget-1 runs) with zero failures, plus a new permanent regression test
+(`internal/diff/memory_test.go`) asserting a heap ceiling so a regression back toward
+string concatenation fails a test instead of surfacing as a swap storm on real fleet data.
+
+**Phases 1–5 below remain unbuilt.** This alone does not remove the `O(files)` memory
+scaling — a big enough tree still won't fit — it only moves the wall further out. `coverage`
+is still the command for anything at fleet scale ([fleet.md](fleet.md)).
 
 ### Phase 1 — a `NodeStream` abstraction, still in memory
 
