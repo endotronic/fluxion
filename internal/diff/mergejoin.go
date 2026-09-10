@@ -82,12 +82,60 @@ func twoPassInsert(root *Node, iterA, iterB FileIterator, hashType string, onPro
 // correctness requirement - which is the property the later, stack-based phases
 // will NOT enjoy, and the reason to establish this one first.
 func mergeJoinInsert(root *Node, iterA, iterB FileIterator, hashType string, onProgress func(int)) error {
+	prog := &progressReporter{onProgress: onProgress}
+
+	err := mergeJoinStreams(iterA, iterB, func(path string, a, b *models.FileRecord) error {
+		switch {
+		case a != nil && b != nil:
+			// Shared path: locate once, record both sides.
+			n := locateNode(root, path)
+			applySide(n, *a, true, hashType)
+			applySide(n, *b, false, hashType)
+			prog.add(2)
+		case a != nil:
+			applySide(locateNode(root, path), *a, true, hashType)
+			prog.add(1)
+		default:
+			applySide(locateNode(root, path), *b, false, hashType)
+			prog.add(1)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	prog.finish()
+	return nil
+}
+
+// mergeJoinStreams co-walks two record streams, calling onRecord once per
+// distinct path with whichever sides carry it. Both a and b are non-nil when a
+// path appears on both sides.
+//
+// **Every record is passed to onRecord exactly once, whatever order the streams
+// arrive in.** Each iteration consumes at least one record and the loop runs
+// until both sides are exhausted, so nothing can be dropped or applied twice.
+// Order decides only whether a path's two sides are presented together or
+// separately - which mergeJoinInsert does not care about, since locateNode is
+// idempotent, but which streamCompare very much does. Consumers needing real
+// ordering must verify it themselves; see streamCompare's DFS-key check.
+func mergeJoinStreams(iterA, iterB FileIterator, onRecord func(path string, a, b *models.FileRecord) error) error {
+	return mergeJoinStreamsBy(iterA, iterB, func(p string) string { return p }, onRecord)
+}
+
+// mergeJoinStreamsBy is mergeJoinStreams with an explicit sort key.
+//
+// The key matters because the merge decides which side to advance by comparing
+// heads, so it imposes its own ordering on the merged output regardless of how
+// the inputs were sorted. streamCompare needs DFS-key order all the way through;
+// feeding it DFS-ordered inputs while merging on raw paths silently re-interleaves
+// them, which is a bug that looks like out-of-order input arriving from nowhere.
+func mergeJoinStreamsBy(iterA, iterB FileIterator, key func(string) string, onRecord func(path string, a, b *models.FileRecord) error) error {
 	pa := newPullIter(iterA)
 	defer pa.stop()
 	pb := newPullIter(iterB)
 	defer pb.stop()
-
-	prog := &progressReporter{onProgress: onProgress}
 
 	okA := pa.advance()
 	okB := pb.advance()
@@ -95,22 +143,25 @@ func mergeJoinInsert(root *Node, iterA, iterB FileIterator, hashType string, onP
 	for okA || okB {
 		switch {
 		case okA && okB && pa.cur.path == pb.cur.path:
-			// Shared path: locate once, record both sides.
-			n := locateNode(root, pa.cur.path)
-			applySide(n, pa.cur.rec, true, hashType)
-			applySide(n, pb.cur.rec, false, hashType)
-			prog.add(2)
+			recA, recB := pa.cur.rec, pb.cur.rec
+			if err := onRecord(pa.cur.path, &recA, &recB); err != nil {
+				return err
+			}
 			okA = pa.advance()
 			okB = pb.advance()
 
-		case okA && (!okB || pa.cur.path < pb.cur.path):
-			applySide(locateNode(root, pa.cur.path), pa.cur.rec, true, hashType)
-			prog.add(1)
+		case okA && (!okB || key(pa.cur.path) < key(pb.cur.path)):
+			rec := pa.cur.rec
+			if err := onRecord(pa.cur.path, &rec, nil); err != nil {
+				return err
+			}
 			okA = pa.advance()
 
 		default: // okB, and B's path sorts first (or A is exhausted)
-			applySide(locateNode(root, pb.cur.path), pb.cur.rec, false, hashType)
-			prog.add(1)
+			rec := pb.cur.rec
+			if err := onRecord(pb.cur.path, nil, &rec); err != nil {
+				return err
+			}
 			okB = pb.advance()
 		}
 	}
@@ -120,10 +171,5 @@ func mergeJoinInsert(root *Node, iterA, iterB FileIterator, hashType string, onP
 	if err := pa.err(); err != nil {
 		return err
 	}
-	if err := pb.err(); err != nil {
-		return err
-	}
-
-	prog.finish()
-	return nil
+	return pb.err()
 }

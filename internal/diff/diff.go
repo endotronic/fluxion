@@ -280,34 +280,35 @@ func compareSnapshotsWith(build treeBuilder, iterA, iterB FileIterator, opts Opt
 	// 9. The trial run above is the final output.
 	results := c.results
 
-	// 10. Reconstruct Absolute Paths
+	// 10. Reconstruct absolute paths.
+	return finalizeResults(results, rootA, rootB), nil
+}
+
+// finalizeResults turns the engine-internal relative paths back into absolute
+// ones, choosing which snapshot root each line resolves against. Shared by both
+// engines so a line means the same thing whichever produced it.
+//
+// The choice is status-dependent: Removed/Modified describe something as it was
+// in A, everything else describes B, and a Move/Copy source is always in A.
+func finalizeResults(results []DiffResult, rootA, rootB string) []DiffResult {
 	finalResults := make([]DiffResult, len(results))
 	for i, res := range results {
-		// Clean paths (remove leading slash if present from Node path construction)
+		// Clean paths (remove leading slash if present from path construction)
 		relPath := strings.TrimPrefix(res.Path, "/")
 
 		var absPath string
 		var rootUsed string
 
 		switch res.Status {
-		case StatusAdded, StatusMove, StatusCopy:
-			absPath = filepath.Join(rootB, relPath)
-			rootUsed = rootB
-			if strings.HasSuffix(res.Path, "/") {
-				absPath += string(filepath.Separator)
-			}
 		case StatusModified, StatusRemoved:
 			absPath = filepath.Join(rootA, relPath)
 			rootUsed = rootA
-			if strings.HasSuffix(res.Path, "/") {
-				absPath += string(filepath.Separator)
-			}
 		default:
 			absPath = filepath.Join(rootB, relPath)
 			rootUsed = rootB
-			if strings.HasSuffix(res.Path, "/") {
-				absPath += string(filepath.Separator)
-			}
+		}
+		if strings.HasSuffix(res.Path, "/") {
+			absPath += string(filepath.Separator)
 		}
 
 		var absSource string
@@ -341,14 +342,7 @@ func compareSnapshotsWith(build treeBuilder, iterA, iterB FileIterator, opts Opt
 			HiddenCount:        res.HiddenCount,
 		}
 	}
-
-	// Sort results - Removed (Logic is now in traversal order)
-	// Traversal is Post-Order (Depth-First), Sibling A-Z.
-	// This matches user requirement:
-	// 1. Children before Parent (Post-Order)
-	// 2. Siblings A-Z
-
-	return finalResults, nil
+	return finalResults
 }
 
 // insertNode places one record's side into the tree, creating the path chain as
