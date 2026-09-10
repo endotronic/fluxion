@@ -128,6 +128,15 @@ single most important structural fact about the algorithm.
 
 Stage 8 is a loop, described under its own heading below.
 
+**There is a second engine, and it is the default.** `internal/diff/streaming.go` and
+`internal/diff/external.go` compute the same output from a depth-first stream and a stack
+instead of a materialised tree — stages 3-5 and 7-9 as one walk, stage 6 as an external
+sort, stage 8 as repeated walks. `CompareSnapshots` uses it whenever the input arrives in
+DFS-key order and falls back here otherwise. **Everything in this file is the
+specification it is checked against**, byte for byte, so a change to any rule below has to
+be made in the shared code (`rollup.go`) or in both engines — and the equivalence harness
+in `streaming_test.go` is what tells you which. See [diff-memory.md](diff-memory.md).
+
 ### Why paths are relative
 
 `app/diff.go` strips each snapshot's `root_path` before yielding to the iterators, and
@@ -289,6 +298,14 @@ seeds found real data loss through this path.
 `--no-moves` / `--no-copies` gate the two halves; if both are set the whole stage returns
 immediately.
 
+**The streaming engine reaches the same verdicts without the tree.** `internal/diff/external.go`
+replaces the three maps with one external sort on `(hash, ordinal)` and four forward-only
+cursors per content group — the ordinal being this stage's own pre-order traversal, which is
+what decides which candidate a move is attributed to. Everything above is the specification
+it is checked against: the guards, the preference order, and which maps consume. See
+[diff-memory.md](diff-memory.md)'s Phase 3, in particular the one shape a stream refuses to
+guess at (a matched directory with a `FileTwin`).
+
 ## Stage 8: hidden move sources
 
 A `MovedSource` is normally suppressed, on the assumption that the destination's line
@@ -330,6 +347,14 @@ results := c.results          // the last trial run is the answer
 
 Each pass only ever turns `MovedSource` into `Removed`, so the loop converges; the bound of
 32 is a guard, not an expected limit.
+
+The streaming engine reaches the same fixed point by re-running the walk instead of
+mutating a tree: each round merge-joins a larger set of demoted ordinals in by ordinal, and
+the walk writes out the sources it suppressed so the round's output can be asked about them.
+Two facts from this section become load-bearing there and are easy to lose: **the demotion
+set is cumulative** (a demoted source emits a `Removed` line, which would otherwise make the
+next round think it had been mentioned all along), and **the candidate is the highest
+suppressed node, not each leaf**. See [diff-memory.md](diff-memory.md)'s Phase 3.
 
 An earlier version predicted the output with a `markVisible` pass instead. It was wrong
 twice over — once because a `Move` line collapsed into an enclosing `Move` still names the
@@ -399,10 +424,12 @@ was deliberately left on the table.
 The tree is still fully materialised in *this* engine, so that part is constant-factor
 work: a 200M-node diff still wants ~34 GB. **`streamCompare` (Phase 2, built 2026-09-10)
 is not on that curve** — it retains `O(depth × budget)` and measured 10.7× lower peak RSS
-on a real 2.27M-file fleet diff, with byte-identical output. It cannot do move/copy
-detection yet, so `CompareSnapshots` streams when the options allow and falls back to this
-engine otherwise; [diff-memory.md](diff-memory.md) has both. `coverage` remains the right
-command for a pure delete decision, per [fleet.md](fleet.md).
+on a real 2.27M-file fleet diff, with byte-identical output. Phase 3 (2026-09-10) gave it
+move/copy detection as an external sort, so it is now what `CompareSnapshots` uses for
+every diff whose input arrives in DFS order; peak RSS measured 210 MiB at 6.4M files a
+side, flat. This engine is retained as the fallback and as the oracle every equivalence
+test is written against. [diff-memory.md](diff-memory.md) has both. `coverage` remains the
+right command for a pure delete decision, per [fleet.md](fleet.md).
 
 `TestMemory_UnifiedTree` asserts a per-node ceiling, so any of this regressing is a test
 failure rather than a swap storm.

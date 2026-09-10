@@ -13,7 +13,7 @@ refers to stages by number. Read [fleet.md](fleet.md) for why the numbers are th
 |---|---|
 | Measured cost when this was written | ~1 KiB per unique path (two identical 200,000-file snapshots retained 200 MiB) |
 | **Measured cost now, tree engine** | **178 B/node** (same case, 34.1 MiB — an 83% reduction, see "What the constant-factor work achieved") |
-| **Measured cost now, streaming engine** | **`O(depth × budget)`** — bounded, does not scale with file count at all (Phase 2, below) |
+| **Measured cost now, streaming engine** | **`O(depth × budget)`** — bounded, does not scale with file count at all (Phase 2, below). Since Phase 3 that includes move/copy detection, at the cost of a fixed sort buffer. |
 | Observed failure | 200 GB of swap ⇒ roughly 100–200M nodes in the unified tree |
 | Target | **1 GB resident**, temp storage unconstrained |
 | Implied budget at 200M nodes | **≈5 bytes per node** |
@@ -30,9 +30,10 @@ constant on the same curve, and the 200M-node case that stalled the project stil
 
 The streaming engine (Phase 2, built 2026-09-10) is off that curve entirely: retention is
 `O(depth × budget)`, measured identical at 20,000 and 200,000 files, and 10.7× lower peak
-RSS than the tree engine on a real 2.27M-file fleet diff. **It cannot do move/copy
-detection yet**, which is what Phase 3 is for — so today the choice is a bounded diff that
-answers "what changed", or an unbounded one that also answers "where did it go".
+RSS than the tree engine on a real 2.27M-file fleet diff. **Phase 3 (also 2026-09-10)
+removed its one restriction**: move/copy detection now runs as an external sort, so there
+is no longer a choice between a bounded diff that answers "what changed" and an unbounded
+one that also answers "where did it go". Both are the same command.
 
 ## What the constant-factor work achieved
 
@@ -283,98 +284,203 @@ pathological name could still sort wrong, and under the severity rule a mis-nest
 node is a wrong answer, so `streamCompare` returns `errStreamOutOfOrder` and lets
 the caller fall back instead of guessing.
 
-### Phase 3 — external move/copy matching (stage 6)
+### Phase 3 — external move/copy matching (stage 6) — BUILT 2026-09-10
 
-The one stage that needs a global view, and the only thing standing between the streaming
-engine and a full-featured `diff`.
+`internal/diff/external.go`. The streaming engine now does a full-featured diff; there is
+nothing left that only the tree engine can answer, bar one unreachable shape (below).
 
-**Correction to what this section used to assume:** it said "Phase 2 writes a spine file".
-Phase 2 as built does *not* — `streamCompare` goes straight from records to output and
-persists nothing, because without move detection it never needs a second pass. Writing the
-spine is therefore Phase 3's own first job, not something already sitting there.
+**No spine file was needed, and that is the main structural surprise.** The plan below
+assumed the matcher would carry an 8-byte ordinal instead of a path (40-byte records) and
+then join those ordinals back to paths through a spine written in DFS order. As built,
+there is no spine: the *source* records carry their path directly, and the destination is
+identified by ordinal because the walk that consumes the decisions re-derives every path as
+it goes anyway. The spine, the ordinal→path resolution pass and one whole external sort all
+disappear with it. What is paid for that is a fatter hash-record file — a path instead of
+nothing on the source side — which is the cheaper end of the trade, since the alternative
+was an extra full pass over both snapshots.
 
-1. Write a **spine** file during the stream, in DFS order: front-coded path suffixes plus
-   each node's digests, sizes, flags and status, numbered by ordinal. Note this also means
-   the streaming engine must start computing directory digests, which it currently skips
-   for the same reason — nothing consumes them without move matching.
-2. Emit a fixed-width `(digest, ordinal, kind, size)` record per node, **external-sort by
-   digest**, then scan hash-groups applying the existing pairing and consumption rules —
-   `Removed`↔`Added` = Move, existing↔`Added` = Copy, plus the swap cases. Carrying an
-   8-byte ordinal instead of a path is what keeps these records at 40 bytes.
-3. Sort the resulting `(destOrdinal, sourceOrdinal, kind)` triples back into ordinal order
-   and merge-join them against the spine on the next pass.
+What it does, in three steps:
 
-One pathology to handle deliberately: a single digest can cover an enormous group (every
-zero-byte file shares one). The group scan must pair off streaming with a bounded buffer
-and spill beyond it — the current in-memory code has the same pathology and simply
-survives it by having already lost.
+1. **Pass 1** walks the stream and writes, per node, a *source* record keyed on its A-side
+   hash (for every node `detectMovesCopies` would have indexed) and a *target* record keyed
+   on its B-side hash (for every node it would have tried to match). Every guard the tree
+   engine applies is applied at emit time, so a node it would never have indexed never
+   reaches the sort: the `presentInA` prune, the empty-hash skip, the zero-byte-file skip
+   (one hash shared by every empty file would make each of them a move of all the others),
+   and the refusal to match a directory that already held something in A.
+   This is where the streaming engine starts computing directory digests, which Phase 2
+   skipped because nothing consumed them.
+2. **The sort key is `(hash, ordinal)`**, so byte order groups by content and, within a
+   group, restores the pre-order traversal — which is what decides *which* source a move is
+   attributed to. Each group is then scanned with **four forward-only cursors** over the
+   group's byte range: one per map the tree engine kept (`removedMap`, `modifiedMap`,
+   `existingMap`) plus one for the targets. Taking a source is advancing a cursor, which
+   consumes it exactly as `take()` popped a slice head.
+3. **The decisions** — "node 4,201 is a Move whose source is `/old/x`", "node 900 is that
+   source, suppress it" — are sorted back into ordinal order and merge-joined into a second
+   walk, which produces the output.
 
-**Two things Phase 2 established that this should reuse rather than reinvent:**
+**The pathological group costs nothing now.** The plan flagged that one digest can cover an
+enormous group (every directory of zero-byte files hashes the same) and suggested a bounded
+buffer with spill. The cursor design removes the problem instead of managing it: four
+forward scans over a contiguous byte range, no buffer at all. Where the tree engine's
+`map[hashVal][]*Node` held every member of the group, this holds one record per cursor.
+`TestExternal_HugeContentGroup` pins a 4,000-member group.
 
-- `rollupAccum`/`decideRollup` (`internal/diff/rollup.go`) is how both engines reach the
-  rollup verdict through one implementation. Move/copy statuses already flow through it
-  (`firstMoveSource`/`firstCopySource`), so a streaming engine that learns about moves
-  feeds the same accumulator. Do not transcribe those rules a third time.
-- The equivalence harness (`streaming_test.go`, `mergejoin_test.go`) is the acceptance
-  test: byte-identical `[]DiffResult` against the tree engine over the same corpus
-  `property_test.go` uses, unbudgeted and budgeted. Extend it by dropping the
-  `NoMoves`/`NoCopies` restriction from `streamOpts` once moves work. It found four real
-  bugs in Phase 2, all of which would otherwise have shipped as plausible wrong output.
+**Stage 8 (what the plan called Phase 4) came with it**, because externally it is the same
+shape of problem. Each round is another walk with a larger demotion set merge-joined in by
+ordinal; the walk writes out the move sources it suppressed, and the round's output is then
+asked which of them it failed to mention. Three things had to be got right:
 
-**And one hard constraint it must keep:** `streamCompare` verifies DFS-key ordering as it
-walks and returns `errStreamOutOfOrder` rather than guessing, because a mis-nested node is
-a wrong answer under the severity rule. Multi-pass processing must not weaken that — each
-pass over the spine needs the same discipline.
+- **The demotion set is cumulative**, exactly as the tree engine's mutations are. A source
+  demoted in round *k* emits a `Removed` line, which would make round *k+1* think it had
+  been mentioned all along and put it back — an oscillation, not a fixed point.
+- **The candidate is the *highest* suppressed node, not each leaf.** `reinstateHiddenMoveSources`
+  stops recursing at the first `MovedSource` it meets and decides for the whole subtree.
+  A stream cannot know that a directory is wholly `MovedSource` until it closes, by which
+  point its children have already written their own candidate records — so a directory
+  that closes as `MovedSource` **truncates the candidate log back to where its subtree
+  started** and writes one record for itself. That is what `spillFile.truncate` exists for.
+  The resulting log is still in ordinal order, because candidates are mutually
+  incomparable and for such nodes pre-order and post-order coincide.
+- **The root is a node too.** If every file moved away, the root itself rolls up to
+  `MovedSource`, and nothing can ever name the root — so the whole diff reverts to
+  `Removed`.
 
-### Phase 4 — external fixed point (stage 8)
+**Measured.** With every one of 400,000 files a side moving from one tree to another, peak
+frames 2 and peak retained lines 27 at *both* 20,000 and 200,000 files a side, two passes
+in both cases (`TestExternal_RetentionIsBoundedWithMovesOn`). Peak RSS, everything moving,
+against the tree engine on the same input:
 
-Stage 8 collects a trial output, derives `accountedPaths`, demotes unmentioned
-`MovedSource` nodes to `Removed`, re-propagates and re-collects. Externally this is the
-same loop with the trial output written to a temp file and `accountedPaths` merge-joined
-back into the next pass by ordinal. Each iteration is one sequential pass over the spine;
-it converges in one or two in practice and is capped at 32.
+| Files per side | Tree engine | Streaming + external matching |
+|---|---|---|
+| 100,000 | 100 MiB | 62 MiB |
+| 200,000 | 192 MiB | — |
+| 400,000 | 376 MiB | 179 MiB |
+| 1,600,000 | ~1.5 GiB (extrapolated; would not fit) | 215 MiB |
+| 6,400,000 | ~6 GiB (extrapolated) | **210 MiB** |
+
+**The streaming column is flat, not merely slower-growing** — the last two rows differ by
+4× in input and 5 MiB in the wrong direction, which is measurement noise. What is left
+resident is the sort buffer (`sortMemLimit`, 64 MiB) plus `O(depth × budget)` plus Go's GC
+headroom, none of which grows with the file count. The tree column is a straight line
+through ~470 B/node.
+
+Measured on a 4 GB machine, so the tree rows stop where they stop; that is itself the
+point. Note the temp files must be on real storage for a measurement like this to mean
+anything — on this box `/tmp` is a `tmpfs`, so the first attempt was spilling into RAM.
+
+**Two real defects the equivalence sweep caught**, both of which would have shipped as
+plausible wrong output rather than a crash:
+
+- **The root was never emitted to the matcher.** `closeTop` never runs for the virtual
+  root, so its digest and status never reached the index — and the root is a legitimate
+  copy source. Seed 6084 (`A = {/b}`, `B = {/c/b}`) should read `Removed b` + `Copy c/`,
+  because `c`'s digest equals the root's A-side digest; the stream reported
+  `Move c/b <- b` instead.
+- **`accumulateStats` counts the root itself as an unchanged directory**, so a diff with
+  nothing to report says "1 directory unchanged". The frame never counts itself — `closeTop`
+  does that, and the root never closes. Only visible with `--show-unchanged`, which is why
+  the harness now sweeps that flag too.
+
+**One tree-engine behaviour a stream cannot reproduce, and refuses to guess at.** A
+`matched` node freezes its subtree at stage 5 statuses (`propagateStatus` returns without
+recursing into it). That is invisible while the node collapses to one line — but a
+`FileTwin` whose fate differs forces `Mixed`, and the collector then prints those frozen
+children, where a stream has already rolled them up with the move statuses included.
+Reaching it needs a path that is a file **and** a directory *within the same snapshot*: a
+matched directory is never present in A, so its twin can only be the B-side file half. No
+filesystem holds both, the scanner cannot record both, and 200,000 generated tree pairs
+contain none. `streamCompare` returns `errStreamMatchedTwin` (wrapping
+`errStreamUnsupported`) and the caller falls back to the tree engine.
+
+**Two things carried over from Phase 2 as intended.** `rollupAccum`/`decideRollup` is still
+the single implementation of the rollup rules — the streaming engine feeds move and copy
+statuses (and their source paths) into the same accumulator rather than transcribing the
+rules a third time. And DFS-key ordering is still *verified* as the walk proceeds, on every
+pass, rather than trusted.
+
+**Two things that fell out of the work and are worth knowing:**
+
+- **Phase 2's retention bound had a hole in it.** The line budget was applied when a
+  directory closed, so a directory with a million changed children accumulated a million
+  lines and only then capped them. It is now applied as lines are appended, which is
+  equivalent output and actually `O(budget)`.
+- **The streaming engine never reported progress.** Nobody noticed while it only ran under
+  `--no-moves --no-copies`; the moment `auto` started streaming the ordinary diff, the
+  progress bar would have sat at 0% for the whole run. It reports per pass now, so a
+  multi-pass diff sweeps the bar once per pass.
+
+### Phase 4 — external fixed point (stage 8) — BUILT 2026-09-10, with Phase 3
+
+Folded into Phase 3 above, because the streaming engine reaches the fixed point by re-running
+the walk rather than by mutating a tree, which makes stage 8 the same machinery as stage 6's
+second pass rather than a separate mechanism. Converges in one round on every input measured;
+the bound of 32 is a guard.
 
 The invariant from [diff-algo.md](diff-algo.md) carries over unchanged and gets sharper
 teeth here: **anything that removes lines from the output must live inside the collector**,
 because stage 8 only sees what the collector emitted.
 
-### Phase 5 — engine selection and measurement — PARTLY BUILT 2026-09-10
+### Phase 5 — engine selection and measurement — BUILT 2026-09-10
 
-`--engine auto|memory|external`, defaulting to `auto` and switching on estimated node
-count (`GetFileCount` on both snapshots, so the choice costs one query). Keep the
-in-memory engine permanently: it is faster below a few million nodes, and it is the
-oracle for the equivalence test.
+`--engine auto|tree|streaming` (not the `memory|external` names guessed here), defaulting
+to `auto`. It does **not** switch on estimated node count: `auto` streams whenever the
+input arrives in DFS order and falls back only when the streaming engine says it cannot
+answer, so the choice costs nothing and cannot be wrong — a misjudged threshold would have
+been a silently worse memory profile. `--temp-dir` is the other knob; see
+[cli.md](cli.md), including the warning that the default may be a `tmpfs`.
+
+The tree engine is kept permanently, as planned: it is faster below a few million nodes,
+and it is the oracle for the equivalence test.
+
+Still unbuilt: nothing tunes `sortMemLimit` (a package-level 64 MiB) from the command line.
+It is the single largest resident item once a diff is big enough for the file count not to
+matter, so it is the knob to expose first if a fleet run needs to trade RAM for I/O.
 
 ## How this gets verified
 
 This is the highest-risk code in the project, so the acceptance test is equivalence, not
 inspection:
 
-- `property_test.go` runs **both engines on the same input and asserts identical
-  `[]DiffResult`** — for the hand-built scenarios, for the random trees (currently 5,000
-  seeds, clean to 400,000), and for the budgeted sweep.
+- `streaming_test.go` runs **both engines on the same input and asserts identical
+  `[]DiffResult`** — over the hand-built scenarios, over `property_test.go`'s random trees,
+  budgeted and not, and with `--show-unchanged` both on and off. Routine runs cover 5,000
+  seeds; **clean to 200,000 across all six combinations as of Phase 3**, which takes about
+  seven minutes and is the sweep to repeat after any change to either engine.
+  `external_test.go` adds the move-specific shapes, the switch combinations
+  (`--no-moves` and `--no-copies` each have their own path through the matcher), and a
+  run with the spill limits shrunk to a few kilobytes so the disk-backed halves of
+  `spillFile`, `recReader` and the sorter's run merge are actually executed — no
+  test-sized diff reaches them otherwise.
 - The two existing invariants — every differing file is accounted for somewhere; a
-  collapsed Added/Removed line never contradicts the snapshots — apply to the external
-  engine unchanged.
-- Add a large-tree memory test asserting a hard ceiling on `HeapInuse` for a synthetic
-  10M-node diff, so a regression is a test failure rather than a swap storm.
+  collapsed Added/Removed line never contradicts the snapshots — apply to the streaming
+  engine unchanged, and reach it through `CompareSnapshots`.
+- Boundedness is asserted structurally rather than by sampling the heap: the engine records
+  its own high-water marks (frames, retained lines, passes) and the tests assert that
+  **ten times the input does not move them at all**. Heap sampling for this is both noisy
+  and, at any useful rate, slower than the work being measured.
 
-## Estimated cost
+## Cost, as built
 
-Estimates, not measurements — nothing here has been built. For a 200M-node diff:
+Resident memory is `sortMemLimit` (64 MiB) + `O(depth × budget)` + I/O buffers + Go's GC
+headroom, which measured **215 MiB at 1.6M files a side** and stops tracking the file count
+from around there. Temp storage is smaller than the estimate this section used to carry,
+because there is no spine file:
 
-| Resource | Estimate |
+| Resource | For 200M nodes |
 |---|---|
-| Resident memory | sort buffer (tunable, ~256 MB–1 GB) + `O(depth × budget)` + I/O buffers |
-| Spine file | ~13 GB (front-coded paths ~15 B, digests 32 B, sizes 16 B, flags) |
-| Hash-sorted file | ~8 GB, plus ~8 GB transient during the merge |
-| Match + accounted files | ≤ 3 GB |
-| **Total temp storage** | **≈40 GB** for 200M nodes; ≈4 GB for 20M |
-| Wall clock | I/O-bound: a few tens of GB written, ~100 GB read across all passes |
+| Hash records (~45 B: 21 B hash, 8 B ordinal, 3 B flags, path on the source side) | ~9 GB, plus the same again transiently during the run merge |
+| Decisions (~20 B, only for nodes that actually matched) | ≤ 4 GB |
+| Candidates (one record per suppressed move source, per round) | ≤ 4 GB |
+| **Total temp storage** | **≈20 GB** for 200M nodes; ≈2 GB for 20M |
+| Passes over both snapshots | 1 for the matcher + 1 per fixed-point round (measured: 1) |
 
-Note that ~40 GB of temp space is itself a real constraint on a fleet with 8.11T free
-spread across pools at 94–96%. The temp directory must be configurable
-(`--temp-dir`), and the engine should refuse to start rather than fill a pool.
+**~20 GB of temp space is still a real constraint on a fleet with 8.11T free spread across
+pools at 94–96%,** which is what `--temp-dir` is for. Two things the engine does *not* yet
+do: check that the temp filesystem has room before starting, and warn when the default temp
+directory is a `tmpfs` (it is on most Linux systems, where spilling to it is spilling to
+RAM). Both are worth adding before the first fleet-scale run.
 
 ## The shortcut worth taking first — BUILT (2026-08-23)
 

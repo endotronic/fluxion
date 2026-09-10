@@ -110,13 +110,21 @@ on an ordinary machine; a 200M-node one still wants ~34 GB.
 **This is the issue that stalled the project.** The author reported needing ~200 GB of
 swap to diff real snapshots, which puts the working set at roughly 100-200M nodes.
 
-**Solved for diffs that do not need move detection** (2026-09-10): the streaming engine
-retains `O(depth x budget)` regardless of file count, measured at 10.7x lower peak RSS
-than the tree engine on a real 2.27M-file fleet diff with byte-identical output. Run it
-with `--no-moves --no-copies` (auto-selected) or force it with `--engine streaming`.
-Move/copy detection still needs the whole-tree index, so a diff that wants "where did it
-go" still pays the tree engine's memory - [diff-memory.md](diff-memory.md)'s Phase 3 is
-what would close that.
+**Solved** (2026-09-10): the streaming engine retains `O(depth x budget)` regardless of
+file count, measured at 10.7x lower peak RSS than the tree engine on a real 2.27M-file
+fleet diff with byte-identical output. It is what `--engine auto` picks whenever the input
+can be read in DFS order, which is every diff against a snapshot in the DB.
+
+Phase 3 (2026-09-10) removed the last restriction - move/copy detection, which needed a
+whole-tree hash index, now runs as an external sort. What remains resident is the sort
+buffer (a fixed 64 MiB) plus `O(depth x budget)`, so **peak RSS stops tracking the file
+count entirely**: 1.6M files a side measured 215 MiB and 6.4M a side measured 210 MiB,
+against a tree engine that extrapolates to ~1.5 GiB and ~6 GiB on the same inputs. The
+200M-node case that stalled the project is now a temp-storage question (~20 GB, see
+`--temp-dir`) rather than a memory one. See [diff-memory.md](diff-memory.md)'s Phase 3.
+
+The tree engine is kept permanently: it is faster below a few million nodes, and it is the
+oracle the streaming one is equivalence-tested against.
 
 Not blocking the fleet work in the meantime: the `coverage` command (2026-08-23) answers
 *"is it safe to delete this?"* without building the tree at all, in flat memory. Reach for

@@ -33,9 +33,15 @@
   `snapshot` dataset-by-dataset by hand. `--dry-run` prints the full plan with no mounting
   or DB writes. Does not read ZFS's own snapshot history — orthogonal to the dropped "ZFS
   tools" item above. See `knowledge/cli.md`
-- [ ] external/streaming diff engine so `diff` fits in 1 GB regardless of tree size —
-  six-phase plan in `knowledge/diff-memory.md`, starting with fixed-width digests
-  (issues 2.2/3.1) and `--engine auto|memory|external`
+- [x] external/streaming diff engine so `diff` fits in 1 GB regardless of tree size —
+  **done 2026-09-10**, all six phases of `knowledge/diff-memory.md`. Peak RSS measured
+  flat at ~210 MiB from 1.6M to 6.4M files a side, where the tree engine extrapolates to
+  ~1.5 GiB and ~6 GiB; move/copy detection runs as an external sort rather than a
+  whole-tree hash index. `--engine auto|tree|streaming` (not the `memory|external` names
+  planned) plus `--temp-dir`. Byte-identical to the tree engine over 200,000 property-test
+  seeds, budgeted and not, with `--show-unchanged` on and off. Still open: nothing exposes
+  the sort buffer size, and the engine does not check that the temp filesystem has room
+  (or warn that the default is usually a `tmpfs`) before starting
 - [ ] metadata-only scan mode (no hashing) so a 185T fleet can be triaged by size+name
   first and hashed only where trees actually overlap — blocked by the
   `CHECK (length(sha1) > 0 OR length(md5) > 0)` constraint on `files`
