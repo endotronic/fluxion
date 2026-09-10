@@ -15,6 +15,7 @@ import (
 type MountInfo struct {
 	Source string // The device or filesystem (e.g., /dev/sda1)
 	Target string // The mount point (e.g., /mnt/data)
+	FSType string // The filesystem type (e.g., ext4, zfs, tmpfs)
 }
 
 // GetMounts returns all active mounts with both source and target.
@@ -100,10 +101,11 @@ func getMountsLinux() ([]MountInfo, error) {
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) >= 2 {
-			mounts = append(mounts, MountInfo{
-				Source: fields[0], 
-				Target: fields[1],
-			})
+			m := MountInfo{Source: fields[0], Target: fields[1]}
+			if len(fields) >= 3 {
+				m.FSType = fields[2]
+			}
+			mounts = append(mounts, m)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -120,20 +122,74 @@ func getMountsDarwin() ([]MountInfo, error) {
 	}
 
 	// Output format: /dev/disk1s1 on / (apfs, local, journaled)
-	// Regex: `^(.+) on (.+) \(`
-	re := regexp.MustCompile(`^(.+) on (.+) \(`)
-	
+	re := regexp.MustCompile(`^(.+) on (.+) \(([^,)]+)`)
+
 	var mounts []MountInfo
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 	for scanner.Scan() {
 		line := scanner.Text()
 		matches := re.FindStringSubmatch(line)
 		if len(matches) > 2 {
-			mounts = append(mounts, MountInfo{
-				Source: matches[1],
-				Target: matches[2],
-			})
+			m := MountInfo{Source: matches[1], Target: matches[2]}
+			if len(matches) > 3 {
+				m.FSType = strings.TrimSpace(matches[3])
+			}
+			mounts = append(mounts, m)
 		}
 	}
 	return mounts, nil
+}
+
+// FSTypeAt returns the filesystem type backing path - the type of the
+// most-specific mount point containing it.
+//
+// Callers use it to tell a real filesystem from a memory-backed one. On most
+// Linux systems /tmp is a tmpfs, so a program that "spills to disk" through the
+// default temp directory is spilling to RAM, which is worth saying out loud when
+// the entire point of spilling was to stay off the heap.
+func FSTypeAt(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	mounts, err := GetMounts()
+	if err != nil {
+		return "", err
+	}
+
+	best, bestType := "", ""
+	for _, m := range mounts {
+		if !mountContains(m.Target, abs) {
+			continue
+		}
+		if len(m.Target) >= len(best) {
+			best, bestType = m.Target, m.FSType
+		}
+	}
+	if best == "" {
+		return "", fmt.Errorf("no mount point found for %s", path)
+	}
+	return bestType, nil
+}
+
+// IsMemoryBackedFS reports whether a filesystem type stores its contents in RAM.
+func IsMemoryBackedFS(fsType string) bool {
+	switch fsType {
+	case "tmpfs", "ramfs", "devtmpfs":
+		return true
+	}
+	return false
+}
+
+// mountContains reports whether path is at or under mount, matching only at a
+// path boundary so /mnt/data2 is not treated as living under /mnt/data.
+func mountContains(mount, path string) bool {
+	mount, path = filepath.Clean(mount), filepath.Clean(path)
+	if mount == path {
+		return true
+	}
+	if mount[len(mount)-1] == filepath.Separator {
+		return strings.HasPrefix(path, mount) // the root
+	}
+	return strings.HasPrefix(path, mount+string(filepath.Separator))
 }

@@ -49,6 +49,34 @@ const (
 	roleTarget = byte(1)
 )
 
+// EstimateTempBytes is a deliberately pessimistic estimate of the temp disk the
+// streaming engine's move/copy matching will occupy at once, for a diff of
+// `nodes` nodes whose paths average `avgPathLen` bytes.
+//
+// It exists so a caller can refuse to start rather than fill a pool - on the
+// fleet in knowledge/fleet.md every pool is at 94-96%, where "run it and see" is
+// not an option. Measured against the real thing at 65 B/node when the sort fits
+// in one run and 86 B/node when it merges (~20-byte paths), so this is roughly
+// double the worst case observed. Erring high costs the user a --temp-dir flag;
+// erring low costs them a full filesystem in the middle of an hours-long run.
+//
+// TestExternal_TempEstimateIsNotOptimistic asserts the direction of that error
+// against the measured peak, so the constants stay honest as the record format
+// changes.
+func EstimateTempBytes(nodes int64, avgPathLen int) int64 {
+	if nodes <= 0 {
+		return 0
+	}
+	if avgPathLen < 0 {
+		avgPathLen = 0
+	}
+	// Per node: a source record (fixed 36 B plus its path) and a target record
+	// (fixed 36 B), doubled because the sorted output coexists with the runs it
+	// was merged from, plus decision and candidate records at a path each.
+	perNode := int64(2*(36+36+avgPathLen) + (20 + avgPathLen))
+	return nodes * perNode
+}
+
 // decision is what the matcher concluded about one node.
 type decision struct {
 	status Status // StatusMove, StatusCopy, StatusMovedSource, or zero for none
@@ -56,7 +84,7 @@ type decision struct {
 }
 
 func externalCompare(iterA, iterB FileIterator, opts Options) ([]DiffResult, error) {
-	return (&externalDiff{opts: opts}).compare(iterA, iterB)
+	return newExternalDiff(opts).compare(iterA, iterB)
 }
 
 // externalDiff is the multi-pass driver. It exists as a struct so its cost is
@@ -69,6 +97,26 @@ type externalDiff struct {
 	passes     int
 	peakFrames int
 	peakLines  int
+
+	// meter is both the record of what this diff cost in temp disk and the
+	// guard that stops it filling the filesystem.
+	meter spillMeter
+}
+
+// newExternalDiff wires the temp-space guard up from the options.
+func newExternalDiff(opts Options) *externalDiff {
+	x := &externalDiff{opts: opts}
+	x.meter.dir = opts.TempDir
+	x.meter.checkEvery = 64 << 20
+	switch {
+	case opts.MinFreeTempBytes < 0:
+		x.meter.minFree = 0 // explicitly disabled
+	case opts.MinFreeTempBytes == 0:
+		x.meter.minFree = DefaultMinFreeTempBytes
+	default:
+		x.meter.minFree = opts.MinFreeTempBytes
+	}
+	return x
 }
 
 func (x *externalDiff) note(e *streamEngine) {
@@ -105,7 +153,7 @@ func (x *externalDiff) compare(iterA, iterB FileIterator) ([]DiffResult, error) 
 		if demotions != nil {
 			e.demotions = newOrdinalCursor(demotions)
 		}
-		candidates := newSpill(opts.TempDir)
+		candidates := newSpill(opts.TempDir, &x.meter)
 		e.candidates = candidates
 
 		if err := e.run(iterA, iterB); err != nil {
@@ -123,7 +171,7 @@ func (x *externalDiff) compare(iterA, iterB FileIterator) ([]DiffResult, error) 
 			return results, nil
 		}
 
-		reinstated, n, err := unnamedSources(candidates, accountedPaths(results), opts.TempDir)
+		reinstated, n, err := unnamedSources(candidates, accountedPaths(results), opts.TempDir, &x.meter)
 		candidates.close()
 		if err != nil {
 			return nil, err
@@ -133,7 +181,7 @@ func (x *externalDiff) compare(iterA, iterB FileIterator) ([]DiffResult, error) 
 			return results, nil
 		}
 
-		merged, err := mergeOrdinals(demotions, reinstated, opts.TempDir)
+		merged, err := mergeOrdinals(demotions, reinstated, opts.TempDir, &x.meter)
 		reinstated.close()
 		if err != nil {
 			return nil, err
@@ -149,7 +197,7 @@ func (x *externalDiff) compare(iterA, iterB FileIterator) ([]DiffResult, error) 
 // ordinal order. The caller owns the result.
 func (x *externalDiff) matchExternally(iterA, iterB FileIterator) (*spillFile, error) {
 	opts := x.opts
-	sorter := newExtSorter(opts.TempDir, hashKeyLen)
+	sorter := newExtSorter(opts.TempDir, hashKeyLen, &x.meter)
 
 	e := newStreamEngine(opts, true)
 	var scratch []byte
@@ -169,7 +217,7 @@ func (x *externalDiff) matchExternally(iterA, iterB FileIterator) (*spillFile, e
 	}
 	defer sorted.close()
 
-	return matchGroups(sorted, opts)
+	return matchGroups(sorted, opts, &x.meter)
 }
 
 // writeHashRecords emits a node's source and target records - the two halves of
@@ -245,8 +293,8 @@ func parseHashRecord(rec []byte) hashRecord {
 
 // matchGroups scans the sorted records one content group at a time and writes
 // the decisions, sorted by ordinal. The caller owns the result.
-func matchGroups(sorted *spillFile, opts Options) (*spillFile, error) {
-	out := newExtSorter(opts.TempDir, ordKeyLen)
+func matchGroups(sorted *spillFile, opts Options, meter *spillMeter) (*spillFile, error) {
+	out := newExtSorter(opts.TempDir, ordKeyLen, meter)
 
 	main := newRecReader(sorted, 0, sorted.size)
 	var cur [21]byte
@@ -509,11 +557,11 @@ func (c *ordinalCursor) at(ord int64) bool {
 // walk, and a directory that turns out to be a suppressed source itself replaces
 // its subtree's records with its own, which is a truncation back to where the
 // subtree started.
-func unnamedSources(candidates *spillFile, named map[string]bool, tmpDir string) (*spillFile, int, error) {
+func unnamedSources(candidates *spillFile, named map[string]bool, tmpDir string, meter *spillMeter) (*spillFile, int, error) {
 	if err := candidates.flush(); err != nil {
 		return nil, 0, err
 	}
-	out := newSpill(tmpDir)
+	out := newSpill(tmpDir, meter)
 	r := newRecReader(candidates, 0, candidates.size)
 	n := 0
 	w := ordWriter{out: out}
@@ -545,8 +593,8 @@ func unnamedSources(candidates *spillFile, named map[string]bool, tmpDir string)
 
 // mergeOrdinals unions two ordinal-ordered lists. The demotion set is
 // cumulative, so this is how a round's findings are added to it.
-func mergeOrdinals(a, b *spillFile, tmpDir string) (*spillFile, error) {
-	out := newSpill(tmpDir)
+func mergeOrdinals(a, b *spillFile, tmpDir string, meter *spillMeter) (*spillFile, error) {
+	out := newSpill(tmpDir, meter)
 	var ca, cb *ordinalCursor
 	if a != nil {
 		ca = newOrdinalCursor(a)

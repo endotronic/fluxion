@@ -18,17 +18,31 @@ func GetFSUsage(path string) (usedBytes uint64, totalBytes uint64, err error) {
 	// Calculate sizes
 	// Note: Types of fields in Statfs_t vary by platform (int32/int64/uint64)
 	// We cast to uint64 for consistency and safety.
-	
+
 	bsize := uint64(stat.Bsize)
 	totalBytes = uint64(stat.Blocks) * bsize
-	
+
 	// Available blocks to non-root user is usually Bavail, but Bfree is total free blocks.
 	// We usually want "Used" = Total - Free.
 	freeBytes := uint64(stat.Bfree) * bsize
-	
+
 	usedBytes = totalBytes - freeBytes
-	
+
 	return usedBytes, totalBytes, nil
+}
+
+// GetFSAvail returns the bytes still writable by an unprivileged user on the
+// filesystem containing path.
+//
+// Bavail, not Bfree: the difference is the root reserve, and a diff spilling
+// intermediates is not running as root's last resort. Reporting the reserve as
+// usable is how a "there is room" check ends up filling a filesystem.
+func GetFSAvail(path string) (uint64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, fmt.Errorf("statfs failed for %s: %w", path, err)
+	}
+	return uint64(stat.Bavail) * uint64(stat.Bsize), nil
 }
 
 // GetRecursiveFSUsage calculates the total usage of the directory and any sub-mounts.
@@ -47,7 +61,7 @@ func GetRecursiveFSUsage(root string) (usedBytes uint64, totalBytes uint64, foun
 	mounts, err := GetMountPoints()
 	if err != nil {
 		// If we fail to list mounts, just return the base usage.
-		return usedBytes, totalBytes, nil, nil 
+		return usedBytes, totalBytes, nil, nil
 	}
 
 	// 3. Clean root path for comparison
@@ -55,7 +69,7 @@ func GetRecursiveFSUsage(root string) (usedBytes uint64, totalBytes uint64, foun
 	if err != nil {
 		return usedBytes, totalBytes, nil, nil
 	}
-	
+
 	for _, m := range mounts {
 		// Skip if it's the root itself (already counted in step 1)
 		if m == rootAbs {
@@ -67,7 +81,7 @@ func GetRecursiveFSUsage(root string) (usedBytes uint64, totalBytes uint64, foun
 		if err != nil {
 			continue
 		}
-		
+
 		// If rel does not start with "..", it is inside.
 		if !strings.HasPrefix(rel, "..") {
 			// Found a sub-mount!
@@ -82,4 +96,3 @@ func GetRecursiveFSUsage(root string) (usedBytes uint64, totalBytes uint64, foun
 
 	return usedBytes, totalBytes, foundMounts, nil
 }
-

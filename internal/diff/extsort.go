@@ -23,6 +23,7 @@ var sortMemLimit = 64 << 20
 type extSorter struct {
 	dir    string
 	keyLen int
+	meter  *spillMeter
 
 	arena []byte // packed framed records
 	offs  []int  // frame offsets into arena
@@ -30,8 +31,8 @@ type extSorter struct {
 	err   error
 }
 
-func newExtSorter(dir string, keyLen int) *extSorter {
-	return &extSorter{dir: dir, keyLen: keyLen}
+func newExtSorter(dir string, keyLen int, meter *spillMeter) *extSorter {
+	return &extSorter{dir: dir, keyLen: keyLen, meter: meter}
 }
 
 func (s *extSorter) add(payload []byte) error {
@@ -89,7 +90,7 @@ func (s *extSorter) flushRun() error {
 		return nil
 	}
 	s.sortPending()
-	run := newSpill(s.dir)
+	run := newSpill(s.dir, s.meter)
 	for _, off := range s.offs {
 		n := recHeaderLen + int(leUint32(s.arena[off:]))
 		if _, err := run.Write(s.arena[off : off+n]); err != nil {
@@ -116,7 +117,7 @@ func (s *extSorter) finish() (*spillFile, error) {
 		// Everything fit in memory: sort in place and write one log. This is
 		// the path every test-sized diff takes, and it never touches the disk.
 		s.sortPending()
-		out := newSpill(s.dir)
+		out := newSpill(s.dir, s.meter)
 		for _, off := range s.offs {
 			n := recHeaderLen + int(leUint32(s.arena[off:]))
 			if _, err := out.Write(s.arena[off : off+n]); err != nil {
@@ -153,7 +154,7 @@ func (s *extSorter) mergeRuns() (*spillFile, error) {
 	}
 	heap.Init(h)
 
-	out := newSpill(s.dir)
+	out := newSpill(s.dir, s.meter)
 	var frame []byte
 	for h.Len() > 0 {
 		c := h.cursors[0]

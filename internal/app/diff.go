@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 	"fluxion/internal/models"
 	"fluxion/internal/store"
 	"fluxion/internal/store/sqlite"
+	"fluxion/internal/util"
 
 	"github.com/schollz/progressbar/v3"
 	"github.com/sirupsen/logrus"
@@ -110,7 +112,6 @@ func RunDiff(cfg DiffConfig) error {
 	countA, _ := dbStore.GetFileCount(oldID)
 	countB, _ := dbStore.GetFileCount(newID)
 	totalExpected := countA + countB
-	barDiff := progressbar.Default(totalExpected)
 
 	// The streaming engine needs DFS-key order, which costs a temp b-tree sort;
 	// there is no reason to pay for it when the tree engine is going to run
@@ -119,6 +120,17 @@ func RunDiff(cfg DiffConfig) error {
 	// CompareSnapshots detects unusable ordering and falls back - only a wasted
 	// sort or a missed opportunity to stream.
 	streamable := cfg.Engine != diff.EngineTree
+
+	// Advise on temp space before starting rather than after an hour of work.
+	// This only advises: the hard stop lives in the engine, which statfs's as it
+	// writes and refuses while there is still room to refuse in. An up-front
+	// estimate has to be pessimistic enough that gating on it would turn away
+	// runs that would have fitted.
+	if streamable && !(cfg.NoMoves && cfg.NoCopies) {
+		reportTempSpace(cfg.TempDir, totalExpected)
+	}
+
+	barDiff := progressbar.Default(totalExpected)
 
 	// Helper to create iterator
 	createIter := func(id int64, rootPath string) diff.FileIterator {
@@ -372,4 +384,55 @@ func isExcluded(path, root string, excludes []string) bool {
 		}
 	}
 	return false
+}
+
+// assumedAvgPathLen is what the temp-space estimate charges per path when it has
+// no cheap way to measure. Deliberately generous: fleet paths
+// (knowledge/fleet.md) run to well over a hundred bytes, and the estimate's only
+// job is to not be optimistic.
+const assumedAvgPathLen = 120
+
+// tempSpaceWorthMentioning is the estimate below which none of this is worth a
+// line of output: the intermediates for a diff that small never leave memory at
+// all, so free space and filesystem type are both irrelevant. A var so a test
+// can reach the advisory without a million-file snapshot.
+var tempSpaceWorthMentioning int64 = 256 << 20
+
+// reportTempSpace tells the user what the diff's intermediates may cost and
+// whether the temp directory can take it, before the run rather than after.
+//
+// Two things are worth saying out loud. Free space, because the fleet's pools
+// sit at 94-96% and tens of gigabytes of intermediates are not free. And the
+// filesystem type, because on most Linux systems the default temp directory is a
+// tmpfs - which is RAM, so a diff that spills there is not spilling at all, and
+// the memory bound the streaming engine exists to provide quietly stops holding.
+func reportTempSpace(tempDir string, nodes int64) {
+	where := tempDir
+	if where == "" {
+		where = os.TempDir()
+	}
+
+	need := diff.EstimateTempBytes(nodes, assumedAvgPathLen)
+	if need < tempSpaceWorthMentioning {
+		// A diff of a few thousand files never leaves memory. Saying anything
+		// about temp space here would be noise on every ordinary run.
+		return
+	}
+
+	if fsType, err := util.FSTypeAt(where); err == nil && util.IsMemoryBackedFS(fsType) {
+		logrus.Warnf("Temp directory %s is a %s, which is memory - the diff's intermediates "+
+			"will not leave RAM. Pass --temp-dir to put them on real storage.", where, fsType)
+	}
+
+	free, err := util.GetFSAvail(where)
+	if err != nil {
+		logrus.Debugf("Could not check free space on %s: %v", where, err)
+		return
+	}
+	logrus.Infof("Temp space: %s free at %s; this diff may use up to %s (typically far less)",
+		util.FormatBytes(int64(free)), where, util.FormatBytes(need))
+	if int64(free) < need {
+		logrus.Warnf("That may not be enough. The diff will stop rather than fill %s; "+
+			"pass --temp-dir to use a filesystem with more room.", where)
+	}
 }

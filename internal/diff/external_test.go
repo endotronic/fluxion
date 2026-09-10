@@ -1,9 +1,11 @@
 package diff
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
+	"strings"
 	"testing"
 
 	"fluxion/internal/models"
@@ -33,7 +35,7 @@ func TestExternal_RetentionIsBoundedWithMovesOn(t *testing.T) {
 	for _, n := range []int{20_000, 200_000} {
 		a, b := build(n, "old"), build(n, "new")
 
-		x := &externalDiff{opts: streamOpts(budget)}
+		x := newExternalDiff(streamOpts(budget))
 		if _, err := x.compare(dfsIter(a), dfsIter(b)); err != nil {
 			t.Fatalf("n=%d: %v", n, err)
 		}
@@ -340,7 +342,7 @@ func TestExternal_FixedPointConverges(t *testing.T) {
 	for seed := int64(0); seed < 20000; seed++ {
 		a, b := generateTreePair(rand.New(rand.NewSource(seed)))
 		for _, budget := range []int{0, 1} {
-			x := &externalDiff{opts: streamOpts(budget)}
+			x := newExternalDiff(streamOpts(budget))
 			if _, err := x.compare(dfsIter(a), dfsIter(b)); err != nil {
 				t.Fatalf("seed %d: %v", seed, err)
 			}
@@ -363,5 +365,113 @@ func TestExternal_FixedPointConverges(t *testing.T) {
 	}
 	if rounds[1] == 0 {
 		t.Error("no input finished in a single round - the fixed point is now always paying an extra full re-walk")
+	}
+}
+
+// EstimateTempBytes is what a caller refuses to start on, so the only property
+// that matters is the direction of its error: it must never come in under what
+// the engine actually occupies. Checked against the measured peak on shapes that
+// really do spill, including one that forces a multi-run merge - the case where
+// the sorted output coexists with the runs it came from and temp usage roughly
+// doubles.
+func TestExternal_TempEstimateIsNotOptimistic(t *testing.T) {
+	const pathLen = 20 // "/old/d0000/f0000.txt"
+
+	for _, n := range []int{100_000, 400_000} {
+		for _, sortMem := range []int{64 << 20, 4 << 20} { // one run, then many
+			defer swapLimits(sortMem, spillMemLimit)()
+
+			gen := func(prefix string) FileIterator {
+				return func(yield func(string, models.FileRecord) error) error {
+					for i := 0; i < n; i++ {
+						p := fmt.Sprintf("/%s/d%04d/f%04d.txt", prefix, i/1000, i%1000)
+						if err := yield(p, models.FileRecord{
+							Path: p, SizeBytes: 10, SHA1: fmt.Sprintf("%040x", i),
+						}); err != nil {
+							return err
+						}
+					}
+					return nil
+				}
+			}
+
+			x := newExternalDiff(Options{
+				RootA: "/", RootB: "/", HashType: "sha1",
+				MaxLinesPerDir: DefaultMaxLinesPerDir, TempDir: t.TempDir(),
+			})
+			if _, err := x.compare(gen("old"), gen("new")); err != nil {
+				t.Fatalf("n=%d: %v", n, err)
+			}
+
+			// Every file, every directory, on both sides.
+			nodes := int64(2 * (n + n/1000 + 1))
+			est := EstimateTempBytes(nodes, pathLen)
+			t.Logf("n=%d sortMem=%dMiB: peak %d B (%.1f B/node), estimate %d B (%.1f B/node)",
+				n, sortMem>>20, x.meter.peak, float64(x.meter.peak)/float64(nodes),
+				est, float64(est)/float64(nodes))
+
+			if est < x.meter.peak {
+				t.Errorf("n=%d sortMem=%dMiB: estimate %d is below the measured peak %d - "+
+					"a caller sizing a run against this would fill the filesystem",
+					n, sortMem>>20, est, x.meter.peak)
+			}
+		}
+	}
+}
+
+// The guard has to stop a run that would fill the temp filesystem, and it has to
+// stop it as an error rather than as a short diff - a partial answer that looks
+// complete is the failure goals.md ranks worst. Driven through the statfs hook
+// rather than by actually filling a filesystem.
+func TestExternal_RefusesWhenTempSpaceRunsOut(t *testing.T) {
+	// One run's worth of intermediates, then the filesystem "fills".
+	var calls int
+	restore := tempFreeBytes
+	tempFreeBytes = func(string) (int64, error) {
+		calls++
+		if calls > 1 {
+			return 1 << 20, nil // 1 MiB left, below any sane reserve
+		}
+		return 100 << 30, nil
+	}
+	defer func() { tempFreeBytes = restore }()
+
+	defer swapLimits(sortMemLimit, 1<<10)() // force everything onto "disk" early
+
+	const n = 60_000
+	gen := func(prefix string) FileIterator {
+		return func(yield func(string, models.FileRecord) error) error {
+			for i := 0; i < n; i++ {
+				p := fmt.Sprintf("/%s/d%03d/f%04d", prefix, i/500, i%500)
+				if err := yield(p, models.FileRecord{
+					Path: p, SizeBytes: 10, SHA1: fmt.Sprintf("%040x", i),
+				}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
+	opts := Options{RootA: "/", RootB: "/", HashType: "sha1",
+		MaxLinesPerDir: DefaultMaxLinesPerDir, TempDir: t.TempDir()}
+	x := newExternalDiff(opts)
+	x.meter.checkEvery = 1 << 20 // look often, so the test does not need to be huge
+
+	results, err := x.compare(gen("old"), gen("new"))
+	if !errors.Is(err, errTempSpaceExhausted) {
+		t.Fatalf("err = %v, want errTempSpaceExhausted", err)
+	}
+	if results != nil {
+		t.Errorf("got %d results alongside the error; a partial diff must not be returned", len(results))
+	}
+	if msg := err.Error(); !strings.Contains(msg, "--temp-dir") {
+		t.Errorf("error does not tell the user what to do about it: %q", msg)
+	}
+
+	// A negative reserve is the caller saying the filesystem is theirs to fill.
+	opts.MinFreeTempBytes = -1
+	if _, err := newExternalDiff(opts).compare(gen("old"), gen("new")); err != nil {
+		t.Errorf("MinFreeTempBytes < 0 should disable the guard, got %v", err)
 	}
 }

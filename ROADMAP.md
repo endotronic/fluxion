@@ -39,9 +39,11 @@
   ~1.5 GiB and ~6 GiB; move/copy detection runs as an external sort rather than a
   whole-tree hash index. `--engine auto|tree|streaming` (not the `memory|external` names
   planned) plus `--temp-dir`. Byte-identical to the tree engine over 200,000 property-test
-  seeds, budgeted and not, with `--show-unchanged` on and off. Still open: nothing exposes
-  the sort buffer size, and the engine does not check that the temp filesystem has room
-  (or warn that the default is usually a `tmpfs`) before starting
+  seeds, budgeted and not, with `--show-unchanged` on and off. Temp space is guarded two
+  ways: an advisory estimate against free space up front (plus a warning when the temp
+  directory is a `tmpfs`, which the default usually is), and a hard abort in the engine
+  once writing would leave less than 512 MiB free. Still open: nothing exposes the sort
+  buffer size from the command line
 - [ ] metadata-only scan mode (no hashing) so a 185T fleet can be triaged by size+name
   first and hashed only where trees actually overlap — blocked by the
   `CHECK (length(sha1) > 0 OR length(md5) > 0)` constraint on `files`

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"fluxion/internal/util"
 )
 
 // Phase 3 of knowledge/diff-memory.md needs somewhere to put the intermediate
@@ -26,6 +28,118 @@ import (
 // per-file figure rather than a budget for the phase.
 var spillMemLimit = 8 << 20
 
+// DefaultMinFreeTempBytes is how much room the streaming engine insists on
+// leaving on the temp filesystem. On the fleet in knowledge/fleet.md every pool
+// sits at 94-96%, where the last gigabyte is not a rounding error - and the
+// thing being protected is the filesystem the user still has to work on after
+// the diff is abandoned.
+const DefaultMinFreeTempBytes = 512 << 20
+
+// errTempSpaceExhausted reports that the temp filesystem ran too low to keep
+// going. It is deliberately a hard stop: a partial diff that looks complete is
+// the failure knowledge/goals.md ranks worst, and there is no way to finish
+// honestly once the intermediates cannot be written.
+var errTempSpaceExhausted = errors.New("diff: not enough free space for the diff's temporary files")
+
+// spillMeter tracks how much temp *disk* a diff is using across all its
+// intermediates at once - bytes still in memory do not count, because the
+// question it answers is "will this fill the filesystem".
+//
+// It also enforces the answer. An up-front estimate has to be pessimistic
+// enough to be useless as a hard gate (see EstimateTempBytes, which runs three
+// to five times the observed figure), so the real check is here: statfs the temp
+// directory as the intermediates grow, and stop while there is still room to
+// stop in. That refuses when the run genuinely would fill the filesystem rather
+// than when a guess says it might.
+type spillMeter struct {
+	live int64
+	peak int64
+
+	// Guard state. checkEvery is how many bytes may be written between statfs
+	// calls: the check costs a syscall, and one per Write on a fleet-size diff
+	// would be millions of them.
+	dir        string
+	minFree    int64
+	checkEvery int64
+	sinceCheck int64
+	err        error
+}
+
+func (m *spillMeter) add(n int64) {
+	if m == nil {
+		return
+	}
+	m.live += n
+	if m.live > m.peak {
+		m.peak = m.live
+	}
+	m.sinceCheck += n
+}
+
+func (m *spillMeter) sub(n int64) {
+	if m == nil {
+		return
+	}
+	m.live -= n
+}
+
+// tempFreeBytes reports free space on the filesystem holding dir. A variable so
+// the guard can be driven from a test without filling a real filesystem.
+var tempFreeBytes = func(dir string) (int64, error) {
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	n, err := util.GetFSAvail(dir)
+	return int64(n), err
+}
+
+// check statfs's the temp filesystem if enough has been written since the last
+// look, and returns an error once it is too full to continue.
+func (m *spillMeter) check() error {
+	if m == nil || m.minFree <= 0 {
+		return nil
+	}
+	if m.err != nil {
+		return m.err
+	}
+	if m.sinceCheck < m.checkEvery {
+		return nil
+	}
+	m.sinceCheck = 0
+
+	free, err := tempFreeBytes(m.dir)
+	if err != nil {
+		// Not being able to ask is not a reason to stop: the run is still
+		// correct, and the guard is a courtesy to the filesystem.
+		return nil
+	}
+	if free < m.minFree {
+		where := m.dir
+		if where == "" {
+			where = os.TempDir() + " (the system default)"
+		}
+		m.err = fmt.Errorf("%w: %s has %s free, below the %s this diff keeps in reserve; "+
+			"point --temp-dir at a filesystem with room",
+			errTempSpaceExhausted, where, humanBytes(free), humanBytes(m.minFree))
+		return m.err
+	}
+	return nil
+}
+
+// humanBytes formats a byte count for an error a person has to act on.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
 // spillFile is an append-only log of bytes, readable at any offset and
 // truncatable back to any offset. Writes go to memory until spillMemLimit is
 // exceeded, at which point the whole thing moves to a temp file and stays
@@ -33,15 +147,18 @@ var spillMemLimit = 8 << 20
 type spillFile struct {
 	dir   string
 	limit int
+	meter *spillMeter
 
 	mem  []byte
 	f    *os.File
 	w    *bufio.Writer
 	size int64
+
+	onDiskBytes int64 // what this file is charging the meter for
 }
 
-func newSpill(dir string) *spillFile {
-	return &spillFile{dir: dir, limit: spillMemLimit}
+func newSpill(dir string, meter *spillMeter) *spillFile {
+	return &spillFile{dir: dir, limit: spillMemLimit, meter: meter}
 }
 
 func (s *spillFile) Write(p []byte) (int, error) {
@@ -57,7 +174,20 @@ func (s *spillFile) Write(p []byte) (int, error) {
 	}
 	n, err := s.w.Write(p)
 	s.size += int64(n)
+	s.charge()
+	if err == nil {
+		err = s.meter.check()
+	}
 	return n, err
+}
+
+// charge brings the meter in line with what this file now occupies on disk.
+func (s *spillFile) charge() {
+	if s.f == nil {
+		return
+	}
+	s.meter.add(s.size - s.onDiskBytes)
+	s.onDiskBytes = s.size
 }
 
 func (s *spillFile) moveToDisk() error {
@@ -78,6 +208,7 @@ func (s *spillFile) moveToDisk() error {
 		return err
 	}
 	s.mem, s.f, s.w = nil, f, w
+	s.charge()
 	return nil
 }
 
@@ -129,6 +260,8 @@ func (s *spillFile) truncate(off int64) error {
 	}
 	s.w.Reset(s.f)
 	s.size = off
+	s.meter.sub(s.onDiskBytes - s.size)
+	s.onDiskBytes = s.size
 	return nil
 }
 
@@ -137,9 +270,11 @@ func (s *spillFile) close() error {
 	if s.f == nil {
 		return nil
 	}
+	s.meter.sub(s.onDiskBytes)
+	s.onDiskBytes = 0
 	f := s.f
 	s.f, s.w = nil, nil
-	return f.Close() // already unlinked
+	return f.Close() // already unlinked, so the space is reclaimed here
 }
 
 // onDisk reports whether this log outgrew memory. Only tests care.

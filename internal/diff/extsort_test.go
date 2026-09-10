@@ -26,7 +26,8 @@ func TestExtSorter_SortsAndSpills(t *testing.T) {
 		t.Run(limits.name, func(t *testing.T) {
 			defer swapLimits(limits.sortMem, limits.spillMem)()
 
-			s := newExtSorter(t.TempDir(), keyLen)
+			var meter spillMeter
+			s := newExtSorter(t.TempDir(), keyLen, &meter)
 			r := rand.New(rand.NewSource(7))
 			want := make([]uint64, 0, n)
 			for i := 0; i < n; i++ {
@@ -82,7 +83,7 @@ func TestSpillFile_Truncate(t *testing.T) {
 	for _, limit := range []int{8 << 20, 16} {
 		defer swapLimits(sortMemLimit, limit)()
 
-		s := newSpill(t.TempDir())
+		s := newSpill(t.TempDir(), nil)
 		var frame []byte
 		for i := 0; i < 100; i++ {
 			frame = appendRecord(frame[:0], []byte(fmt.Sprintf("record-%03d", i)))

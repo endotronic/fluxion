@@ -521,10 +521,28 @@ because there is no spine file:
 | Passes over both snapshots | 1 for the matcher + 1 per fixed-point round (measured: one round in 76% of runs, two in 24%, four at worst — see Phase 4) |
 
 **~20 GB of temp space is still a real constraint on a fleet with 8.11T free spread across
-pools at 94–96%,** which is what `--temp-dir` is for. Two things the engine does *not* yet
-do: check that the temp filesystem has room before starting, and warn when the default temp
-directory is a `tmpfs` (it is on most Linux systems, where spilling to it is spilling to
-RAM). Both are worth adding before the first fleet-scale run.
+pools at 94–96%,** which is what `--temp-dir` is for. Both guards are now built (2026-09-10),
+and they are deliberately of two different kinds:
+
+- **The up-front estimate is advice, not a gate.** `EstimateTempBytes` is an upper bound on
+  the record format, and it runs three to five times the measured peak (224 B/node estimated
+  against 46–69 B/node measured, on ~20-byte paths). Refusing on that would turn away runs
+  that would have fitted comfortably. `internal/app` logs it against free space, and warns
+  when the temp directory is memory-backed — on most Linux systems the default `/tmp` is a
+  `tmpfs`, so a diff "spilling to disk" there is not spilling at all and this whole phase's
+  bound quietly stops holding. Both are suppressed below a 256 MiB estimate, since an
+  ordinary diff never leaves memory.
+- **The hard stop is in the engine.** `spillMeter` `statfs`'s the temp directory every
+  64 MiB written and aborts once free space would drop below `DefaultMinFreeTempBytes`
+  (512 MiB), returning an error that names `--temp-dir` and **no results at all** — a
+  partial diff that looks complete is the failure [goals.md](goals.md) ranks worst. That
+  refuses when a run genuinely would fill the filesystem rather than when a guess says it
+  might, which is why the estimate is allowed to stay pessimistic.
+
+The measured figures come from `spillMeter.peak`, which is a permanent count of live temp
+*disk* (bytes still in memory are not disk), so the estimate can be checked against reality
+rather than re-guessed: `TestExternal_TempEstimateIsNotOptimistic` asserts the direction of
+its error on shapes that really spill.
 
 ## The shortcut worth taking first — BUILT (2026-08-23)
 

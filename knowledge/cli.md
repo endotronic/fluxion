@@ -116,11 +116,22 @@ fluxion d --db <db> [-u|--update] [-e|--exclude PATH]...
   once they outgrow memory. Small diffs never touch the disk at all — the intermediates
   stay in memory until they exceed a limit — so this only matters at scale, where it
   matters a lot: the records for a 200M-node diff run to tens of gigabytes.
-  **Check what the default actually is before relying on it.** On most Linux systems `/tmp`
-  is a `tmpfs`, which is RAM — spilling there defeats the whole point and can take the
-  machine down. On the fleet ([fleet.md](fleet.md)) point this at a pool with room, and
-  remember the pools are at 94–96%. Files are unlinked as soon as they are created, so an
-  interrupted run cannot leave them behind.
+  **On most Linux systems the default `/tmp` is a `tmpfs`, which is RAM** — spilling there
+  defeats the whole point of the streaming engine and can take the machine down. `diff`
+  warns when it detects that, and prints free space against an estimate, but only for runs
+  big enough for either to matter. On the fleet ([fleet.md](fleet.md)) point this at a pool
+  with room, and remember the pools are at 94–96%. Files are unlinked the moment they are
+  created, so an interrupted run cannot leave them behind.
+
+  Two checks guard it, and they are deliberately different in kind. The up-front estimate is
+  **advice only** — it has to be pessimistic (three to five times what a run actually uses)
+  so gating on it would turn away runs that would have fitted. The hard stop is in the
+  engine, which `statfs`'s the temp filesystem as it writes and **aborts while there is
+  still room to abort in**, leaving `DefaultMinFreeTempBytes` (512 MiB) untouched. It fails
+  with an error naming `--temp-dir` rather than returning the partial diff it had — a short
+  diff that looks complete is the failure [goals.md](goals.md) ranks worst. A caller that
+  wants the filesystem filled can set `Options.MinFreeTempBytes` negative; there is no flag
+  for it.
 
 ## dupes
 

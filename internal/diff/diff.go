@@ -214,6 +214,11 @@ type Options struct {
 	// being diffed.
 	TempDir string
 
+	// MinFreeTempBytes is how much room the engine refuses to encroach on when
+	// spilling to TempDir. 0 means DefaultMinFreeTempBytes; negative disables
+	// the check, which is the caller saying the filesystem is theirs to fill.
+	MinFreeTempBytes int64
+
 	// Engine selects how the diff is computed. The zero value, EngineAuto,
 	// uses the streaming engine when it can answer the question asked and the
 	// tree engine otherwise - see CompareSnapshots.
