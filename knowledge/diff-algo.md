@@ -390,18 +390,19 @@ See stage 4 above. Was the single highest-value change available in this package
 built (`digestEntries`/`compactHash`), measured (200 MiB → 72.8 MiB retained heap on the
 200,000-file case), and validated against 400,000 property-test seeds.
 
-### Memory — reduced 5.75×, not solved
+### Memory — bounded in the streaming engine, reduced 5.75× in the tree engine
 
 Two identical 200,000-file snapshots now retain **34.1 MiB / 178 B per node**, down from
 200 MiB / ~1 KiB. [diff-memory.md](diff-memory.md) has the change-by-change table and what
 was deliberately left on the table.
 
-The tree is still fully materialised, so this is constant-factor work: a 200M-node diff
-still wants ~34 GB. It does move the practical ceiling a long way — a 10M-node diff went
-from ~10 GiB to ~1.7 GiB — but [diff-memory.md](diff-memory.md)'s Phases 2–5 (external
-sort-based streaming, replacing the tree with a DFS stream) remain what actually removes
-the `O(files)` scaling, and remain unbuilt. `coverage` is still the command to reach for at
-fleet scale, per [fleet.md](fleet.md).
+The tree is still fully materialised in *this* engine, so that part is constant-factor
+work: a 200M-node diff still wants ~34 GB. **`streamCompare` (Phase 2, built 2026-09-10)
+is not on that curve** — it retains `O(depth × budget)` and measured 10.7× lower peak RSS
+on a real 2.27M-file fleet diff, with byte-identical output. It cannot do move/copy
+detection yet, so `CompareSnapshots` streams when the options allow and falls back to this
+engine otherwise; [diff-memory.md](diff-memory.md) has both. `coverage` remains the right
+command for a pure delete decision, per [fleet.md](fleet.md).
 
 `TestMemory_UnifiedTree` asserts a per-node ceiling, so any of this regressing is a test
 failure rather than a swap storm.

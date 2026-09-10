@@ -49,7 +49,8 @@ fluxion s --db <db> [--name N] [--dir D] [--threads N] [--md5]
 
 ```
 fluxion d --db <db> [-u|--update] [-e|--exclude PATH]... 
-         [--no-copies] [--no-moves] [--show-unchanged] [--max-lines N] <A> <B>
+         [--no-copies] [--no-moves] [--show-unchanged] [--max-lines N]
+         [--engine auto|tree|streaming] <A> <B>
 ```
 
 `A` and `B` are snapshot IDs or names. Output symbols:
@@ -81,6 +82,24 @@ fluxion d --db <db> [-u|--update] [-e|--exclude PATH]...
   `data2/` and `database/`. Confirmed bug; see [known-issues.md](known-issues.md).
 - `--no-moves` / `--no-copies` disable the corresponding half of `detectMovesCopies`;
   setting both skips the stage entirely.
+- `--engine` (added 2026-09-10, default `auto`) picks how the diff is computed.
+  **`--no-moves --no-copies` is now also a memory decision, not just an output one**: with
+  both set, `auto` uses the streaming engine, which holds `O(depth × budget)` instead of
+  the whole tree. Measured on a real 2.27M-file fleet pair, peak RSS went from 1,362 MiB
+  to 127 MiB — **10.7× less, byte-identical output**. That is the difference between a
+  multi-million-file diff running on an ordinary machine and not.
+  - `auto` streams when it can and builds the tree when it cannot, so the answer is always
+    the full-featured one and only the memory profile changes. It falls back for the two
+    things streaming cannot do: move/copy detection, and input whose ordering it cannot
+    trust.
+  - `tree` always builds the in-memory tree — the full-featured engine, and the oracle the
+    streaming one is equivalence-tested against.
+  - `streaming` refuses rather than falling back, so a run that needs the memory bound
+    fails loudly instead of quietly consuming gigabytes. Requires `--no-moves --no-copies`.
+  - Streaming needs `IterateFilesDFS`'s ordering, which costs a temp b-tree sort in SQLite;
+    measured at roughly the cost of the plain ordering (1.45s vs 1.83s on 1.16M rows), and
+    only paid when streaming is actually in play. See [diff-memory.md](diff-memory.md)'s
+    Phase 2.
 
 ## dupes
 

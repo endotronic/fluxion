@@ -108,10 +108,15 @@ diff went from ~10 GiB to ~1.7 GiB, which is the difference between impossible a
 on an ordinary machine; a 200M-node one still wants ~34 GB.
 
 **This is the issue that stalled the project.** The author reported needing ~200 GB of
-swap to diff real snapshots, which puts the working set at roughly 100-200M nodes. It is
-severity 3 only by the numbering here; in practice it is what blocks the tool from being
-used at fleet scale. The plan to actually fix it is [diff-memory.md](diff-memory.md)'s
-Phases 2-5, still unbuilt.
+swap to diff real snapshots, which puts the working set at roughly 100-200M nodes.
+
+**Solved for diffs that do not need move detection** (2026-09-10): the streaming engine
+retains `O(depth x budget)` regardless of file count, measured at 10.7x lower peak RSS
+than the tree engine on a real 2.27M-file fleet diff with byte-identical output. Run it
+with `--no-moves --no-copies` (auto-selected) or force it with `--engine streaming`.
+Move/copy detection still needs the whole-tree index, so a diff that wants "where did it
+go" still pays the tree engine's memory - [diff-memory.md](diff-memory.md)'s Phase 3 is
+what would close that.
 
 Not blocking the fleet work in the meantime: the `coverage` command (2026-08-23) answers
 *"is it safe to delete this?"* without building the tree at all, in flat memory. Reach for

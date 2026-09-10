@@ -12,7 +12,8 @@ refers to stages by number. Read [fleet.md](fleet.md) for why the numbers are th
 | | |
 |---|---|
 | Measured cost when this was written | ~1 KiB per unique path (two identical 200,000-file snapshots retained 200 MiB) |
-| **Measured cost now** | **178 B/node** (same case, 34.1 MiB — an 83% reduction, see "What the constant-factor work achieved") |
+| **Measured cost now, tree engine** | **178 B/node** (same case, 34.1 MiB — an 83% reduction, see "What the constant-factor work achieved") |
+| **Measured cost now, streaming engine** | **`O(depth × budget)`** — bounded, does not scale with file count at all (Phase 2, below) |
 | Observed failure | 200 GB of swap ⇒ roughly 100–200M nodes in the unified tree |
 | Target | **1 GB resident**, temp storage unconstrained |
 | Implied budget at 200M nodes | **≈5 bytes per node** |
@@ -21,12 +22,17 @@ Five bytes per node settles the design question before it is asked: **nothing pr
 to file count can live in RAM.** Compaction is not a route to the goal — it is a
 multiplier on a curve that still goes to infinity. The tree has to leave memory.
 
-**That conclusion survived the constant-factor work, and is the thing to keep in mind
-before doing more of it.** 178 B/node is a 5.75× improvement and it moves the practical
-ceiling a long way — a 10M-node diff went from ~10 GiB to ~1.7 GiB, which is the
-difference between impossible and routine on an ordinary machine. It does nothing for the
-200M-node case that stalled the project: that is still ~34 GB. Phases 2–5 remain the only
-route to the stated target.
+**That conclusion survived the constant-factor work, and it is why Phase 2 matters.**
+178 B/node is a 5.75× improvement on the tree engine and moves the practical ceiling a
+long way — a 10M-node diff went from ~10 GiB to ~1.7 GiB — but it is still a smaller
+constant on the same curve, and the 200M-node case that stalled the project still wants
+~34 GB.
+
+The streaming engine (Phase 2, built 2026-09-10) is off that curve entirely: retention is
+`O(depth × budget)`, measured identical at 20,000 and 200,000 files, and 10.7× lower peak
+RSS than the tree engine on a real 2.27M-file fleet diff. **It cannot do move/copy
+detection yet**, which is what Phase 3 is for — so today the choice is a bounded diff that
+answers "what changed", or an unbounded one that also answers "where did it go".
 
 ## What the constant-factor work achieved
 
@@ -224,15 +230,58 @@ not the data-loss class. Fixed by ranging `sortedChildren`, the convention
 equivalence check is worthless while the thing being checked disagrees with itself**, so
 determinism is the first property to establish, not the last.
 
-### Phase 2 — streaming rollup and collector
+### Phase 2 — streaming rollup and collector — BUILT 2026-09-10
 
-Replace stages 4, 5, 7 and 9 with a single stack walk. Each open directory carries an
-accumulator: per-status child counts, the `allAddedLike` / `hasMovedSource` flags that
-`propagateNodeStatus` needs, two running digests, and its pending line list capped at the
-budget. On close, the directory decides collapse-or-emit and hands the result to its
-parent.
+`streamCompare` (`internal/diff/streaming.go`) produces the diff from a
+depth-first stream instead of a materialised tree. One `streamFrame` per
+directory on the current path, each holding the rollup accumulator, running
+counts and its budgeted output — `O(depth × budget)`, nothing per file.
 
-Memory: `O(depth × budget)`.
+**Measured.** Peak frames 3 and peak retained lines 59 at *both* 20,000 and
+200,000 files per side: ten times the input, identical retention
+(`TestStreaming_RetentionIsBoundedByDepthAndBudget` asserts they do not move).
+End to end on real fleet data — `luna/mike/archives` vs `luna/mike/unsorted`,
+2.27M files — **peak RSS 1,362 MiB → 127 MiB, a 10.7× reduction, byte-identical
+output**.
+
+**Scope: `--no-moves --no-copies` only.** Not a shortcut — it is where the phase
+boundary genuinely falls. `detectMovesCopies` needs a hash-keyed index over every
+node in both snapshots, which is exactly the global view a stream does not have;
+Phase 3 below is what replaces it. A stream can currently answer "what changed"
+but not "where did it go". That still covers the cases that actually blow up: two
+scans of the same multi-million-file tree, the stale-replica comparisons in
+[fleet.md](fleet.md), where moves are rare and the question is "what does the
+replica lack".
+
+**Selection and fallback.** `Options.Engine` is `auto` / `tree` / `streaming`.
+Auto streams when it can and builds the tree when it cannot, so the answer is
+always the full-featured one and only the memory profile changes; `streaming`
+refuses rather than falling back, for a caller that would rather hear "no". The
+two ways streaming declines are options it cannot honour and input whose order it
+cannot trust.
+
+**What building it actually cost, and what that says about doing Phase 3.** The
+equivalence harness found four real bugs, every one of which would have shipped
+as plausible-looking wrong output rather than a crash:
+
+- leaf lines carried no per-file counts;
+- a `FileTwin` whose fate differs from its directory must force `Mixed` — without
+  it, a file-becomes-directory collapsed to one line and silently dropped the
+  other half, which is the severity-1 direction;
+- `mergeJoinStreams` compared raw paths, so DFS-ordered inputs came back out
+  re-interleaved: **a merge join imposes its own order regardless of how its
+  inputs were sorted**, so it now takes an explicit key function;
+- a directory's `DirA` comes from its children, never from its twin.
+
+Two design notes worth carrying forward. `rollupAccum`/`decideRollup`
+(`internal/diff/rollup.go`) exist so both engines reach the rollup verdict through
+the same code rather than the streaming engine transcribing rules
+[diff-algo.md](diff-algo.md) itself calls "reverse-engineered from individual test
+cases" — Phase 3 should extend that seam, not fork it. And the DFS-key ordering is
+*verified as it walks*, not trusted: 0x01 is a legal filename byte, so a
+pathological name could still sort wrong, and under the severity rule a mis-nested
+node is a wrong answer, so `streamCompare` returns `errStreamOutOfOrder` and lets
+the caller fall back instead of guessing.
 
 ### Phase 3 — external move/copy matching (stage 6)
 
@@ -264,7 +313,7 @@ The invariant from [diff-algo.md](diff-algo.md) carries over unchanged and gets 
 teeth here: **anything that removes lines from the output must live inside the collector**,
 because stage 8 only sees what the collector emitted.
 
-### Phase 5 — engine selection and measurement
+### Phase 5 — engine selection and measurement — PARTLY BUILT 2026-09-10
 
 `--engine auto|memory|external`, defaulting to `auto` and switching on estimated node
 count (`GetFileCount` on both snapshots, so the choice costs one query). Keep the
