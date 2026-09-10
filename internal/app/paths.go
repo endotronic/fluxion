@@ -35,3 +35,25 @@ func pathHasPrefix(path, prefix string) bool {
 	}
 	return strings.HasPrefix(path, prefix+string(filepath.Separator))
 }
+
+// rebasePath moves p from under oldRoot to under newRoot, leaving it alone if
+// it is not under oldRoot at all.
+//
+// This is how a scan records where a file *is* rather than where it happened to
+// be readable from. zfs-scan walks a dataset through a throwaway mount point and
+// must not record that: the directory is gone by the time anyone reads the
+// snapshot, and a ZFS mountpoint is a property that can change under you
+// anyway. What is stable is the dataset's own name and the path within it.
+func rebasePath(p, oldRoot, newRoot string) string {
+	if oldRoot == newRoot || !pathHasPrefix(p, oldRoot) {
+		return p
+	}
+	rel, err := filepath.Rel(filepath.Clean(oldRoot), filepath.Clean(p))
+	if err != nil {
+		return p
+	}
+	if rel == "." {
+		return newRoot
+	}
+	return filepath.Join(newRoot, rel)
+}

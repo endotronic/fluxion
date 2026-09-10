@@ -72,7 +72,24 @@ func progressWriter(quiet bool) io.Writer {
 }
 
 type SnapshotConfig struct {
-	TargetDir      string
+	TargetDir string
+
+	// RecordAs is the path prefix to record in the database, when that differs
+	// from where the scan actually reads. Empty means "record TargetDir", which
+	// is what an ordinary `snapshot` wants.
+	//
+	// It exists for zfs-scan, which mounts each dataset at a throwaway
+	// directory and scans it there. Recording that directory is wrong twice
+	// over: it is deleted the moment the scan finishes, so every path the
+	// snapshot can ever produce points at nothing, and two datasets scanned in
+	// the same run get two indistinguishable /tmp/fluxion-zfsscan-NNNN roots,
+	// so a diff between them cannot say which side a line came from. A ZFS
+	// mountpoint is a mutable property in any case; the dataset's name is not.
+	//
+	// Comparisons are unaffected either way - diff strips the root before
+	// comparing, and the path within the dataset is the same under either
+	// prefix - so this changes what is displayed and stored, not what matches.
+	RecordAs       string
 	DBPath         string
 	Name           string
 	Threads        int
@@ -164,6 +181,12 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	}
 	defer dbStore.Close()
 
+	// What gets recorded, as opposed to what gets read. See SnapshotConfig.RecordAs.
+	recordRoot := targetDir
+	if cfg.RecordAs != "" {
+		recordRoot = cfg.RecordAs
+	}
+
 	var snapshotID int64
 
 	var resumeMap map[string]models.FileRecord
@@ -194,7 +217,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		// InProgress or User confirmed
 	} else {
 		// Auto-detect last snapshot
-		lastSnap, err = dbStore.GetLastSnapshot(targetDir)
+		lastSnap, err = dbStore.GetLastSnapshot(recordRoot)
 		if err != nil {
 			return fmt.Errorf("error checking snapshots: %w", err)
 		}
@@ -272,6 +295,19 @@ func RunSnapshot(cfg SnapshotConfig) error {
 				bar.Finish()
 				fmt.Println()
 			}
+			// The resume map is keyed by what was recorded; the scanner will ask
+			// about what it reads. Translating here is also what makes resume
+			// work for zfs-scan at all: a resumed dataset is mounted at a *new*
+			// temporary directory, so under the old scheme not one stored path
+			// could ever match a live one and every resume silently rescanned
+			// the whole dataset from scratch.
+			if recordRoot != targetDir {
+				rekeyed := make(map[string]models.FileRecord, len(resumeMap))
+				for p, rec := range resumeMap {
+					rekeyed[rebasePath(p, recordRoot, targetDir)] = rec
+				}
+				resumeMap = rekeyed
+			}
 			logrus.Infof("Already processed %d files. Skipping them.", len(resumeMap))
 		} else {
 			// Start new (abandon old)
@@ -330,7 +366,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 	}
 
 	if mode == "new" && !cfg.EstimateOnly {
-		snap, err := dbStore.CreateSnapshot(targetDir, finalName, hostname)
+		snap, err := dbStore.CreateSnapshot(recordRoot, finalName, hostname)
 		if err != nil {
 			return fmt.Errorf("error creating snapshot: %w", err)
 		}
@@ -751,6 +787,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 					continue
 				}
 
+				res.File.Path = rebasePath(res.File.Path, targetDir, recordRoot)
 				batch = append(batch, res.File)
 				if len(batch) >= consts.DBBatchSize {
 					flush()

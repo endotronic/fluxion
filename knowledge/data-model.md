@@ -6,7 +6,7 @@
 snapshots(
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   name          TEXT NOT NULL,            -- UNIQUE via idx_snapshots_name
-  root_path     TEXT NOT NULL,            -- absolute; diff strips it to compare
+  root_path     TEXT NOT NULL,            -- what paths are stored under; diff strips it
   started_at    DATETIME NOT NULL,
   finished_at   DATETIME,                 -- NULL while in_progress
   status        TEXT NOT NULL,            -- in_progress | completed | failed | deleted
@@ -57,9 +57,18 @@ and `idx_snapshots_name ON snapshots(name)` (unique).
   one.
 - `hashes` is a comma-joined string, not a relation — parsed with `strings.Split` in the
   sqlite store and used by `app/diff.go` to negotiate a common algorithm.
-- `path` is stored **absolute**. Relativisation happens at read time in `app/diff.go`.
-  Storing absolute paths is what makes `root_path` load-bearing: change it and comparisons
-  break.
+- `path` is stored **under `root_path`, whatever that is** — usually an absolute
+  filesystem path, but not always. Relativisation happens at read time in `app/diff.go`,
+  which strips `root_path` and re-attaches it for display; that is what makes `root_path`
+  load-bearing, because a stored path that is not underneath it falls into a fallback branch
+  and compares by its full path against everyone else's relative one.
+
+  **`zfs-scan` stores the dataset name** (`luna/mike/archives`), not a filesystem path,
+  because the directory it reads through is a throwaway mount that is deleted when the scan
+  finishes, and a ZFS `mountpoint` is a mutable property besides. So do not assume
+  `root_path` starts with `/`. Databases from before 2026-09-10 hold the throwaway mount
+  instead and can be brought into line with `scripts/repair-zfsscan-roots` — see
+  [cli.md](cli.md#zfs-scan).
 
 ## Migrations
 

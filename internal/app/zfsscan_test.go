@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -29,9 +30,10 @@ func TestMain(m *testing.M) {
 type fakeZFS struct {
 	rows         [][6]string // name, mountpoint, mounted, canmount, type, used
 	failMountFor map[string]bool
-	mountCalls   []string          // dataset names successfully mounted via MountAt
-	unmountCalls []string          // paths successfully unmounted via UnmountPath
-	mountAtPaths map[string]string // dataset -> temp path it was mounted at
+	mountCalls   []string            // dataset names successfully mounted via MountAt
+	unmountCalls []string            // paths successfully unmounted via UnmountPath
+	mountAtPaths map[string]string   // dataset -> temp path it was mounted at
+	contents     map[string][]string // dataset -> file paths to create at mount time
 	listCalls    int
 }
 
@@ -66,6 +68,17 @@ func (f *fakeZFS) runner() zfsutil.Runner {
 				f.mountAtPaths = map[string]string{}
 			}
 			f.mountAtPaths[ds] = path
+			// Materialise whatever this dataset is supposed to contain, so a
+			// test can assert on what actually got recorded.
+			for _, rel := range f.contents[ds] {
+				full := filepath.Join(path, rel)
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(full, []byte("contents of "+rel), 0o644); err != nil {
+					return "", err
+				}
+			}
 			return "", nil
 		case "umount":
 			// zfsutil.UnmountPath: `umount <path>`, targeting the exact
@@ -681,5 +694,80 @@ func TestHandleInterrupt_ExitCodeAndCleanup(t *testing.T) {
 	code = handleInterrupt(syscall.SIGTERM, fz.runner(), nil)
 	if code != 143 {
 		t.Errorf("exit code = %d, want 143 (128 + SIGTERM)", code)
+	}
+}
+
+// A ZFS mountpoint is a mutable property and zfs-scan's own mount is a throwaway
+// directory that is deleted the moment the scan finishes. Recording either would
+// mean every path the snapshot can ever produce points at nothing - and worse,
+// two datasets scanned in one run get two indistinguishable
+// /tmp/fluxion-zfsscan-NNNN roots, so a diff between them cannot say which side
+// a line came from. Issue 2.8, found by running a real fleet diff.
+func TestRunZFSScan_RecordsDatasetRelativePathsNotTheTemporaryMount(t *testing.T) {
+	dbPath, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	fz := &fakeZFS{
+		rows: [][6]string{
+			{"pool/alpha", "/pool/alpha", "no", "on", "filesystem", "0"},
+			{"pool/beta", "/pool/beta", "no", "on", "filesystem", "0"},
+		},
+		contents: map[string][]string{
+			"pool/alpha": {"keep/one.txt", "two.txt"},
+			"pool/beta":  {"three.txt"},
+		},
+	}
+
+	if _, err := RunZFSScan(ZFSScanConfig{
+		DBPath: dbPath, Roots: []string{"pool"}, Threads: 1, Runner: fz.runner(),
+	}); err != nil {
+		t.Fatalf("RunZFSScan: %v", err)
+	}
+	// The real code removes its mount directories with os.Remove, never
+	// RemoveAll (see cli.md) - so the files this fake put there, which a real
+	// unmount would have taken away with the filesystem, are ours to clear up.
+	defer func() {
+		for _, dir := range fz.mountAtPaths {
+			os.RemoveAll(dir)
+		}
+	}()
+
+	st, err := sqlite.NewSqliteStore(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer st.Close()
+
+	want := map[string][]string{
+		"pool/alpha": {"pool/alpha/keep/one.txt", "pool/alpha/two.txt"},
+		"pool/beta":  {"pool/beta/three.txt"},
+	}
+
+	for ds, wantPaths := range want {
+		snap, err := st.FindSnapshot(ds)
+		if err != nil {
+			t.Fatalf("FindSnapshot(%q): %v", ds, err)
+		}
+		if snap.RootPath != ds {
+			t.Errorf("%s: root_path = %q, want the dataset name %q (not the mount it was read through)",
+				ds, snap.RootPath, ds)
+		}
+
+		var got []string
+		if err := st.IterateFiles(snap.ID, func(f models.FileRecord) error {
+			got = append(got, f.Path)
+			return nil
+		}); err != nil {
+			t.Fatalf("IterateFiles: %v", err)
+		}
+		sort.Strings(got)
+		if fmt.Sprint(got) != fmt.Sprint(wantPaths) {
+			t.Errorf("%s: recorded paths = %v, want %v", ds, got, wantPaths)
+		}
+		for _, p := range got {
+			if strings.Contains(p, "fluxion-zfsscan") {
+				t.Errorf("%s: recorded path %q names the throwaway mount directory", ds, p)
+			}
+		}
 	}
 }

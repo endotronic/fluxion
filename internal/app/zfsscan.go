@@ -38,6 +38,12 @@ type ZFSScanConfig struct {
 	Runner zfsutil.Runner
 }
 
+// ZFSScanTempPrefix names the throwaway directories zfs-scan mounts datasets at.
+// Exported because the repair tool for pre-2026-09-10 databases has to
+// recognise one that was recorded as a snapshot's root_path; see issue 2.8 in
+// knowledge/known-issues.md.
+const ZFSScanTempPrefix = "fluxion-zfsscan-"
+
 // ZFSScanResult is the outcome of one zfs-scan run, dataset names bucketed by
 // what happened to them.
 type ZFSScanResult struct {
@@ -461,7 +467,7 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			logrus.Infof("%s is already mounted (mountpoint=%s); mounting an additional, isolated copy for this scan so nothing shadowed by a nested mount is missed", ds.Name, ds.Mountpoint)
 		}
 
-		dir, err := os.MkdirTemp("", "fluxion-zfsscan-")
+		dir, err := os.MkdirTemp("", ZFSScanTempPrefix)
 		if err != nil {
 			logrus.Errorf("failed to create temp mount dir for %s: %v", ds.Name, err)
 			fmt.Printf("  fail  %-55s could not create temp mount dir: %v\n", ds.Name, err)
@@ -490,7 +496,11 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 		fmt.Printf("\n=== %s (%s) ===\n", p.dataset.Name, p.mountpoint)
 		progress.print(doneCount+i, 0)
 		snapCfg := SnapshotConfig{
-			TargetDir:      p.mountpoint,
+			TargetDir: p.mountpoint,
+			// Record the dataset, not the throwaway mount it is read through:
+			// that directory is removed as soon as this returns, and a ZFS
+			// mountpoint is mutable anyway. See SnapshotConfig.RecordAs.
+			RecordAs:       p.dataset.Name,
 			DBPath:         cfg.DBPath,
 			Name:           p.dataset.Name,
 			Threads:        cfg.Threads,

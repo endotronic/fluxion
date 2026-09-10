@@ -8,7 +8,7 @@ Items marked **CONFIRMED** were reproduced with executed tests, not inferred fro
 
 Issues fixed since the review are removed from this file rather than annotated — `git log`
 is the record of what was fixed. As of 2026-09-10 that is 1.1, 1.2, 1.3, 1.4, 1.5, 2.1,
-2.3, 3.3, 3.4, and 3.6, plus the cgo modernisation item; the numbering of what remains is
+2.3, 2.8, 3.3, 3.4, and 3.6, plus the cgo modernisation item; the numbering of what remains is
 unchanged so earlier references still resolve. **No severity-1 issue is open.**
 
 Four entries are kept in place with a FIXED/solved marker rather than deleted (2.2, 2.7,
@@ -52,45 +52,6 @@ tag `internal/diff` needs and `internal/dupes` has no equivalent of). One test
 exact string (`"file1:h1"`) as its expected hash — a coupling to internal representation
 that the fix necessarily broke — and was rewritten to check the meaningful property
 instead (a directory-level group covering the expected paths), not the opaque digest value.
-
-### 2.8 `zfs-scan` records the temporary mount point as `root_path` — CONFIRMED
-Found 2026-09-10 by actually running a diff over the fleet DB, which is the only way this
-surfaces: every unit test uses a root that still exists.
-
-`zfs-scan` mounts each dataset at a fresh temporary directory and scans it there
-([cli.md](cli.md#zfs-scan) explains why, and that part is right). But the snapshot's
-`root_path` is then recorded as that temporary directory, and the file rows are stored
-absolute underneath it. The directory is removed as soon as the scan finishes, so every
-path the snapshot can ever produce points at somewhere that no longer exists:
-
-```
-$ fluxion d --db luna-md5.db luna/mike/archives luna/mike/unsorted
-[-] Archives/ (1040871 removed in /tmp/fluxion-zfsscan-3181317525/)
-[+] Downloads/0amvqtfjl9q61.jpg (1 added in /tmp/fluxion-zfsscan-574009572/)
-$ ls -d /tmp/fluxion-zfsscan-3181317525
-ls: cannot access '/tmp/fluxion-zfsscan-3181317525': No such file or directory
-```
-
-74 of that run's 83 lines named such a path. Two things are wrong with it, and the second
-is worse than the first:
-
-- The path cannot be used — not to `ls` it, not to feed it to another command, not to find
-  the file.
-- **The two roots are indistinguishable.** `/tmp/fluxion-zfsscan-3181317525/` and
-  `/tmp/fluxion-zfsscan-574009572/` carry nothing that says which is `archives` and which is
-  `unsorted`, so a reader cannot tell which side of the diff a line belongs to without going
-  back to the snapshot table. On a delete decision that is the whole question.
-
-The information is not lost — the snapshot's `name` is the dataset (`luna/mike/archives`) —
-so this is presentation and provenance, not silent data loss. But it lands squarely on the
-workflow the project exists for.
-
-Fix direction: record the dataset's canonical location (its `mountpoint` property, or the
-dataset name) as `root_path`, and store file paths underneath *that* rather than under the
-temporary mount. The translation is a prefix swap at insert time, so it costs nothing;
-doing it by rewriting rows afterwards would cost a pass over millions of them. Existing
-`zfs-scan` DBs cannot be repaired without such a rewrite, so a migration is a separate
-question from fixing new scans.
 
 ### 2.4 Deleted snapshots are still resolvable
 `FindSnapshot` and `GetLastSnapshot` do not filter `status = 'deleted'` tombstones. Naming

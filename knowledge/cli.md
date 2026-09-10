@@ -330,6 +330,41 @@ mounting this way unconditionally:
   (its usual location plus zfs-scan's temporary copy), a name-based unmount would be
   ambiguous about which instance to tear down. Unmounting the exact path zfs-scan mounted
   has no such ambiguity, and only that mount is ever affected.
+**What gets recorded is the dataset, not the mount** (changed 2026-09-10). The snapshot's
+`root_path` is the dataset name — `luna/mike/archives` — and file paths are stored
+underneath it, translated at insert time from the temporary mount they were read through.
+`SnapshotConfig.RecordAs` is the seam; an ordinary `snapshot` is unaffected and still
+records its target directory.
+
+Recording the mount was wrong twice over, and both ways showed up the first time a real
+fleet diff was run (issue 2.8, now closed):
+
+- The directory is deleted the moment the scan finishes, so every path the snapshot could
+  ever produce pointed at nothing. 74 of one 83-line diff's lines named a dead
+  `/tmp/fluxion-zfsscan-NNNN` path.
+- Worse, two datasets scanned in the same run got two *indistinguishable* roots, so a diff
+  between them could not say which side a line came from. On a delete decision that is the
+  whole question.
+
+A ZFS `mountpoint` is a mutable property in any case; the dataset name is the stable
+identity, which is why it is recorded rather than the dataset's usual mount location.
+**Comparisons are unaffected either way** — `diff` strips the root before comparing, and the
+path within the dataset is the same under either prefix — so this changed what is displayed
+and stored, not what matches.
+
+It also fixed resume for `zfs-scan`, which had never worked: a resumed dataset is mounted at
+a *new* temporary directory, so under the old scheme not one stored path could match a live
+one and every resume silently rescanned the whole dataset from scratch.
+
+**Repairing an existing database.** `scripts/repair-zfsscan-roots --db <db>` rewrites
+`root_path` and every file path for snapshots recorded the old way, so a scan that took days
+does not have to be repeated. It reports and changes nothing without `--apply`, converts in
+batches, and is safe to interrupt — files are converted before the snapshot's `root_path` is,
+so a half-finished snapshot still matches on the next run and is picked up where it stopped.
+Snapshots whose `root_path` looks like a `zfs-scan` mount but whose name cannot serve as a
+path are reported and skipped rather than guessed at. Expect it to take a while: the author's
+`luna-md5.db` is 27 snapshots and 84M file rows.
+
 - The temporary directory is removed with `os.Remove` (never `os.RemoveAll`) only after its
   unmount succeeds, so a failed unmount just leaves the directory behind rather than risking
   a recursive delete into anything still mounted there.
