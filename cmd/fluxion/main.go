@@ -559,6 +559,7 @@ func runCoverage(args []string) {
 	limitPtr := cmd.Int("limit", app.DefaultCoverageLimit, "Maximum entries to list; totals are always complete (0 = list all)")
 	byDirPtr := cmd.Bool("by-dir", false, "List one line per containing directory instead of one per file")
 	rollupPtr := cmd.Bool("rollup", false, "Recursive covered/not-covered/no-hash counts per directory, collapsing fully-homogeneous subtrees (mutually exclusive with --by-dir)")
+	rollupDetailPtr := cmd.Int("rollup-detail", app.DefaultRollupDetailMax, "With --rollup, list actual file paths for a subtree with this many or fewer not-covered/no-hash files instead of drilling through directory structure to reach them (0 disables)")
 
 	var excludes arrayFlags
 	cmd.Var(&excludes, "exclude", "Path to exclude (can be repeated)")
@@ -582,14 +583,15 @@ func runCoverage(args []string) {
 	}
 
 	res, err := app.RunCoverage(app.CoverageConfig{
-		DBPath:         *dbPtr,
-		CandidateQuery: cmd.Arg(0),
-		KeeperQueries:  cmd.Args()[1:],
-		MinSize:        minSize,
-		Limit:          *limitPtr,
-		ByDir:          *byDirPtr,
-		Rollup:         *rollupPtr,
-		Excludes:       excludes,
+		DBPath:          *dbPtr,
+		CandidateQuery:  cmd.Arg(0),
+		KeeperQueries:   cmd.Args()[1:],
+		MinSize:         minSize,
+		Limit:           *limitPtr,
+		ByDir:           *byDirPtr,
+		Rollup:          *rollupPtr,
+		RollupDetailMax: *rollupDetailPtr,
+		Excludes:        excludes,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

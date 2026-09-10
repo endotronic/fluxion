@@ -106,7 +106,7 @@ compiled as given, with no `(?i)`.
 ## coverage
 
 ```
-fluxion c --db <db> [--min-size 1M] [--limit N] [--by-dir | --rollup]
+fluxion c --db <db> [--min-size 1M] [--limit N] [--by-dir | --rollup [--rollup-detail N]]
          [-e|--exclude PATH]... <candidate> <keeper>...
 ```
 
@@ -170,13 +170,37 @@ with no unified tree, no merkle hashes, and no move/copy matching. See
     ancestor, which is exactly the failure [goals.md](goals.md)'s severity rule forbids.
   - `no-hash` gets its own bucket throughout (never folded into "not covered" silently),
     matching the same reasoning `IterateUncovered`'s doc comment already gives.
-  - **No output cap yet** (`--limit` is not consulted in this mode) — deliberately deferred.
-    A real dataset already demonstrates why one will eventually be needed: `luna/kevin/photos/immich`'s
-    hashed-bucket upload directories are almost all genuinely mixed (one covered original,
-    one not-covered derivative, per bucket), so the "merge boring-covered siblings" rule
-    can't help there and a `--rollup` run over it produced 9,451 lines. Something
-    `diff`'s `--max-lines`-style budget for the "mixed, keep recursing" case is the likely
-    fix, not yet built.
+  - **`--rollup-detail N`** (added 2026-09-09, default `DefaultRollupDetailMax = 3`, `0`
+    disables): a mixed *or* homogeneously-not-covered subtree whose not-covered-plus-no-hash
+    count is at or under `N` stops recursing through directory structure and lists the actual
+    file paths (with size and a `[not covered]`/`[no hash]` tag) instead — "show me the file,
+    not another line of directory nesting to reach it," for exactly the case where a handful
+    of files are buried several levels deep. Each `rollupFrame` buffers up to `N+1`
+    `detailEntry` records (`details`) as files stream past; the moment the count would exceed
+    `N` the buffer is dropped (`detailsDropped`) rather than kept growing, which is safe
+    because the count only ever grows as more files/children fold in — once it exceeds `N` it
+    can never come back down, so there is no case where a buffer gets dropped that the final
+    verdict would have wanted.
+  - **A frame that itself qualifies always wins over a descendant that also does**, with no
+    special-casing required: `render()` decides independently at every level, and both the
+    "fully covered" and "small enough, show files" branches ignore `notableLines` entirely —
+    so if a child already rendered its own detail listing but gets absorbed into a parent
+    whose own total is *also* small enough, the parent's `render()` simply produces its own
+    listing from its own (necessarily superset) buffer and the child's already-built lines are
+    discarded unused. Confirmed: with `--rollup-detail 6` on `luna/historian/arctic_shift`
+    (12 total not-covered), its two 6-file children (`comments/`, `submissions/`) each
+    individually qualified and printed actual filenames, while the enclosing directory
+    (12 > 6) correctly fell through to the normal recurse-and-list-children behavior instead
+    of re-printing them as a summary.
+  - **No cap on the *large*-count case** (`--limit` is not consulted in `--rollup` mode) —
+    deliberately deferred, unaffected by `--rollup-detail` which only ever *adds* detail for
+    small counts. A real dataset already demonstrates why a cap will eventually be needed for
+    the large case: `luna/kevin/photos/immich`'s hashed-bucket upload directories are almost
+    all genuinely mixed (one covered original, one not-covered derivative, per bucket), so
+    neither the "merge boring-covered siblings" rule nor `--rollup-detail` can compress that
+    region, and a `--rollup` run over it produced 9,451 lines. Something `diff`'s
+    `--max-lines`-style budget for the "mixed, keep recursing, still too big" case is the
+    likely fix, not yet built.
 - Incomplete (`in_progress` / `failed`) snapshots are warned about on stderr but still used;
   an incomplete *keeper* is the dangerous direction and is called out as such.
 - **`--exclude` only suppresses candidate files that are *already uncovered* — it does not

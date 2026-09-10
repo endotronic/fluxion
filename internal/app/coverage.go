@@ -19,6 +19,11 @@ import (
 // are summarised. The totals are always complete; only the listing is capped.
 const DefaultCoverageLimit = 50
 
+// DefaultRollupDetailMax is how few not-covered-or-no-hash files a --rollup
+// subtree may hold before it stops recursing through directory structure and
+// lists their actual paths instead.
+const DefaultRollupDetailMax = 3
+
 type CoverageConfig struct {
 	DBPath string
 
@@ -42,6 +47,12 @@ type CoverageConfig struct {
 	// not) into one line instead of drilling into it. Mutually exclusive with
 	// ByDir - see RunCoverage.
 	Rollup bool
+
+	// RollupDetailMax: a --rollup subtree whose not-covered-or-no-hash count
+	// is at or below this stops recursing and lists the actual file paths
+	// instead of drilling into directory structure to reach them. 0 disables
+	// (never show files, only directory-level counts). Ignored outside Rollup.
+	RollupDetailMax int
 
 	Excludes []string
 }
@@ -287,19 +298,49 @@ type rollupFrame struct {
 	// subdirectories from printing thousands of "fully covered" lines.
 	boringCoveredDirs, boringCoveredFiles int64
 	boringCoveredBytes                    int64
+
+	// details buffers every not-covered/no-hash file under this subtree, but
+	// only for as long as that count might still end at or under
+	// RollupDetailMax - counts only grow as more files/children are folded
+	// in, so the moment it's exceeded, it can never come back down, and the
+	// buffer is dropped (detailsDropped) to bound memory. Whether the final
+	// count actually stayed at or under the limit is decided in render().
+	details        []detailEntry
+	detailsDropped bool
 }
 
-func (f *rollupFrame) add(status models.CoverageStatus, size int64) {
+// detailEntry is one buffered not-covered/no-hash file, for printing directly
+// instead of drilling through directory structure to reach it.
+type detailEntry struct {
+	path   string
+	size   int64
+	status models.CoverageStatus
+}
+
+func (f *rollupFrame) add(status models.CoverageStatus, path string, size int64, detailMax int) {
 	switch status {
 	case models.CoverageCovered:
 		f.coveredFiles++
 		f.coveredBytes += size
+		return
 	case models.CoverageUncovered:
 		f.uncoveredFiles++
 		f.uncoveredBytes += size
 	case models.CoverageNoHash:
 		f.noHashFiles++
 		f.noHashBytes += size
+	}
+	f.addDetail(detailEntry{path, size, status}, detailMax)
+}
+
+func (f *rollupFrame) addDetail(d detailEntry, detailMax int) {
+	if f.detailsDropped || detailMax <= 0 {
+		return
+	}
+	f.details = append(f.details, d)
+	if int64(len(f.details)) > int64(detailMax) {
+		f.details = nil
+		f.detailsDropped = true
 	}
 }
 
@@ -313,7 +354,7 @@ func (f *rollupFrame) isFullyNotCovered() bool {
 
 // absorb folds a just-closed child's recursive totals into f, and decides
 // whether the child earns its own line or merges into f's boring-covered note.
-func (f *rollupFrame) absorb(child *rollupFrame) {
+func (f *rollupFrame) absorb(child *rollupFrame, detailMax int) {
 	f.coveredFiles += child.coveredFiles
 	f.coveredBytes += child.coveredBytes
 	f.uncoveredFiles += child.uncoveredFiles
@@ -321,19 +362,35 @@ func (f *rollupFrame) absorb(child *rollupFrame) {
 	f.noHashFiles += child.noHashFiles
 	f.noHashBytes += child.noHashBytes
 
+	// Only a child that actually contributed a not-covered/no-hash file can
+	// change f's details verdict - a fully-covered child leaves it untouched
+	// either way, so this must not fall through to an unconditional drop.
+	if child.uncoveredFiles+child.noHashFiles > 0 {
+		if f.detailsDropped || child.detailsDropped {
+			f.details = nil
+			f.detailsDropped = true
+		} else {
+			for _, d := range child.details {
+				f.addDetail(d, detailMax)
+			}
+		}
+	}
+
 	if child.isFullyCovered() {
 		f.boringCoveredDirs++
 		f.boringCoveredFiles += child.coveredFiles
 		f.boringCoveredBytes += child.coveredBytes
 		return
 	}
-	f.notableLines = append(f.notableLines, child.render()...)
+	f.notableLines = append(f.notableLines, child.render(detailMax)...)
 }
 
 // render decides this frame's own verdict and returns the line(s) it
 // contributes to its parent: one line if homogeneous (fully covered, or
-// fully not covered), or its own summary plus its children's detail if mixed.
-func (f *rollupFrame) render() []string {
+// fully not covered), its own summary plus buffered file paths if mixed but
+// small enough (RollupDetailMax), or its summary plus its children's own
+// decisions otherwise.
+func (f *rollupFrame) render(detailMax int) []string {
 	total := f.coveredFiles + f.uncoveredFiles + f.noHashFiles
 	if total == 0 {
 		return nil
@@ -346,6 +403,31 @@ func (f *rollupFrame) render() []string {
 			util.Comma(f.coveredFiles), util.FormatBytes(f.coveredBytes), label)}
 	}
 
+	badCount := f.uncoveredFiles + f.noHashFiles
+	if !f.detailsDropped && badCount > 0 && badCount <= int64(detailMax) {
+		tag := "[mixed]"
+		if f.isFullyNotCovered() {
+			tag = "[NOT covered]"
+		}
+		header := fmt.Sprintf("  covered: %-8s not covered: %-8s",
+			util.Comma(f.coveredFiles), util.Comma(f.uncoveredFiles))
+		if f.noHashFiles > 0 {
+			header += fmt.Sprintf(" no-hash: %-8s", util.Comma(f.noHashFiles))
+		}
+		header += fmt.Sprintf(" %10s  %s  %s",
+			util.FormatBytes(f.coveredBytes+f.uncoveredBytes+f.noHashBytes), label, tag)
+
+		lines := []string{header}
+		for _, d := range f.details {
+			dtag := "not covered"
+			if d.status == models.CoverageNoHash {
+				dtag = "no hash"
+			}
+			lines = append(lines, fmt.Sprintf("      %10s  %s  [%s]", util.FormatBytes(d.size), d.path, dtag))
+		}
+		return lines
+	}
+
 	if f.isFullyNotCovered() {
 		detail := plural(f.uncoveredFiles, "file")
 		if f.noHashFiles > 0 {
@@ -355,8 +437,8 @@ func (f *rollupFrame) render() []string {
 			detail, util.FormatBytes(f.uncoveredBytes+f.noHashBytes), label)}
 	}
 
-	// Mixed: this frame's own summary, then its children's own decisions,
-	// indented one level deeper.
+	// Mixed, and too big for the detail listing above: this frame's own
+	// summary, then its children's own decisions, indented one level deeper.
 	summary := fmt.Sprintf("  covered: %-8s not covered: %-8s",
 		util.Comma(f.coveredFiles), util.Comma(f.uncoveredFiles))
 	if f.noHashFiles > 0 {
@@ -389,7 +471,16 @@ func isAncestorOrSelf(ancestor, dir string) bool {
 
 // runCoverageRollup implements `coverage --rollup`: recursive covered/
 // not-covered/no-hash counts per directory, collapsing any subtree that is
-// entirely one verdict into a single line instead of drilling into it.
+// entirely one verdict into a single line instead of drilling into it, and -
+// when a mixed subtree's not-covered-or-no-hash count is small enough
+// (RollupDetailMax) - stopping the recursion early to list the actual file
+// paths instead of drilling through however many ancestor directories stand
+// between here and them. A parent frame that already qualifies for this
+// always wins over a descendant that also would: rendering happens bottom-up,
+// but a frame that takes this branch (or the fully-covered one) never reads
+// notableLines, so a child's already-built detail listing is simply discarded
+// once an ancestor decides to show its own instead - no special-casing needed
+// beyond render() itself deciding independently at every level.
 //
 // Memory is O(tree depth), not O(files or directories): exactly one open
 // rollupFrame per directory on the current path, exactly as diff-memory.md's
@@ -427,7 +518,7 @@ func runCoverageRollup(dbStore store.Store, candidate *models.Snapshot, keeperID
 		top := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		if len(stack) > 0 {
-			stack[len(stack)-1].absorb(top)
+			stack[len(stack)-1].absorb(top, cfg.RollupDetailMax)
 		} else {
 			topLevel = append(topLevel, top)
 		}
@@ -465,7 +556,7 @@ func runCoverageRollup(dbStore store.Store, candidate *models.Snapshot, keeperID
 			}
 
 			pushTo(path.Dir(f.Path))
-			stack[len(stack)-1].add(status, f.SizeBytes)
+			stack[len(stack)-1].add(status, f.Path, f.SizeBytes, cfg.RollupDetailMax)
 
 			switch status {
 			case models.CoverageUncovered:
@@ -487,7 +578,7 @@ func runCoverageRollup(dbStore store.Store, candidate *models.Snapshot, keeperID
 	}
 
 	for _, root := range topLevel {
-		for _, l := range root.render() {
+		for _, l := range root.render(cfg.RollupDetailMax) {
 			fmt.Println(l)
 		}
 	}
