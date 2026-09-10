@@ -58,7 +58,8 @@ func TestMemory_UnifiedTree(t *testing.T) {
 	//   274 B/node    after Children stopped being pre-allocated on leaves
 	//   226 B/node    after Path was replaced by a parent pointer + path()
 	//   210 B/node    after Status became a uint8 instead of a string
-	const ceilingPerNode = 230.0
+	//   178 B/node    after HashA/HashB became inline hashVal instead of strings
+	const ceilingPerNode = 195.0
 	if perNode > ceilingPerNode {
 		t.Errorf("tree costs %.0f B/node, over the %.0f B ceiling - a memory optimisation in "+
 			"knowledge/diff-memory.md has regressed", perNode, ceilingPerNode)

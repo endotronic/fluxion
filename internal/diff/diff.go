@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
@@ -93,9 +94,9 @@ type Node struct {
 	DirB bool // something at or under this path existed in B
 
 	// Metadata for comparison (Generic, set based on strategy).
-	// For a directory, HashA/HashB hold its merkle hash.
-	HashA string
-	HashB string
+	// For a directory, HashA/HashB hold its merkle digest.
+	HashA hashVal
+	HashB hashVal
 
 	SizeA int64
 	SizeB int64
@@ -411,13 +412,13 @@ func applySide(current *Node, record models.FileRecord, isA bool, hashType strin
 	current.IsFile = true
 
 	// Extract correct hash
-	hash := ""
+	raw := ""
 	if hashType == "sha1" {
-		hash = record.SHA1
+		raw = record.SHA1
 	} else if hashType == "md5" {
-		hash = record.MD5
+		raw = record.MD5
 	}
-	hash = compactHash(hash)
+	hash := compactHash(raw)
 
 	if isA {
 		current.InA = true
@@ -439,7 +440,7 @@ func fileStatus(n *Node) Status {
 		return StatusRemoved
 	case n.InB && !n.InA:
 		return StatusAdded
-	case n.HashA == "" || n.HashB == "":
+	case n.HashA.empty() || n.HashB.empty():
 		// Present on both sides, but at least one side carries no hash of the
 		// type being compared, so we cannot claim the contents match. Report
 		// Modified: over-reporting costs the user reading time, and a false
@@ -488,7 +489,7 @@ func splitFileDirCollisions(node *Node) {
 	// What remains is a directory and nothing else.
 	node.IsFile = false
 	node.InA, node.InB = false, false
-	node.HashA, node.HashB = "", ""
+	node.HashA, node.HashB = hashVal{}, hashVal{}
 	node.SizeA, node.SizeB = 0, 0
 	node.Status = StatusUnchanged
 }
@@ -756,36 +757,59 @@ func propagateNodeStatus(node *Node) (Status, bool) {
 	return StatusMixed, hasUnchangedContent
 }
 
-// compactHash decodes a hex hash (as stored in the DB) into its raw bytes, so
-// a leaf hash costs 20/16 bytes instead of 40/32 hex characters. Stored as a
-// plain Go string - which can hold any byte sequence - so every existing
-// comparison (==, map keys) is unchanged; nothing outside this package ever
-// sees or prints these values (confirmed: no Hash field is exposed on
-// DiffResult, and app/diff.go never reads HashA/HashB).
+// hashVal is a content hash held inline on the Node rather than as a string.
 //
-// A decode failure (an empty or malformed value - never expected from the DB,
-// which only ever writes valid hex or '') falls back to the original string
-// rather than silently becoming "": treating a comparable-but-odd hash as "no
-// hash" would misclassify a Modified file as having no hash at all, which
-// reads identically to Unchanged-turned-Modified-for-missing-hash - the
-// severity rule direction is fine either way, so the fallback only matters
-// for not losing the distinguishing value itself.
-func compactHash(hexHash string) string {
+// A Go string cost 16 bytes of header plus a separate heap allocation for the
+// bytes (a 20-byte SHA-1 lands in a 24-byte size class), so the HashA/HashB
+// pair was ~80 B/node and two allocations - the largest single item left in the
+// tree after Path. Inline it is 21 bytes each.
+//
+// n is the significant length, and 0 means "no hash of the compared type",
+// which is a real state: a legacy MD5-only import compared as SHA-1 has it for
+// every record, and goals.md is explicit that such a file must never read as
+// unchanged. Carrying the length rather than just the bytes also preserves a
+// guarantee the string form got for free - a 16-byte MD5 and a 20-byte SHA-1
+// digest can never compare equal, because == compares n as well.
+type hashVal struct {
+	b [20]byte
+	n uint8
+}
+
+func (h hashVal) empty() bool { return h.n == 0 }
+
+func (h hashVal) bytes() []byte { return h.b[:h.n] }
+
+// compactHash converts a hash as stored in the DB into a hashVal.
+//
+// Valid hex - which is all the DB ever writes - decodes to its raw bytes, so
+// SHA-1 occupies 20 and MD5 16. Anything else is SHA-1'd instead of stored
+// verbatim, because a fixed 20-byte field cannot hold arbitrary text and
+// silently truncating it could make two different hashes compare equal, which
+// is the false-unchanged direction goals.md ranks worst. Hashing preserves what
+// actually matters here: equal inputs stay equal, unequal inputs stay unequal
+// short of a 2^-160 collision. This path is not merely defensive - the tests in
+// this package use short non-hex fixtures like "h1" as hashes throughout.
+func compactHash(hexHash string) hashVal {
 	if hexHash == "" {
-		return ""
+		return hashVal{}
 	}
-	decoded, err := hex.DecodeString(hexHash)
-	if err != nil {
-		return hexHash
+
+	var h hashVal
+	if decoded, err := hex.DecodeString(hexHash); err == nil && len(decoded) <= len(h.b) {
+		h.n = uint8(copy(h.b[:], decoded))
+		return h
 	}
-	return string(decoded)
+
+	sum := sha1.Sum([]byte(hexHash))
+	h.n = uint8(copy(h.b[:], sum[:]))
+	return h
 }
 
 // merkleEntry is one child's contribution to its parent's directory digest.
 type merkleEntry struct {
 	name string
 	twin bool // true for a FileTwin's contribution, alongside its directory host
-	hash string
+	hash hashVal
 }
 
 // digestEntries hashes entries into a single fixed-width (20-byte) digest,
@@ -809,9 +833,9 @@ type merkleEntry struct {
 // side contributes nothing, and an empty entry set yields "" (not a hash of
 // zero entries) - untouched children's DirA/DirB tracking already handles
 // "empty vs absent" separately from "has a hash".
-func digestEntries(entries []merkleEntry) string {
+func digestEntries(entries []merkleEntry) hashVal {
 	if len(entries) == 0 {
-		return ""
+		return hashVal{}
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].name != entries[j].name {
@@ -820,7 +844,7 @@ func digestEntries(entries []merkleEntry) string {
 		if entries[i].twin != entries[j].twin {
 			return !entries[i].twin // host entry sorts before its twin
 		}
-		return entries[i].hash < entries[j].hash
+		return bytes.Compare(entries[i].hash.bytes(), entries[j].hash.bytes()) < 0
 	})
 
 	h := sha1.New()
@@ -830,6 +854,11 @@ func digestEntries(entries []merkleEntry) string {
 		h.Write(lenBuf[:])
 		h.Write([]byte(s))
 	}
+	writeLenPrefixedBytes := func(b []byte) {
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(b)))
+		h.Write(lenBuf[:])
+		h.Write(b)
+	}
 	for _, e := range entries {
 		writeLenPrefixed(e.name)
 		if e.twin {
@@ -837,9 +866,11 @@ func digestEntries(entries []merkleEntry) string {
 		} else {
 			h.Write([]byte{0})
 		}
-		writeLenPrefixed(e.hash)
+		writeLenPrefixedBytes(e.hash.bytes())
 	}
-	return string(h.Sum(nil))
+	var out hashVal
+	out.n = uint8(copy(out.b[:], h.Sum(nil)))
+	return out
 }
 
 // computeMerkleHashes computes each directory's content digest bottom-up.
@@ -867,20 +898,20 @@ func computeMerkleHashes(node *Node) {
 			node.DirB = true
 		}
 
-		if child.HashA != "" {
+		if !child.HashA.empty() {
 			entriesA = append(entriesA, merkleEntry{name: child.Name, hash: child.HashA})
 		}
-		if child.HashB != "" {
+		if !child.HashB.empty() {
 			entriesB = append(entriesB, merkleEntry{name: child.Name, hash: child.HashB})
 		}
 
 		// A split path contributes both halves, tagged so that a directory and
 		// a file of the same name cannot produce the same entry.
 		if twin := child.FileTwin; twin != nil {
-			if twin.HashA != "" {
+			if !twin.HashA.empty() {
 				entriesA = append(entriesA, merkleEntry{name: child.Name, twin: true, hash: twin.HashA})
 			}
-			if twin.HashB != "" {
+			if !twin.HashB.empty() {
 				entriesB = append(entriesB, merkleEntry{name: child.Name, twin: true, hash: twin.HashB})
 			}
 		}
@@ -900,12 +931,12 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 	// The maps hold nodes rather than paths. A path that is a file on one side
 	// and a directory on the other exists twice in the tree, so resolving a
 	// source by path alone could mark the wrong half as the origin of a move.
-	removedMap := make(map[string][]*Node)  // Hash -> nodes (For Moves)
-	modifiedMap := make(map[string][]*Node) // Hash -> nodes (For Swap Moves / Copies)
-	existingMap := make(map[string][]*Node) // Hash -> nodes (For Copies)
+	removedMap := make(map[hashVal][]*Node)  // Hash -> nodes (For Moves)
+	modifiedMap := make(map[hashVal][]*Node) // Hash -> nodes (For Swap Moves / Copies)
+	existingMap := make(map[hashVal][]*Node) // Hash -> nodes (For Copies)
 
-	add := func(m map[string][]*Node, n *Node, hash string, size int64) {
-		if hash == "" {
+	add := func(m map[hashVal][]*Node, n *Node, hash hashVal, size int64) {
+		if hash.empty() {
 			return
 		}
 		// Every empty file has the same hash, so matching on it would attribute
@@ -958,7 +989,7 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 		}
 
 		hash := n.HashB
-		if hash == "" {
+		if hash.empty() {
 			return
 		}
 		if n.IsFile && n.SizeB == 0 {
@@ -975,7 +1006,7 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 		}
 
 		// take pulls the first candidate for hash, consuming it.
-		take := func(m map[string][]*Node) *Node {
+		take := func(m map[hashVal][]*Node) *Node {
 			nodes := m[hash]
 			if len(nodes) == 0 {
 				return nil
