@@ -2,6 +2,7 @@ package dupes
 
 import (
 	"fluxion/internal/models"
+	"slices"
 	"testing"
 )
 
@@ -12,6 +13,11 @@ func TestFindDuplicates(t *testing.T) {
 		minSize    int64
 		wantHashes []string        // Hashes of groups we expect (simplified check)
 		wantPaths  map[string]bool // Paths validation?
+
+		// wantDirPaths checks for a directory-level group with exactly these
+		// paths, without depending on the internal hash's exact value (an
+		// opaque digest as of the 2.2 fix, not something a test should predict).
+		wantDirPaths []string
 	}{
 		{
 			name: "No Duplicates",
@@ -41,21 +47,22 @@ func TestFindDuplicates(t *testing.T) {
 			wantHashes: nil,
 		},
 		{
+			// Directory hashes are an internal digest (internal/diff's
+			// digestEntries, ported here - see knowledge/known-issues.md issue
+			// 2.2), not a value any caller should compute or predict, so this
+			// case is checked below by structure (IsDir + Paths) instead of by
+			// a literal expected hash string. FindDuplicates should report the
+			// DIRECTORY group, not separate files, since /root/dirA and
+			// /root/dirB have identical structure and content: report {dirA,
+			// dirB} at the directory level, and suppress dirA/file1 as covered
+			// by its already-reported parent.
 			name: "Directory Duplicate (Collapsed)",
 			files: map[string]models.FileRecord{
 				"/root/dirA/file1": {SHA1: "h1", SizeBytes: 100},
 				"/root/dirB/file1": {SHA1: "h1", SizeBytes: 100},
 			},
-			minSize: 1,
-			// Directory hashes are computed internally as Merkle.
-			// Check logic: FindDuplicates should report the DIRECTORY group, not separate files if structure matches.
-			// DirA hash: "file1:h1"
-			// DirB hash: "file1:h1"
-			// Wait, FindDuplicates returns file duplicates too if they aren't totally covered?
-			// The logic in dupes.go attempts to report "Highest Level".
-			// So it should report /root/dirA and /root/dirB as a group.
-			// And suppress /root/dirA/file1.
-			wantHashes: []string{"file1:h1"}, // This is the merkle hash of the dir!
+			minSize:      1,
+			wantDirPaths: []string{"/root/dirA", "/root/dirB"},
 		},
 		{
 			name: "Partial Directory Duplicate",
@@ -79,7 +86,7 @@ func TestFindDuplicates(t *testing.T) {
 				t.Fatalf("FindDuplicates() error = %v", err)
 			}
 
-			if len(tt.wantHashes) == 0 {
+			if len(tt.wantHashes) == 0 && len(tt.wantDirPaths) == 0 {
 				if len(groups) != 0 {
 					t.Errorf("Expected 0 groups, got %d", len(groups))
 				}
@@ -97,6 +104,19 @@ func TestFindDuplicates(t *testing.T) {
 				}
 				if !found {
 					t.Errorf("Expected group with hash %s not found. Got: %+v", wantH, groups)
+				}
+			}
+
+			if len(tt.wantDirPaths) > 0 {
+				found := false
+				for _, g := range groups {
+					if g.IsDir && slices.Equal(g.Paths, tt.wantDirPaths) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Expected a directory group with paths %v not found. Got: %+v", tt.wantDirPaths, groups)
 				}
 			}
 		})

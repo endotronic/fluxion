@@ -1,6 +1,8 @@
 package dupes
 
 import (
+	"crypto/sha1"
+	"encoding/binary"
 	"fluxion/internal/models"
 	"sort"
 	"strings"
@@ -45,16 +47,16 @@ func FindDuplicates(files map[string]models.FileRecord, minSize int64, rootPath 
 
 	// 4. Filter and Group
 	var groups []DuplicateGroup
-	
+
 	// We need to handle "Collapsing".
 	// Logic: If a directory is duplicated, we shouldn't report its children as duplicates.
 	// But how do we know if a child is *only* duplicated because the parent is?
 	// If Parent A and Parent B are exact dupes, then Child A/x and Child B/x are exact dupes.
 	// We want to report {A, B} and suppress {A/x, B/x}.
-	// Approach: 
+	// Approach:
 	// Iterate valid duplicate hashes. Check if their parents are also duplicates?
 	// Or simpler: If we identify a Dir duplicate, mark its children as "covered".
-	
+
 	// Let's sort hashIndex by some metric? No.
 	// We can iterate the Tree Top-Down logic again?
 	// Or:
@@ -62,11 +64,11 @@ func FindDuplicates(files map[string]models.FileRecord, minSize int64, rootPath 
 	// 2. For each such Hash, we have a list of Nodes.
 	// 3. Check if all Nodes in this group are children of Nodes that form another duplicate group?
 	// That's O(N^2) potentially.
-	
+
 	// Better: Top-Down traversal to finding "Highest Level Duplicates".
-	// But "Finding Duplicates" is inherently global (hashing). 
+	// But "Finding Duplicates" is inherently global (hashing).
 	// You can't just walk the tree to find them.
-	
+
 	// Let's stick to the "Covered" approach.
 	// 1. Collect all potential duplicate groups (Count > 1 && Size >= minSize).
 	// 2. Sort groups by Path depth?
@@ -76,16 +78,15 @@ func FindDuplicates(files map[string]models.FileRecord, minSize int64, rootPath 
 	// Caveat: What if P1 and P2 match, but P3 is different parent?
 	// Then {N1, N2} are covered by {P1, P2}, but N3 is loose?
 	// Then we might splits.
-	
+
 	// Simplified Approach (User Requirement: "report the copy at the highest level common ancestor")
 	// If /a/b and /c/d are duplicates. Report them.
 	// If /a/b/x and /c/d/x are duplicates. Don't report them IF /a/b + /c/d reported.
-	
-	
+
 	// We need to iterate "biggest structures" first? Or Top Down?
 	// If we process /a/b (Dir) and mark it as Dupe, we can mark all its children as Covered.
 	// But /a/b is only a dupe if found elsewhere.
-	
+
 	// Let's refine:
 	// 1. Collect all Nodes that are part of a duplicate set (Hash count > 1).
 	// 2. Filter by MinSize.
@@ -97,16 +98,20 @@ func FindDuplicates(files map[string]models.FileRecord, minSize int64, rootPath 
 	//       - If we process Node A (Hash H), we find all other nodes with Hash H.
 	//       - Mark A and its peers as processed.
 	//       - Mark all children of A and peers as "Covered" (suppress their future groups).
-	
+
 	candidates := make(map[string][]*Node) // Hash -> Nodes
-	
+
 	for h, nodes := range hashIndex {
-		if len(nodes) < 2 { continue }
+		if len(nodes) < 2 {
+			continue
+		}
 		// Check size of one (all same size)
-		if nodes[0].Size < minSize { continue }
+		if nodes[0].Size < minSize {
+			continue
+		}
 		candidates[h] = nodes
 	}
-	
+
 	// Traverse tree Top-Down.
 	// If Node is in Candidates:
 	//    If Node is Covered -> Skip.
@@ -114,10 +119,10 @@ func FindDuplicates(files map[string]models.FileRecord, minSize int64, rootPath 
 	//        Report Group (Hash).
 	//        Mark all nodes in this group as Covered.
 	//        Mark all descendents of these nodes as Covered.
-	
+
 	covered := make(map[*Node]bool)
 	reportedHashes := make(map[string]bool)
-	
+
 	var traverse func(n *Node)
 	traverse = func(n *Node) {
 		if covered[n] {
@@ -125,18 +130,18 @@ func FindDuplicates(files map[string]models.FileRecord, minSize int64, rootPath 
 			// So yes, skip traversal of subtree.
 			return
 		}
-		
+
 		isCandidate := false
 		if n.Hash != "" {
 			if _, ok := candidates[n.Hash]; ok {
 				isCandidate = true
 			}
 		}
-		
+
 		if isCandidate && !reportedHashes[n.Hash] {
 			// Found a new highest-level duplicate group!
 			groupNodes := candidates[n.Hash]
-			
+
 			// Build Group
 			var paths []string
 			for _, gn := range groupNodes {
@@ -144,7 +149,7 @@ func FindDuplicates(files map[string]models.FileRecord, minSize int64, rootPath 
 				markCovered(gn, covered)
 			}
 			sort.Strings(paths)
-			
+
 			groups = append(groups, DuplicateGroup{
 				Hash:      n.Hash,
 				Size:      n.Size,
@@ -152,30 +157,30 @@ func FindDuplicates(files map[string]models.FileRecord, minSize int64, rootPath 
 				IsDir:     !n.IsFile,
 				ItemCount: countItems(n),
 			})
-			
+
 			reportedHashes[n.Hash] = true
-			
+
 			// Since we marked n and its peers/children covered, we don't recurse.
 			return
 		}
-		
+
 		// If not a candidate, or hash already reported (which implies n was not covered when hash reported? impossible if logic sound), recurse
 		// If hash already reported, it means 'n' is part of a group we just handled?
 		// No, 'reportedHashes' is global.
 		// If n.Hash is reported, then n SHOULD be covered.
 		// So checking covered first handles it.
-		
+
 		for _, child := range n.Children {
 			traverse(child)
 		}
 	}
-	
+
 	// Use sorted children traversal for determinism
 	// Actually traverse helper needs to order children
 	// We can reuse a deterministic walker
-	
+
 	walkDeterministic(root, traverse)
-	
+
 	return groups, nil
 }
 
@@ -185,7 +190,9 @@ func insertNode(root *Node, path string, rec models.FileRecord) {
 
 	current := root
 	for _, part := range parts {
-		if part == "" { continue }
+		if part == "" {
+			continue
+		}
 		if current.Children == nil {
 			current.Children = make(map[string]*Node)
 		}
@@ -193,7 +200,7 @@ func insertNode(root *Node, path string, rec models.FileRecord) {
 		if !exists {
 			child = &Node{
 				Name:     part,
-				Path:     "", 
+				Path:     "",
 				Children: make(map[string]*Node),
 			}
 			if current.Path == "" {
@@ -218,29 +225,79 @@ func insertNode(root *Node, path string, rec models.FileRecord) {
 	}
 }
 
+// dirEntry is one child's contribution to its parent's directory digest.
+type dirEntry struct {
+	name string
+	hash string
+}
+
+// dirDigest hashes entries into a single fixed-width (20-byte) digest,
+// replacing the old "name:hash,name:hash" concatenated string this package
+// used to build (ported from internal/diff's identical fix - see
+// knowledge/diff-algo.md "Stage 4" and knowledge/known-issues.md issue 2.2).
+//
+// The old scheme joined "name:hash" pairs with unescaped ':' and ',', both
+// legal filename bytes, so two structurally different directories could hash
+// identical - e.g. one file literally named "a:AA,b" with hash "BB" produced
+// the same string as a directory containing separate files "a" (hash "AA")
+// and "b" (hash "BB"). Two different directories then compared equal, and
+// FindDuplicates could report one as a duplicate of the other: a false
+// positive, though a milder failure mode than diff's false-unchanged, since
+// dupes only ever suggests deletions for the user to review, it doesn't
+// silently drop files from a report.
+//
+// Explicit length-prefixing means no separator byte is ever interpreted as
+// content, so this class of collision can no longer occur. It also replaces
+// an O(total subtree bytes) string with a fixed 20 bytes per directory
+// regardless of subtree size - the same dominant memory cost diff-memory.md
+// measured in internal/diff before its Phase 0 fix.
+//
+// Unlike internal/diff's version, there is no FileTwin concept here (dupes'
+// Node has one Hash field, not per-side HashA/HashB), so entries need no twin
+// tag - a directory and a file can never collide in this scheme regardless,
+// since each (name, hash) pair is length-prefixed independently either way.
+func dirDigest(entries []dirEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].name != entries[j].name {
+			return entries[i].name < entries[j].name
+		}
+		return entries[i].hash < entries[j].hash
+	})
+
+	h := sha1.New()
+	var lenBuf [4]byte
+	for _, e := range entries {
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(e.name)))
+		h.Write(lenBuf[:])
+		h.Write([]byte(e.name))
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(e.hash)))
+		h.Write(lenBuf[:])
+		h.Write([]byte(e.hash))
+	}
+	return string(h.Sum(nil))
+}
+
 func computeMetadata(n *Node) {
 	if n.IsFile {
 		return
 	}
-	
-	// Dir: Size = sum of children sizes. Hash = Merkle.
+
+	// Dir: Size = sum of children sizes. Hash = digest of children's names+hashes.
 	var size int64 = 0
-	var hashes []string
-	
+	var entries []dirEntry
+
 	for _, child := range n.Children {
 		computeMetadata(child)
 		size += child.Size
 		if child.Hash != "" {
-			// Hash input: Name + Hash (structure sensitive)
-			hashes = append(hashes, child.Name+":"+child.Hash)
+			entries = append(entries, dirEntry{name: child.Name, hash: child.Hash})
 		}
 	}
 	n.Size = size
-	
-	if len(hashes) > 0 {
-		sort.Strings(hashes) // Sort for stability
-		n.Hash = strings.Join(hashes, ",") // Simple merkle
-	}
+	n.Hash = dirDigest(entries)
 }
 
 func indexNodes(n *Node, index map[string][]*Node) {
@@ -253,7 +310,9 @@ func indexNodes(n *Node, index map[string][]*Node) {
 }
 
 func markCovered(n *Node, covered map[*Node]bool) {
-	if covered[n] { return }
+	if covered[n] {
+		return
+	}
 	covered[n] = true
 	for _, child := range n.Children {
 		markCovered(child, covered)
@@ -281,7 +340,7 @@ func walkDeterministic(n *Node, visit func(*Node)) {
 	sort.Slice(children, func(i, j int) bool {
 		return children[i].Name < children[j].Name
 	})
-	
+
 	for _, c := range children {
 		walkDeterministic(c, visit)
 	}

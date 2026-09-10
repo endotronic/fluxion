@@ -14,10 +14,16 @@ one do not propagate to the other.
 
 1. **Build the tree** from the map. Leaves get `Size` and a `Hash` chosen SHA-1-first,
    MD5-fallback (so legacy MD5-only snapshots work).
-2. **`computeMetadata`** post-order: a directory's `Size` is the sum of its children's,
-   and its `Hash` is the same synthetic merkle string as diff uses —
-   `sort(join(child.Name+":"+child.Hash, ","))`. Same two defects as in diff: it is not
-   injective (`:` / `,` unescaped), and it grows with subtree size.
+2. **`computeMetadata`** post-order: a directory's `Size` is the sum of its children's, and
+   its `Hash` is a digest over the sorted `(child.Name, child.Hash)` pairs (`dirDigest`,
+   ported 2026-09-09 from `internal/diff`'s identical `digestEntries` fix — see
+   [known-issues.md](known-issues.md) issue 2.2). This used to be the literal string
+   `sort(join(child.Name+":"+child.Hash, ","))`, with the same two defects diff had: not
+   injective (`:` / `,` unescaped, so two structurally different directories could hash
+   identical) and `O(subtree bytes)` per node. Both fixed by length-prefixing before hashing
+   instead of joining with unescaped separators. No `FileTwin` concept exists here (`Node`
+   has one `Hash` field, not per-side `HashA`/`HashB`), so unlike diff's version this one
+   needs no twin tag on each entry.
 3. **`indexNodes`**: `hash -> []*Node` over every node with a non-empty hash.
 4. **Candidates**: hashes with `len(nodes) >= 2` whose size is `>= minSize`.
 5. **Top-down `walkDeterministic`** (children sorted by name). At each node:

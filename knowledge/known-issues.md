@@ -44,19 +44,22 @@ in `import-legacy`'s root autodetection (`internal/app/import.go`).
 
 ## Severity 2 — wrong or unstable results
 
-### 2.2 Directory hashes are not injective (collision) — FIXED in `internal/diff` 2026-09-09, still open in `internal/dupes`
-`computeMerkleHashes` used to join `child.Name + ":" + child.Hash` with `,` without
-escaping either delimiter. A directory containing one file literally named `a:AA,b` with
-hash `BB` produced `"a:AA,b:BB"` — identical to a directory containing `a`(`AA`) and
-`b`(`BB`). The two directories then compared equal and one could be reported as a move or
-copy of the other.
+### 2.2 Directory hashes are not injective (collision) — FIXED 2026-09-09 (`internal/diff`), FIXED 2026-09-09 (`internal/dupes`)
+`computeMerkleHashes` (`internal/diff`) and `computeMetadata` (`internal/dupes`) both used
+to join `child.Name + ":" + child.Hash` with `,` without escaping either delimiter. A
+directory containing one file literally named `a:AA,b` with hash `BB` produced
+`"a:AA,b:BB"` — identical to a directory containing `a`(`AA`) and `b`(`BB`). The two
+directories then compared equal, and `diff` could report one as a move/copy of the other,
+or `dupes` could report one as a duplicate of the other.
 
-Fixed in `internal/diff` (`digestEntries` in `diff.go`: SHA-1 over a sorted,
-length-prefixed child list — see [diff-algo.md](diff-algo.md) Stage 4). **`internal/dupes/dupes.go:242`
-has the identical `strings.Join(hashes, ",")` scheme and the identical defect, untouched by
-this fix** — it was scoped to `internal/diff` only (diff-memory.md's Phase 0 is about
-`diff`'s memory ceiling specifically). Porting the same `digestEntries` approach to
-`dupes.go` is still open and would close this issue fully.
+Fixed in `internal/diff` first (`digestEntries` in `diff.go`: SHA-1 over a sorted,
+length-prefixed child list — see [diff-algo.md](diff-algo.md) Stage 4), then ported to
+`internal/dupes` the same day (`dirDigest` in `dupes.go`, same approach minus the `FileTwin`
+tag `internal/diff` needs and `internal/dupes` has no equivalent of). One test
+(`dupes_test.go`'s "Directory Duplicate (Collapsed)" case) had hardcoded the old scheme's
+exact string (`"file1:h1"`) as its expected hash — a coupling to internal representation
+that the fix necessarily broke — and was rewritten to check the meaningful property
+instead (a directory-level group covering the expected paths), not the opaque digest value.
 
 ### 2.4 Deleted snapshots are still resolvable
 `FindSnapshot` and `GetLastSnapshot` do not filter `status = 'deleted'` tombstones. Naming
@@ -75,12 +78,11 @@ this should at least require `--force`.
 
 ## Severity 3 — scale and performance
 
-### 3.1 Merkle strings dominate memory — FIXED in `internal/diff` 2026-09-09
+### 3.1 Merkle strings dominate memory — FIXED 2026-09-09 (`internal/diff` and `internal/dupes`)
 A directory's "hash" used to contain every descendant hash. Measured on a synthetic
 depth-5 / 4096-file tree: 1,336,663 total bytes of `HashA`, largest single directory
-string 196,603 bytes — ~326 B/file, growing with depth. Fixed by 2.2's digest change —
-`internal/dupes` still has the pre-fix concatenated-string scheme and its memory profile
-(see 2.2).
+string 196,603 bytes — ~326 B/file, growing with depth. Fixed by 2.2's digest change, in
+both packages.
 
 ### 3.2 Diff peak memory ~1 KiB/file — REDUCED to ~365 B/file 2026-09-09, not eliminated
 Two identical 200,000-file snapshots used to retain 200 MiB (398 MiB total allocated); the
@@ -136,10 +138,8 @@ tree build. [architecture.md](architecture.md).
 
 ## Modernisation candidates
 
-- ~~**Replace the synthetic merkle string with a real digest**~~ Done for `internal/diff`
-  2026-09-09 (issue 2.2/3.1). **The same change in `internal/dupes/dupes.go:242` is still
-  open** and was, per the reasoning that made this the highest value-per-line change in the
-  project, worth doing there too: same collision bug, same memory cost, same fix.
+- ~~**Replace the synthetic merkle string with a real digest**~~ Done 2026-09-09, in both
+  `internal/diff` and `internal/dupes` (issue 2.2/3.1).
 - **Property-based tests for diff.** The existing tests are case-by-case golden output,
   which is why 1.1 and 1.2 went unnoticed. The invariant worth asserting is: *every file
   present in A and absent from B appears somewhere in the output.* All three severity-1
