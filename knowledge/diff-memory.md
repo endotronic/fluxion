@@ -285,10 +285,18 @@ the caller fall back instead of guessing.
 
 ### Phase 3 — external move/copy matching (stage 6)
 
-The one stage that needs a global view. As a three-step external sort:
+The one stage that needs a global view, and the only thing standing between the streaming
+engine and a full-featured `diff`.
 
-1. Phase 2 writes a **spine** file in DFS order: front-coded path suffixes plus each
-   node's digests, sizes, flags and status. Nodes are numbered by ordinal.
+**Correction to what this section used to assume:** it said "Phase 2 writes a spine file".
+Phase 2 as built does *not* — `streamCompare` goes straight from records to output and
+persists nothing, because without move detection it never needs a second pass. Writing the
+spine is therefore Phase 3's own first job, not something already sitting there.
+
+1. Write a **spine** file during the stream, in DFS order: front-coded path suffixes plus
+   each node's digests, sizes, flags and status, numbered by ordinal. Note this also means
+   the streaming engine must start computing directory digests, which it currently skips
+   for the same reason — nothing consumes them without move matching.
 2. Emit a fixed-width `(digest, ordinal, kind, size)` record per node, **external-sort by
    digest**, then scan hash-groups applying the existing pairing and consumption rules —
    `Removed`↔`Added` = Move, existing↔`Added` = Copy, plus the swap cases. Carrying an
@@ -300,6 +308,23 @@ One pathology to handle deliberately: a single digest can cover an enormous grou
 zero-byte file shares one). The group scan must pair off streaming with a bounded buffer
 and spill beyond it — the current in-memory code has the same pathology and simply
 survives it by having already lost.
+
+**Two things Phase 2 established that this should reuse rather than reinvent:**
+
+- `rollupAccum`/`decideRollup` (`internal/diff/rollup.go`) is how both engines reach the
+  rollup verdict through one implementation. Move/copy statuses already flow through it
+  (`firstMoveSource`/`firstCopySource`), so a streaming engine that learns about moves
+  feeds the same accumulator. Do not transcribe those rules a third time.
+- The equivalence harness (`streaming_test.go`, `mergejoin_test.go`) is the acceptance
+  test: byte-identical `[]DiffResult` against the tree engine over the same corpus
+  `property_test.go` uses, unbudgeted and budgeted. Extend it by dropping the
+  `NoMoves`/`NoCopies` restriction from `streamOpts` once moves work. It found four real
+  bugs in Phase 2, all of which would otherwise have shipped as plausible wrong output.
+
+**And one hard constraint it must keep:** `streamCompare` verifies DFS-key ordering as it
+walks and returns `errStreamOutOfOrder` rather than guessing, because a mis-nested node is
+a wrong answer under the severity rule. Multi-pass processing must not weaken that — each
+pass over the spine needs the same discipline.
 
 ### Phase 4 — external fixed point (stage 8)
 
