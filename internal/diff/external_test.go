@@ -287,3 +287,81 @@ func TestExternal_HonoursMoveAndCopySwitches(t *testing.T) {
 		})
 	}
 }
+
+// Legacy-imported snapshots carry MD5 and no SHA-1 (knowledge/goals.md,
+// "Lineage"), so --md5 is how a current scan is compared against the author's
+// years of dupe-finder flat files - the case the fleet work actually starts
+// from. The engines have to agree there too, and the matcher keys on whichever
+// hash was selected, so it is a distinct path and not a relabelling.
+func TestExternal_MD5MatchesTreeEngine(t *testing.T) {
+	md5rec := func(path, hash string) models.FileRecord {
+		return models.FileRecord{Path: path, Filename: path, SizeBytes: 10, MD5: hash}
+	}
+
+	for seed := int64(0); seed < 3000; seed++ {
+		a, b := generateTreePair(rand.New(rand.NewSource(seed)))
+		// Re-key the generated pair onto MD5, leaving SHA-1 empty as an
+		// import-legacy snapshot does.
+		for p, r := range a {
+			a[p] = md5rec(p, r.SHA1)
+		}
+		for p, r := range b {
+			b[p] = md5rec(p, r.SHA1)
+		}
+
+		opts := streamOpts(0)
+		opts.HashType = "md5"
+
+		got, err := streamCompare(dfsIter(a), dfsIter(b), opts)
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		want, err := compareSnapshotsWith(mergeJoinInsert, mapToIter(a), mapToIter(b), opts)
+		if err != nil {
+			t.Fatalf("seed %d: tree: %v", seed, err)
+		}
+		if !reflect.DeepEqual(finalizeResults(got, "/", "/"), want) {
+			t.Fatalf("seed %d: disagreed comparing by MD5\n got: %s\nwant: %s", seed,
+				formatResults(finalizeResults(got, "/", "/")), formatResults(want))
+		}
+	}
+}
+
+// Stage 8's loop is capped at 32 rounds and returns whatever the 32nd produced.
+// That guard is the difference between a bug that fails a test and one that
+// quietly hands back a diff which never reached its fixed point - and each round
+// is a full re-walk of both snapshots, so at fleet scale it is also the
+// difference between one DB scan and several. Both are worth pinning with a
+// measurement rather than an assumption.
+func TestExternal_FixedPointConverges(t *testing.T) {
+	rounds := map[int]int{}
+	worst, worstSeed := 0, int64(-1)
+
+	for seed := int64(0); seed < 20000; seed++ {
+		a, b := generateTreePair(rand.New(rand.NewSource(seed)))
+		for _, budget := range []int{0, 1} {
+			x := &externalDiff{opts: streamOpts(budget)}
+			if _, err := x.compare(dfsIter(a), dfsIter(b)); err != nil {
+				t.Fatalf("seed %d: %v", seed, err)
+			}
+			n := x.passes - 1 // pass 1 is the matcher, the rest are output rounds
+			rounds[n]++
+			if n > worst {
+				worst, worstSeed = n, seed
+			}
+		}
+	}
+
+	t.Logf("output rounds: %v (worst %d, seed %d)", rounds, worst, worstSeed)
+	// Measured over 100,000 runs of this corpus: 76%% need one round, 24%% need
+	// two, 236 need three and 3 need four. Well clear of the guard - if this
+	// starts approaching it, the loop is no longer converging for the reason
+	// diff-algo.md's stage 8 says it does.
+	if worst > 8 {
+		t.Errorf("fixed point needed %d rounds (seed %d); the guard is 32, so it is "+
+			"no longer converging in the two the rules predict", worst, worstSeed)
+	}
+	if rounds[1] == 0 {
+		t.Error("no input finished in a single round - the fixed point is now always paying an extra full re-walk")
+	}
+}

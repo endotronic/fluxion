@@ -327,25 +327,10 @@ forward scans over a contiguous byte range, no buffer at all. Where the tree eng
 `map[hashVal][]*Node` held every member of the group, this holds one record per cursor.
 `TestExternal_HugeContentGroup` pins a 4,000-member group.
 
-**Stage 8 (what the plan called Phase 4) came with it**, because externally it is the same
-shape of problem. Each round is another walk with a larger demotion set merge-joined in by
-ordinal; the walk writes out the move sources it suppressed, and the round's output is then
-asked which of them it failed to mention. Three things had to be got right:
-
-- **The demotion set is cumulative**, exactly as the tree engine's mutations are. A source
-  demoted in round *k* emits a `Removed` line, which would make round *k+1* think it had
-  been mentioned all along and put it back — an oscillation, not a fixed point.
-- **The candidate is the *highest* suppressed node, not each leaf.** `reinstateHiddenMoveSources`
-  stops recursing at the first `MovedSource` it meets and decides for the whole subtree.
-  A stream cannot know that a directory is wholly `MovedSource` until it closes, by which
-  point its children have already written their own candidate records — so a directory
-  that closes as `MovedSource` **truncates the candidate log back to where its subtree
-  started** and writes one record for itself. That is what `spillFile.truncate` exists for.
-  The resulting log is still in ordinal order, because candidates are mutually
-  incomparable and for such nodes pre-order and post-order coincide.
-- **The root is a node too.** If every file moved away, the root itself rolls up to
-  `MovedSource`, and nothing can ever name the root — so the whole diff reverts to
-  `Removed`.
+**Stage 8 came with it**, because externally it is the same shape of problem: another walk
+with a larger demotion set merge-joined in. It is written up under Phase 4 below, including
+the three things that had to be got right and the measured round counts — read that section
+before touching the fixed point, not this paragraph.
 
 **Measured.** With every one of 400,000 files a side moving from one tree to another, peak
 frames 2 and peak retained lines 27 at *both* 20,000 and 200,000 files a side, two passes
@@ -413,14 +398,73 @@ pass, rather than trusted.
 
 ### Phase 4 — external fixed point (stage 8) — BUILT 2026-09-10, with Phase 3
 
-Folded into Phase 3 above, because the streaming engine reaches the fixed point by re-running
-the walk rather than by mutating a tree, which makes stage 8 the same machinery as stage 6's
-second pass rather than a separate mechanism. Converges in one round on every input measured;
-the bound of 32 is a guard.
+Built alongside Phase 3 rather than after it, because externally the two are the same
+machinery: once stage 6 has made the engine re-walk the input, reaching a fixed point is
+another re-walk with a bigger merge-join, not a new mechanism.
+
+**Three things this section used to say turned out to be wrong**, and the corrections are
+the load-bearing part:
+
+- *"the trial output written to a temp file"* — no. `[]DiffResult` is the function's return
+  value; it is in RAM whatever happens, and `accountedPaths` over it is therefore free in
+  the asymptotic sense. **The output is the one thing in this engine that legitimately
+  scales with the answer rather than with the input.** Externalising it would have bought
+  nothing and cost a pass.
+- *"`accountedPaths` merge-joined back into the next pass by ordinal"* — the join runs the
+  other way round. `accountedPaths` is a **path-keyed** set, consulted through
+  `sourceNamed`, which walks up path components; ordinals never touch it. What is
+  merge-joined by ordinal is the **demotion set**, which is the *output* of the check
+  rather than its input.
+- *"one sequential pass over the spine"* — there is no spine (see Phase 3), so each round is
+  a **full re-walk of both snapshots**. At fleet scale that is a whole DB scan per round,
+  far more expensive per round than the tree engine's re-collection over a materialised
+  tree. It is affordable only because extra rounds are rare, which is now measured rather
+  than assumed (below).
+
+**Two things it did not anticipate, and both are wrong answers if got wrong:**
+
+- **The demotion set must be cumulative.** The tree engine gets this for free, because
+  `reinstateHiddenMoveSources` only ever looks at nodes that are *still* `MovedSource` and
+  its demotions persist in the tree. A re-walking engine recomputes from scratch every
+  round, so unless the set is carried forward it oscillates: a source demoted in round *k*
+  emits a `Removed` line, round *k+1* sees that line, concludes the source was mentioned
+  after all, and puts it back.
+- **The candidate is the highest suppressed node, and that is a bottom-up fact.**
+  `reinstateHiddenMoveSources` stops recursing at the first `MovedSource` it meets and
+  decides for that whole subtree, which is *not* the same as deciding for each leaf:
+  coverage is monotone downward, so a leaf can be named by the output while the directory
+  above it is not. A stream cannot know a directory is wholly `MovedSource` until it
+  closes, by which point its children have already written their candidate records — hence
+  `spillFile.truncate`, and hence a directory closing as `MovedSource` cancelling its whole
+  subtree's records and writing one for itself. The log stays in ordinal order because
+  candidates are mutually incomparable, and for such nodes pre-order and post-order
+  coincide.
+
+**And the root is a node.** If every file moved away, the root rolls up to `MovedSource`,
+and no line can ever name the root — so the whole diff correctly reverts to `Removed`.
+
+**Measured convergence** (`TestExternal_FixedPointConverges`, 100,000 runs over
+`property_test.go`'s corpus, unbudgeted and at budget 1 — a deliberately move-dense
+corpus, far worse than real data):
+
+| Output rounds | Runs |
+|---|---|
+| 1 (nothing needed reinstating) | 76,118 |
+| 2 | 23,643 |
+| 3 | 236 |
+| 4 | 3 |
+
+So three quarters of diffs pay one output walk, and the worst case observed is four. The
+cap of 32 remains a guard, not an expected limit — and the test now fails well before it,
+because hitting the cap means returning a diff that never reached its fixed point, which is
+a wrong answer rather than a slow one.
 
 The invariant from [diff-algo.md](diff-algo.md) carries over unchanged and gets sharper
 teeth here: **anything that removes lines from the output must live inside the collector**,
-because stage 8 only sees what the collector emitted.
+because stage 8 only sees what the collector emitted. Translated to the streaming engine:
+it must live inside the walk that produces `results`. The line budget is the live example —
+`streamFrame.appendOut` applies it as lines are appended, inside the walk, so stage 8 sees
+its consequences.
 
 ### Phase 5 — engine selection and measurement — BUILT 2026-09-10
 
@@ -474,7 +518,7 @@ because there is no spine file:
 | Decisions (~20 B, only for nodes that actually matched) | ≤ 4 GB |
 | Candidates (one record per suppressed move source, per round) | ≤ 4 GB |
 | **Total temp storage** | **≈20 GB** for 200M nodes; ≈2 GB for 20M |
-| Passes over both snapshots | 1 for the matcher + 1 per fixed-point round (measured: 1) |
+| Passes over both snapshots | 1 for the matcher + 1 per fixed-point round (measured: one round in 76% of runs, two in 24%, four at worst — see Phase 4) |
 
 **~20 GB of temp space is still a real constraint on a fleet with 8.11T free spread across
 pools at 94–96%,** which is what `--temp-dir` is for. Two things the engine does *not* yet
