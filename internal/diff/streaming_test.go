@@ -276,3 +276,101 @@ func TestStreaming_RetentionIsBoundedByDepthAndBudget(t *testing.T) {
 		prev.frames, prev.lines = e.peakFrames, e.peakLines
 	}
 }
+
+// CompareSnapshots must never hand back a worse answer just because the
+// streaming engine could not produce one. These are the two ways it declines -
+// options it cannot honour, and input it cannot trust - and both must come back
+// with the tree engine's full-featured result rather than an error or a
+// degraded diff.
+func TestEngineAuto_FallsBackToTree(t *testing.T) {
+	a := map[string]models.FileRecord{
+		"/moved/one": rec("/moved/one", "h1", 1),
+		"/keep":      rec("/keep", "h2", 1),
+	}
+	b := map[string]models.FileRecord{
+		"/elsewhere/one": rec("/elsewhere/one", "h1", 1),
+		"/keep":          rec("/keep", "h2", 1),
+	}
+
+	// 1. Move detection requested: streaming refuses, tree answers.
+	withMoves := Options{RootA: "/", RootB: "/", HashType: "sha1"}
+	auto, err := CompareSnapshots(mapToIter(a), mapToIter(b), withMoves)
+	if err != nil {
+		t.Fatalf("auto: %v", err)
+	}
+	tree, err := compareSnapshotsWith(mergeJoinInsert, mapToIter(a), mapToIter(b), withMoves)
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	if !reflect.DeepEqual(auto, tree) {
+		t.Errorf("auto did not match the tree engine when moves are enabled\n got: %s\nwant: %s",
+			formatResults(auto), formatResults(tree))
+	}
+	var sawMove bool
+	for _, r := range auto {
+		if r.Status == StatusMove {
+			sawMove = true
+		}
+	}
+	if !sawMove {
+		t.Error("expected the fallback to still detect the move")
+	}
+
+	// 2. Streaming-compatible options but plain path order, which streaming
+	// cannot trust. mapToIter sorts by path, not by DFS key, so a file/directory
+	// collision is enough to make the two orders differ.
+	collide := map[string]models.FileRecord{
+		"/a":     rec("/a", "h1", 1),
+		"/a.txt": rec("/a.txt", "h2", 1),
+	}
+	collideB := map[string]models.FileRecord{
+		"/a/x":   rec("/a/x", "h3", 1),
+		"/a.txt": rec("/a.txt", "h2", 1),
+	}
+	noMoves := Options{RootA: "/", RootB: "/", HashType: "sha1", NoMoves: true, NoCopies: true}
+
+	auto2, err := CompareSnapshots(mapToIter(collide), mapToIter(collideB), noMoves)
+	if err != nil {
+		t.Fatalf("auto (plain order): %v", err)
+	}
+	tree2, err := compareSnapshotsWith(mergeJoinInsert, mapToIter(collide), mapToIter(collideB), noMoves)
+	if err != nil {
+		t.Fatalf("tree (plain order): %v", err)
+	}
+	if !reflect.DeepEqual(auto2, tree2) {
+		t.Errorf("auto did not fall back cleanly on non-DFS input\n got: %s\nwant: %s",
+			formatResults(auto2), formatResults(tree2))
+	}
+
+	// 3. EngineStreaming says no rather than falling back.
+	if _, err := CompareSnapshots(mapToIter(a), mapToIter(b),
+		Options{RootA: "/", RootB: "/", HashType: "sha1", Engine: EngineStreaming}); err == nil {
+		t.Error("EngineStreaming should refuse move detection, not fall back")
+	}
+}
+
+// With DFS-ordered input and no move detection, auto must actually stream - the
+// fallback is a safety net, not the normal path.
+func TestEngineAuto_UsesStreamingWhenItCan(t *testing.T) {
+	for seed := int64(0); seed < 500; seed++ {
+		a, b := generateTreePair(rand.New(rand.NewSource(seed)))
+		opts := streamOpts(DefaultMaxLinesPerDir)
+
+		auto, err := CompareSnapshots(dfsIter(a), dfsIter(b), opts)
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		streamed, err := CompareSnapshots(dfsIter(a), dfsIter(b), withEngine(opts, EngineStreaming))
+		if err != nil {
+			t.Fatalf("seed %d (forced streaming): %v", seed, err)
+		}
+		if !reflect.DeepEqual(auto, streamed) {
+			t.Fatalf("seed %d: auto did not take the streaming path", seed)
+		}
+	}
+}
+
+func withEngine(o Options, e Engine) Options {
+	o.Engine = e
+	return o
+}

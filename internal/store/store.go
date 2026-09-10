@@ -22,6 +22,11 @@ type Store interface {
 	GetFileCount(snapshotID int64) (int64, error)
 	GetFilesForSnapshot(snapshotID int64, onProgress func(int)) (map[string]models.FileRecord, error)
 	IterateFiles(snapshotID int64, onFile func(models.FileRecord) error) error
+
+	// IterateFilesDFS streams a snapshot in the DFS-key order internal/diff's
+	// streaming engine requires: like path order, except a directory's contents
+	// immediately follow the directory itself.
+	IterateFilesDFS(snapshotID int64, onFile func(models.FileRecord) error) error
 	SearchFiles(snapshotID int64, pattern string, caseSensitive bool, onFile func(models.FileRecord) error) error
 	GetFileList(snapshotID int64, onProgress func(int)) ([]*models.FileRecord, error)
 	HasSizes(snapshotID int64) (bool, error)

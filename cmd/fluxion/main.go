@@ -247,7 +247,24 @@ func runDiff(args []string) {
 	maxLines := cmd.Int("max-lines", diff.DefaultMaxLinesPerDir,
 		"Maximum lines one directory may print before the rest is summarised as \"... N more\" (0 = no limit)")
 
+	enginePtr := cmd.String("engine", "auto",
+		"Diff engine: auto (stream when possible, else tree), tree (always build the in-memory tree), "+
+			"streaming (refuse rather than fall back; needs --no-moves --no-copies)")
+
 	cmd.Parse(args)
+
+	var engine diff.Engine
+	switch *enginePtr {
+	case "auto":
+		engine = diff.EngineAuto
+	case "tree":
+		engine = diff.EngineTree
+	case "streaming":
+		engine = diff.EngineStreaming
+	default:
+		fmt.Printf("Error: unknown --engine %q (want auto, tree or streaming)\n", *enginePtr)
+		os.Exit(1)
+	}
 
 	if *dbPtr == "" {
 		fmt.Println("Error: --db is required for diff")
@@ -272,6 +289,7 @@ func runDiff(args []string) {
 		ShowUnchanged: showUnchanged,
 
 		MaxLinesPerDir: *maxLines,
+		Engine:         engine,
 	}
 
 	if err := app.RunDiff(cfg); err != nil {

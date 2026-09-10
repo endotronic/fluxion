@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fluxion/internal/models"
 	"path/filepath"
 	"sort"
@@ -205,8 +206,27 @@ type Options struct {
 	// the remainder is summarised. 0 means no cap.
 	MaxLinesPerDir int
 
+	// Engine selects how the diff is computed. The zero value, EngineAuto,
+	// uses the streaming engine when it can answer the question asked and the
+	// tree engine otherwise - see CompareSnapshots.
+	Engine Engine
+
 	OnProgress func(current int)
 }
+
+// Engine selects the diff implementation.
+type Engine uint8
+
+const (
+	// EngineAuto streams when the options allow it, otherwise builds the tree.
+	EngineAuto Engine = iota
+	// EngineTree always builds the unified tree: the full-featured engine, and
+	// the oracle everything else is checked against.
+	EngineTree
+	// EngineStreaming refuses rather than falling back, so a caller that needs
+	// the memory bound finds out instead of silently getting the tree.
+	EngineStreaming
+)
 
 // treeBuilder populates the unified two-snapshot tree from A's and B's record
 // streams. Two implementations exist - mergeJoinInsert and twoPassInsert - and
@@ -217,7 +237,29 @@ type Options struct {
 type treeBuilder func(root *Node, iterA, iterB FileIterator, hashType string, onProgress func(int)) error
 
 // CompareSnapshots computes the diff between two sets of files.
+//
+// With EngineAuto it streams when it can and builds the tree when it cannot.
+// Streaming needs DFS-key-ordered input (store.IterateFilesDFS) and cannot do
+// move/copy detection yet; when either does not hold it falls back, so the
+// answer is always the full-featured one and only the memory profile changes.
+// EngineStreaming refuses instead of falling back, for callers that would rather
+// hear "no" than quietly get the memory-hungry path.
 func CompareSnapshots(iterA, iterB FileIterator, opts Options) ([]DiffResult, error) {
+	if opts.Engine == EngineAuto || opts.Engine == EngineStreaming {
+		results, err := streamCompare(iterA, iterB, opts)
+		switch {
+		case err == nil:
+			return finalizeResults(results, opts.RootA, opts.RootB), nil
+		case opts.Engine == EngineStreaming:
+			return nil, err
+		case errors.Is(err, errStreamUnsupported) || errors.Is(err, errStreamOutOfOrder):
+			// Fall through to the tree engine. Re-running the iterators is
+			// safe: they are re-runnable by contract, and the streaming attempt
+			// wrote nothing.
+		default:
+			return nil, err
+		}
+	}
 	return compareSnapshotsWith(mergeJoinInsert, iterA, iterB, opts)
 }
 
