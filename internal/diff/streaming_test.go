@@ -30,43 +30,62 @@ func dfsIter(m map[string]models.FileRecord) FileIterator {
 	}
 }
 
+// streamOpts is the full-featured configuration - move and copy detection on -
+// since Phase 3. Restricting it was Phase 2's scope, and relaxing it here is
+// what turns the equivalence harness into the acceptance test for Phase 3.
 func streamOpts(maxLines int) Options {
 	return Options{
 		RootA: "/", RootB: "/", HashType: "sha1",
-		NoMoves: true, NoCopies: true,
 		MaxLinesPerDir: maxLines,
 	}
 }
 
+// noMoveOpts is the Phase 2 path: one pass, no matcher, no temp files.
+func noMoveOpts(maxLines int) Options {
+	o := streamOpts(maxLines)
+	o.NoMoves, o.NoCopies = true, true
+	return o
+}
+
 // runStreaming and runTree produce the two answers that must agree.
-func runStreaming(t *testing.T, a, b map[string]models.FileRecord, maxLines int) []DiffResult {
+func runStreaming(t *testing.T, a, b map[string]models.FileRecord, opts Options) []DiffResult {
 	t.Helper()
-	got, err := streamCompare(dfsIter(a), dfsIter(b), streamOpts(maxLines))
+	got, err := streamCompare(dfsIter(a), dfsIter(b), opts)
 	if err != nil {
 		t.Fatalf("streamCompare: %v", err)
 	}
 	return finalizeResults(got, "/", "/")
 }
 
-func runTree(t *testing.T, a, b map[string]models.FileRecord, maxLines int) []DiffResult {
+func runTree(t *testing.T, a, b map[string]models.FileRecord, opts Options) []DiffResult {
 	t.Helper()
-	got, err := compareSnapshotsWith(mergeJoinInsert, mapToIter(a), mapToIter(b), streamOpts(maxLines))
+	got, err := compareSnapshotsWith(mergeJoinInsert, mapToIter(a), mapToIter(b), opts)
 	if err != nil {
 		t.Fatalf("compareSnapshotsWith: %v", err)
 	}
 	return got
 }
 
+// requireStreamMatches asserts the acceptance test for both streaming phases:
+// byte-identical results, over every option that changes what gets printed.
+// --show-unchanged is in here because it is the one flag that adds a line the
+// collapsing rules do not otherwise produce - a directory's post-order context
+// row, which carries a rolled-up move's source path.
 func requireStreamMatches(t *testing.T, name string, a, b map[string]models.FileRecord, maxLines int) {
 	t.Helper()
-	got := runStreaming(t, a, b, maxLines)
-	want := runTree(t, a, b, maxLines)
-	if reflect.DeepEqual(got, want) {
-		return
+	for _, showUnchanged := range []bool{false, true} {
+		opts := streamOpts(maxLines)
+		opts.ShowUnchanged = showUnchanged
+		got := runStreaming(t, a, b, opts)
+		want := runTree(t, a, b, opts)
+		if reflect.DeepEqual(got, want) {
+			continue
+		}
+		t.Fatalf("%s (show-unchanged %v): streaming engine disagreed with the tree engine\n"+
+			"A: %v\nB: %v\n got (%d): %s\nwant (%d): %s",
+			name, showUnchanged, sortedKeys(a), sortedKeys(b),
+			len(got), formatResults(got), len(want), formatResults(want))
 	}
-	t.Fatalf("%s: streaming engine disagreed with the tree engine\n"+
-		"A: %v\nB: %v\n got (%d): %s\nwant (%d): %s",
-		name, sortedKeys(a), sortedKeys(b), len(got), formatResults(got), len(want), formatResults(want))
 }
 
 func sortedKeys(m map[string]models.FileRecord) []string {
@@ -188,16 +207,38 @@ func TestStreaming_MatchesTreeEngine_HandBuilt(t *testing.T) {
 	}
 }
 
-func TestStreaming_RefusesMoveDetection(t *testing.T) {
-	a := map[string]models.FileRecord{"/x": rec("/x", "h1", 1)}
-	for _, opts := range []Options{
-		{HashType: "sha1", NoMoves: true},  // copies still on
-		{HashType: "sha1", NoCopies: true}, // moves still on
-		{HashType: "sha1"},                 // both on
-	} {
-		if _, err := streamCompare(mapToIter(a), mapToIter(a), opts); !errors.Is(err, errStreamUnsupported) {
-			t.Errorf("opts %+v: err = %v, want errStreamUnsupported", opts, err)
-		}
+// The one tree-engine behaviour a stream cannot reproduce: a matched node
+// freezes its subtree's statuses at stage 5, which only becomes visible when a
+// disagreeing file twin forces it to Mixed and the collector prints those frozen
+// children. Reaching it needs a path that is a file *and* a directory within the
+// same snapshot - no filesystem produces one and the scanner cannot record one -
+// so the engine refuses and the caller falls back rather than guessing.
+func TestStreaming_RefusesMatchedDirectoryWithTwin(t *testing.T) {
+	a := map[string]models.FileRecord{"/old/y": rec("/old/y", "g", 10)}
+	b := map[string]models.FileRecord{
+		"/x":   rec("/x", "h", 10),   // the same path as a file...
+		"/x/y": rec("/x/y", "g", 10), // ...and as a directory whose content moved here
+	}
+
+	if _, err := streamCompare(dfsIter(a), dfsIter(b), streamOpts(0)); !errors.Is(err, errStreamMatchedTwin) {
+		t.Fatalf("err = %v, want errStreamMatchedTwin", err)
+	}
+	// errStreamMatchedTwin must reach CompareSnapshots as a fall-back signal,
+	// not as a failure, or the user gets an error instead of a diff.
+	if !errors.Is(errStreamMatchedTwin, errStreamUnsupported) {
+		t.Error("errStreamMatchedTwin must wrap errStreamUnsupported so auto falls back")
+	}
+	got, err := CompareSnapshots(dfsIter(a), dfsIter(b), streamOpts(0))
+	if err != nil {
+		t.Fatalf("CompareSnapshots: %v", err)
+	}
+	want, err := compareSnapshotsWith(mergeJoinInsert, mapToIter(a), mapToIter(b), streamOpts(0))
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("fallback did not reproduce the tree engine\n got: %s\nwant: %s",
+			formatResults(got), formatResults(want))
 	}
 }
 
@@ -240,16 +281,9 @@ func TestStreaming_RetentionIsBoundedByDepthAndBudget(t *testing.T) {
 	for _, n := range []int{20_000, 200_000} {
 		a, b := build(n, "a"), build(n, "b") // every file differs: nothing collapses to Unchanged
 
-		e := &streamEngine{opts: streamOpts(budget)}
-		root := &streamFrame{name: "", path: "", acc: newRollupAccum()}
-		e.stack = []*streamFrame{root}
-		err := mergeJoinStreamsBy(dfsIter(a), dfsIter(b), dfsKey,
-			func(path string, ra, rb *models.FileRecord) error { return e.add(path, ra, rb) })
-		if err != nil {
+		e := newStreamEngine(noMoveOpts(budget), false)
+		if err := e.run(dfsIter(a), dfsIter(b)); err != nil {
 			t.Fatalf("n=%d: %v", n, err)
-		}
-		for len(e.stack) > 1 {
-			e.closeTop()
 		}
 
 		t.Logf("%7d files/side: peak frames %d, peak retained lines %d", n, e.peakFrames, e.peakLines)
@@ -292,7 +326,8 @@ func TestEngineAuto_FallsBackToTree(t *testing.T) {
 		"/keep":          rec("/keep", "h2", 1),
 	}
 
-	// 1. Move detection requested: streaming refuses, tree answers.
+	// 1. Move detection requested. Streaming answers this itself since Phase 3;
+	// what must hold either way is that the answer is the tree engine's.
 	withMoves := Options{RootA: "/", RootB: "/", HashType: "sha1"}
 	auto, err := CompareSnapshots(mapToIter(a), mapToIter(b), withMoves)
 	if err != nil {
@@ -327,7 +362,7 @@ func TestEngineAuto_FallsBackToTree(t *testing.T) {
 		"/a/x":   rec("/a/x", "h3", 1),
 		"/a.txt": rec("/a.txt", "h2", 1),
 	}
-	noMoves := Options{RootA: "/", RootB: "/", HashType: "sha1", NoMoves: true, NoCopies: true}
+	noMoves := noMoveOpts(0)
 
 	auto2, err := CompareSnapshots(mapToIter(collide), mapToIter(collideB), noMoves)
 	if err != nil {
@@ -342,15 +377,17 @@ func TestEngineAuto_FallsBackToTree(t *testing.T) {
 			formatResults(auto2), formatResults(tree2))
 	}
 
-	// 3. EngineStreaming says no rather than falling back.
-	if _, err := CompareSnapshots(mapToIter(a), mapToIter(b),
-		Options{RootA: "/", RootB: "/", HashType: "sha1", Engine: EngineStreaming}); err == nil {
-		t.Error("EngineStreaming should refuse move detection, not fall back")
+	// 3. EngineStreaming says no rather than falling back. mapToIter sorts by
+	// path, not by DFS key, so the colliding pair above is order the streaming
+	// engine cannot trust.
+	if _, err := CompareSnapshots(mapToIter(collide), mapToIter(collideB),
+		withEngine(noMoves, EngineStreaming)); !errors.Is(err, errStreamOutOfOrder) {
+		t.Errorf("EngineStreaming err = %v, want errStreamOutOfOrder rather than a fall back", err)
 	}
 }
 
-// With DFS-ordered input and no move detection, auto must actually stream - the
-// fallback is a safety net, not the normal path.
+// With DFS-ordered input, auto must actually stream - the fallback is a safety
+// net, not the normal path.
 func TestEngineAuto_UsesStreamingWhenItCan(t *testing.T) {
 	for seed := int64(0); seed < 500; seed++ {
 		a, b := generateTreePair(rand.New(rand.NewSource(seed)))

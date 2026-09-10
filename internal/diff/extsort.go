@@ -38,12 +38,40 @@ func (s *extSorter) add(payload []byte) error {
 	if s.err != nil {
 		return s.err
 	}
+	need := recHeaderLen + len(payload)
+	if len(s.arena)+need > sortMemLimit && len(s.offs) > 0 {
+		if err := s.flushRun(); err != nil {
+			return err
+		}
+	}
+	s.grow(need)
 	s.offs = append(s.offs, len(s.arena))
 	s.arena = appendRecord(s.arena, payload)
-	if len(s.arena) >= sortMemLimit {
-		return s.flushRun()
-	}
 	return nil
+}
+
+// grow makes room for need more bytes without letting append's doubling take
+// the arena past the limit. Left to append, a buffer at 40 MiB that needs one
+// more record reallocates to 80 MiB - so the knob that says "64 MiB of sort
+// buffer" would quietly cost 128 MiB of resident memory, which is exactly the
+// kind of factor this phase exists to remove.
+func (s *extSorter) grow(need int) {
+	if cap(s.arena)-len(s.arena) >= need {
+		return
+	}
+	size := cap(s.arena) * 2
+	if size < 64<<10 {
+		size = 64 << 10
+	}
+	if size > sortMemLimit {
+		size = sortMemLimit
+	}
+	if size < len(s.arena)+need {
+		size = len(s.arena) + need // one oversized record still has to fit
+	}
+	grown := make([]byte, len(s.arena), size)
+	copy(grown, s.arena)
+	s.arena = grown
 }
 
 func (s *extSorter) key(off int) []byte {

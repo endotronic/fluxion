@@ -31,6 +31,10 @@ type DiffConfig struct {
 	// Engine selects the diff implementation; see diff.Engine. The zero value
 	// streams when it can and builds the tree when it cannot.
 	Engine diff.Engine
+
+	// TempDir is where the streaming engine's move/copy matching puts its
+	// intermediates once they outgrow memory; empty means the system default.
+	TempDir string
 }
 
 func RunDiff(cfg DiffConfig) error {
@@ -110,12 +114,11 @@ func RunDiff(cfg DiffConfig) error {
 
 	// The streaming engine needs DFS-key order, which costs a temp b-tree sort;
 	// there is no reason to pay for it when the tree engine is going to run
-	// anyway. Streaming cannot do move/copy detection yet, so that is the test.
-	// Getting this wrong is not a correctness problem - CompareSnapshots detects
-	// unusable ordering and falls back - only a wasted sort or a missed
-	// opportunity to stream.
-	streamable := cfg.Engine == diff.EngineStreaming ||
-		(cfg.Engine == diff.EngineAuto && cfg.NoMoves && cfg.NoCopies)
+	// anyway. Since Phase 3 that is the only reason left - streaming answers
+	// move/copy detection too. Getting this wrong is not a correctness problem -
+	// CompareSnapshots detects unusable ordering and falls back - only a wasted
+	// sort or a missed opportunity to stream.
+	streamable := cfg.Engine != diff.EngineTree
 
 	// Helper to create iterator
 	createIter := func(id int64, rootPath string) diff.FileIterator {
@@ -165,6 +168,7 @@ func RunDiff(cfg DiffConfig) error {
 			NoMoves:        cfg.NoMoves,
 			ShowUnchanged:  cfg.ShowUnchanged,
 			MaxLinesPerDir: cfg.MaxLinesPerDir,
+			TempDir:        cfg.TempDir,
 			Engine:         cfg.Engine,
 			OnProgress: func(curr int) {
 				barDiff.Set(curr)

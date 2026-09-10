@@ -249,7 +249,11 @@ func runDiff(args []string) {
 
 	enginePtr := cmd.String("engine", "auto",
 		"Diff engine: auto (stream when possible, else tree), tree (always build the in-memory tree), "+
-			"streaming (refuse rather than fall back; needs --no-moves --no-copies)")
+			"streaming (refuse rather than fall back)")
+
+	tempDir := cmd.String("temp-dir", "",
+		"Where the streaming engine spills its move/copy matching intermediates "+
+			"when they outgrow memory (default: system temp)")
 
 	cmd.Parse(args)
 
@@ -289,6 +293,7 @@ func runDiff(args []string) {
 		ShowUnchanged: showUnchanged,
 
 		MaxLinesPerDir: *maxLines,
+		TempDir:        *tempDir,
 		Engine:         engine,
 	}
 

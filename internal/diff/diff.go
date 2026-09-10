@@ -206,6 +206,14 @@ type Options struct {
 	// the remainder is summarised. 0 means no cap.
 	MaxLinesPerDir int
 
+	// TempDir is where the external move/copy matching of Phase 3
+	// (knowledge/diff-memory.md) puts its intermediates when they outgrow
+	// memory. Empty means the system default. On a fleet at 94% capacity this
+	// is not a detail: the intermediates for a 200M-node diff run to tens of
+	// gigabytes, and they must be able to land somewhere other than the pool
+	// being diffed.
+	TempDir string
+
 	// Engine selects how the diff is computed. The zero value, EngineAuto,
 	// uses the streaming engine when it can answer the question asked and the
 	// tree engine otherwise - see CompareSnapshots.
