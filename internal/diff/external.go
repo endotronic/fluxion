@@ -225,11 +225,19 @@ type hashRecord struct {
 	path   string
 }
 
+func recRole(rec []byte) byte     { return rec[29] }
+func recStatus(rec []byte) Status { return Status(rec[30]) }
+
+// parseHashRecord decodes a record, allocating for its path. Callers scanning a
+// group filter on recRole/recStatus first and only decode what they take: a
+// content group can hold millions of members, and building a path string for
+// every one of them just to discard it is the kind of per-node cost this phase
+// exists to remove.
 func parseHashRecord(rec []byte) hashRecord {
 	return hashRecord{
 		ord:    int64(binary.BigEndian.Uint64(rec[21:29])),
-		role:   rec[29],
-		status: Status(rec[30]),
+		role:   recRole(rec),
+		status: recStatus(rec),
 		isFile: rec[31] == 1,
 		path:   string(rec[32:]),
 	}
@@ -281,12 +289,12 @@ func matchGroups(sorted *spillFile, opts Options) (*spillFile, error) {
 // holding every member.
 type roleCursor struct {
 	r    *recReader
-	want func(hashRecord) bool
+	want func(role byte, status Status) bool
 	err  error
 	done bool
 }
 
-func newRoleCursor(s *spillFile, start, end int64, want func(hashRecord) bool) *roleCursor {
+func newRoleCursor(s *spillFile, start, end int64, want func(byte, Status) bool) *roleCursor {
 	return &roleCursor{r: newRecReader(s, start, end), want: want}
 }
 
@@ -305,24 +313,24 @@ func (c *roleCursor) take() *hashRecord {
 			c.done = true
 			return nil
 		}
-		h := parseHashRecord(rec)
-		if c.want(h) {
+		if c.want(recRole(rec), recStatus(rec)) {
+			h := parseHashRecord(rec)
 			return &h
 		}
 	}
 }
 
 func matchGroup(s *spillFile, start, end int64, out *extSorter, opts Options) error {
-	removed := newRoleCursor(s, start, end, func(h hashRecord) bool {
-		return h.role == roleSource && h.status == StatusRemoved
+	removed := newRoleCursor(s, start, end, func(role byte, status Status) bool {
+		return role == roleSource && status == StatusRemoved
 	})
-	modified := newRoleCursor(s, start, end, func(h hashRecord) bool {
-		return h.role == roleSource && h.status == StatusModified
+	modified := newRoleCursor(s, start, end, func(role byte, status Status) bool {
+		return role == roleSource && status == StatusModified
 	})
 	// Every source record that reached the sort is a non-Added node, which is
 	// exactly the tree engine's existingMap membership test.
-	existing := newRoleCursor(s, start, end, func(h hashRecord) bool {
-		return h.role == roleSource
+	existing := newRoleCursor(s, start, end, func(role byte, _ Status) bool {
+		return role == roleSource
 	})
 
 	targets := newRecReader(s, start, end)
@@ -335,10 +343,10 @@ func matchGroup(s *spillFile, start, end int64, out *extSorter, opts Options) er
 		if rec == nil {
 			break
 		}
-		t := parseHashRecord(rec)
-		if t.role != roleTarget {
+		if recRole(rec) != roleTarget {
 			continue
 		}
+		t := parseHashRecord(rec)
 
 		sourcePath := func(src *hashRecord) string {
 			p := src.path
@@ -508,7 +516,7 @@ func unnamedSources(candidates *spillFile, named map[string]bool, tmpDir string)
 	out := newSpill(tmpDir)
 	r := newRecReader(candidates, 0, candidates.size)
 	n := 0
-	var scratch []byte
+	w := ordWriter{out: out}
 	for {
 		rec, err := r.next()
 		if err != nil {
@@ -522,8 +530,7 @@ func unnamedSources(candidates *spillFile, named map[string]bool, tmpDir string)
 		if sourceNamed(named, string(rec[8:])) {
 			continue
 		}
-		scratch = appendRecord(scratch[:0], appendOrd(nil, ord))
-		if _, err := out.Write(scratch); err != nil {
+		if err := w.write(ord); err != nil {
 			out.close()
 			return nil, 0, err
 		}
@@ -547,12 +554,8 @@ func mergeOrdinals(a, b *spillFile, tmpDir string) (*spillFile, error) {
 	if b != nil {
 		cb = newOrdinalCursor(b)
 	}
-	var scratch []byte
-	emit := func(ord int64) error {
-		scratch = appendRecord(scratch[:0], appendOrd(nil, ord))
-		_, err := out.Write(scratch)
-		return err
-	}
+	w := ordWriter{out: out}
+	emit := w.write
 	for {
 		aOK := ca != nil && ca.ok
 		bOK := cb != nil && cb.ok
@@ -612,6 +615,20 @@ func (e *streamEngine) writeCandidate(ord int64, path string) error {
 	e.scratch = append(e.scratch, path...)
 	e.frame = appendRecord(e.frame[:0], e.scratch)
 	_, err := e.candidates.Write(e.frame)
+	return err
+}
+
+// ordWriter appends framed ordinals without allocating per record.
+type ordWriter struct {
+	out   *spillFile
+	ord   [8]byte
+	frame []byte
+}
+
+func (w *ordWriter) write(ord int64) error {
+	binary.BigEndian.PutUint64(w.ord[:], uint64(ord))
+	w.frame = appendRecord(w.frame[:0], w.ord[:])
+	_, err := w.out.Write(w.frame)
 	return err
 }
 
