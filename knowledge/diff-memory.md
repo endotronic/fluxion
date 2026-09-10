@@ -57,6 +57,32 @@ overhead. What remains, and why it was left:
 - **`Name` text** could be interned; trees repeat names heavily. Variable payoff, and it
   trades a bounded win for an unbounded intern table.
 
+## Retained tree vs. process RSS — use the right number when sizing a machine
+
+The per-node figures above are **retained heap for the tree**, measured after a
+collection. They are the right metric for comparing changes to the data structure and the
+wrong one for answering "will this run on my box". Measured on real fleet data
+(`luna/mike/archives` + `luna/mike/unsorted`, 1,158,320 + 1,112,170 files ≈ 2.27M nodes):
+
+| | |
+|---|---|
+| Retained tree, extrapolated at 178 B/node | ~400 MiB |
+| **Actual peak process RSS, default `GOGC`** | **~1,370 MiB** (~620 B/node) |
+| Actual peak process RSS, `GOGC=40` | ~1,140 MiB, byte-identical output |
+
+The ~3.5× gap is not overhead anyone forgot about: Go's collector lets the heap grow to
+roughly twice the live set before collecting (`GOGC=100`), and on top of the tree there are
+`detectMovesCopies`' three transient index maps and the SQLite driver's row buffers.
+
+Two consequences:
+
+- **Size machines against ~600 B/node, not 178.** A 10M-node diff wants roughly 6 GB of
+  RSS, not 1.7 GiB.
+- **`GOGC` is a free lever when a diff is close to the limit.** Lowering it trades CPU for
+  peak RSS and changes nothing about the output — worth reaching for before concluding a
+  diff cannot run. It does not change the asymptotics, so it rescues a run that is close,
+  not one that is off by an order of magnitude.
+
 ## Where it used to go
 
 Kept because it explains what each change above was aimed at. Per `Node`, as measured
