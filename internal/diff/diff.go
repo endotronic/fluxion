@@ -544,217 +544,24 @@ func propagateNodeStatus(node *Node) (Status, bool) {
 	// inferred, so it cannot outlive the reasoning that produced it.
 	node.SourcePath = ""
 
-	// Check children
-	allUnchanged := true
-	allMovedSource := true
-	allRemovedOrMovedSource := true
-	allAddedLike := true // Added, Copy, Move
-
-	hasMove := false
-	hasCopy := false
-	hasAdded := false
-	hasModified := false
-	hasMovedSource := false
-
-	hasUnchangedContent := false
-
-	// Track first sources for potential rollup
-	var firstMoveSource string
-	var firstCopySource string
-
-	changeCount := 0
-
-	// Helper to count changes
-	isChange := func(s Status) bool {
-		return s == StatusAdded || s == StatusRemoved || s == StatusModified || s == StatusCopy || s == StatusMove
-	}
-
-	// sortedChildren, not node.Children: firstMoveSource/firstCopySource below
-	// capture "the first such child", and over a map that means "whichever the
-	// runtime happened to hand us", which differs run to run. A rolled-up
-	// Move/Copy line would then name a different source on each run for the same
-	// input - confirmed by TestDeterminism_SameBuilderTwice, which caught
+	// sortedChildren, not node.Children: the accumulator records "the first
+	// Move/Copy child", and over a map that means "whichever the runtime
+	// happened to hand us", which differs run to run. A rolled-up Move/Copy line
+	// would then name a different source on each run for the same input -
+	// confirmed by TestDeterminism_RepeatedRunsAgree, which caught
 	// `Move d/ <- c/c/b/c` and `Move d/ <- e` from identical inputs. Sorting
 	// makes "first" mean "first by name", the same convention detectMovesCopies
 	// and the collector already follow.
+	acc := newRollupAccum()
 	for _, child := range sortedChildren(node) {
 		s, childHasUnchanged := propagateStatus(child)
-
-		if childHasUnchanged {
-			hasUnchangedContent = true
-		}
-
-		if s != StatusUnchanged {
-			allUnchanged = false
-		}
-
-		if s != StatusMovedSource {
-			allMovedSource = false
-		}
-
-		if s != StatusRemoved && s != StatusMovedSource {
-			allRemovedOrMovedSource = false
-		}
-
-		if s != StatusAdded && s != StatusCopy && s != StatusMove && s != StatusMovedSource {
-			allAddedLike = false
-		}
-
-		if s == StatusAdded {
-			hasAdded = true
-		}
-		if s == StatusMovedSource {
-			hasMovedSource = true
-		}
-		if s == StatusModified {
-			hasModified = true
-		}
-		if s == StatusMove {
-			hasMove = true
-			if firstMoveSource == "" {
-				firstMoveSource = child.SourcePath
-			}
-		}
-		if s == StatusCopy {
-			hasCopy = true
-			if firstCopySource == "" {
-				firstCopySource = child.SourcePath
-			}
-		}
-
-		if s == StatusMixed {
-			allUnchanged = false
-			allMovedSource = false
-			allRemovedOrMovedSource = false
-			allAddedLike = false
-		}
-
-		if isChange(s) {
-			changeCount++
-		}
+		acc.observe(s, childHasUnchanged, child.SourcePath)
 	}
 
-	if allUnchanged {
-		node.Status = StatusUnchanged
-		return StatusUnchanged, true
-	}
-
-	if allMovedSource {
-		node.Status = StatusMovedSource
-		return StatusMovedSource, false
-	}
-
-	if allRemovedOrMovedSource {
-		node.Status = StatusRemoved
-		return StatusRemoved, false
-	}
-
-	// If the directory is new in B and contains only Added-like things (Added,
-	// Move, Copy). Presence is checked directly - a directory whose A-side
-	// children all lack the compared hash has an empty merkle string but is
-	// very much present.
-	if !node.DirA && allAddedLike {
-		// 1. Pure additions -> Always added
-		if !hasMove && !hasCopy {
-			node.Status = StatusAdded
-			return StatusAdded, false
-		}
-		// 2. Mixed/Multiple changes -> Rollup to Added
-		if changeCount > 1 {
-			node.Status = StatusAdded
-			return StatusAdded, false
-		}
-		// 3. Single Move/Copy -> Fall through to show detail (StatusMixed)
-	}
-
-	// Determine if we should attempt a rollup
-	canRollup := !hasUnchangedContent && (allAddedLike || changeCount >= 2)
-
-	// Refined Prioritization for canRollup:
-	if canRollup {
-		if hasModified {
-			node.Status = StatusModified
-			return StatusModified, hasUnchangedContent
-		}
-		// allAddedLike counts MovedSource as "added-like" so that a directory
-		// emptied by a move still rolls up. But content that *left* this
-		// directory is not something arriving in it: summarising as Added, Move
-		// or Copy would describe only what came and silently drop what went. Let
-		// it fall through to Modified (or to Mixed, if detail is available) so
-		// the loss stays on screen.
-		if allAddedLike && !hasMovedSource {
-			// Rule: If we have mixed types of "AddedLike" operations (e.g. Move + Copy),
-			// we should rollup as Modified (Mixed operations on a new/moved set),
-			// rather than picking one winner and confusing the user.
-			typesFound := 0
-			if hasMove {
-				typesFound++
-			}
-			if hasCopy {
-				typesFound++
-			}
-			if hasAdded {
-				typesFound++
-			}
-
-			if typesFound > 1 {
-				node.Status = StatusModified
-				return StatusModified, hasUnchangedContent
-			}
-
-			// Otherwise, pure type (or single dominating type)
-			// Preference: Move > Added > Copy
-			if hasMove {
-				if changeCount == 1 {
-					node.Status = StatusMixed
-					return StatusMixed, hasUnchangedContent
-				}
-				node.Status = StatusMove
-				if firstMoveSource != "" {
-					node.SourcePath = firstMoveSource
-				} else {
-					node.SourcePath = "" // Ensure SourcePath is cleared if not a single source
-				}
-				return StatusMove, false // Move implies pure change
-			}
-			// Added > Copy (per Rollup_Added test)
-			if hasAdded {
-				node.Status = StatusAdded
-				node.SourcePath = "" // Added items don't have a SourcePath
-				return StatusAdded, false
-			}
-			// Copy last
-			if hasCopy {
-				if changeCount == 1 {
-					node.Status = StatusMixed
-					return StatusMixed, hasUnchangedContent
-				}
-				node.Status = StatusCopy
-				if firstCopySource != "" {
-					node.SourcePath = firstCopySource
-				} else {
-					node.SourcePath = "" // Ensure SourcePath is cleared if not a single source
-				}
-				return StatusCopy, false
-			}
-		}
-		// If canRollup, and we haven't returned yet, it means we have mixed changes (e.g. Added + Removed)
-		// but no Unchanged items preventing rollup. Summary: Modified.
-		if !hasUnchangedContent {
-			// If this directory didn't exist in A at all, it is Added, even when
-			// it contains Mixed things (Moves/Copies) that confuse allAddedLike.
-			if !node.DirA {
-				node.Status = StatusAdded
-				return StatusAdded, false
-			}
-
-			node.Status = StatusModified
-			return StatusModified, false
-		}
-	}
-
-	node.Status = StatusMixed
-	return StatusMixed, hasUnchangedContent
+	status, sourcePath, hasUnchanged := decideRollup(acc, node.DirA)
+	node.Status = status
+	node.SourcePath = sourcePath
+	return status, hasUnchanged
 }
 
 // hashVal is a content hash held inline on the Node rather than as a string.
