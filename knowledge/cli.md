@@ -377,14 +377,8 @@ It also fixed resume for `zfs-scan`, which had never worked: a resumed dataset i
 a *new* temporary directory, so under the old scheme not one stored path could match a live
 one and every resume silently rescanned the whole dataset from scratch.
 
-**Repairing an existing database.** `scripts/repair-zfsscan-roots --db <db>` rewrites
-`root_path` and every file path for snapshots recorded the old way, so a scan that took days
-does not have to be repeated. It reports and changes nothing without `--apply`, converts in
-batches, and is safe to interrupt — files are converted before the snapshot's `root_path` is,
-so a half-finished snapshot still matches on the next run and is picked up where it stopped.
-Snapshots whose `root_path` looks like a `zfs-scan` mount but whose name cannot serve as a
-path are reported and skipped rather than guessed at. Expect it to take a while: the author's
-`luna-md5.db` is 27 snapshots and 84M file rows.
+**Bringing an existing database across:** `scripts/convert-db --src old.db --out new.db`.
+See its own section below.
 
 - The temporary directory is removed with `os.Remove` (never `os.RemoveAll`) only after its
   unmount succeeds, so a failed unmount just leaves the directory behind rather than risking
@@ -644,3 +638,39 @@ Errors print and `os.Exit(1)`. There are no distinct exit codes — notably, `di
 whether or not differences were found, so it cannot be used as a shell predicate. Results
 go to stdout, logrus narration to stderr, and some progress bars incorrectly go to stdout;
 see [architecture.md](architecture.md).
+
+## scripts/convert-db (a one-off, not a command)
+
+```
+go run ./scripts/convert-db --src <old.db> --out <new.db> [--resume] [--batch N]
+```
+
+Copies an old database into a new one, correcting what the code that wrote it got wrong. It
+exists for one job — a scan that took days, made with a binary that predates the fixes below,
+which nobody wants to repeat — and is deliberately a separate program rather than a
+migration, so none of it has to live in the code that runs every day.
+
+What it corrects:
+
+- **`zfs-scan` roots.** `/tmp/fluxion-zfsscan-3181317525` becomes `luna/mike/archives`, and
+  every file path under it is rebased to match. See the `zfs-scan` section above for why
+  those were wrong.
+- **The `CHECK` on `files`.** Older databases constrain every row to carry a hash, which
+  `--no-hash` cannot satisfy. The destination is created by the current code, so it simply
+  does not have it.
+
+What it does not do is invent anything. Hashes, sizes, mtimes, timestamps, statuses and error
+counts cross over exactly as they were; a column the source does not have is left at its
+default rather than guessed at; and a snapshot whose root is not a `zfs-scan` mount, or whose
+name cannot serve as a path, is copied unchanged rather than "fixed". The path *within* each
+dataset never moves, so every comparison gives the same answer before and after.
+
+Operationally:
+
+- **The source is opened read-only and never written to** — not even to migrate its schema.
+- **It needs room for a second copy** and checks up front: the author's `luna-md5.db` is
+  45.8 GB against 13.4 GB free on `/mnt/work`, so that one has to be written elsewhere. A
+  conversion that dies two hours in with `ENOSPC` is a bad way to find that out.
+- **Re-running is safe.** Each snapshot is copied whole or not at all; one already fully
+  present is skipped, and a half-copied one is discarded and redone. `--resume` is what
+  permits writing into an existing `--out`; without it, an existing file is refused.

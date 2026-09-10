@@ -67,8 +67,7 @@ and `idx_snapshots_name ON snapshots(name)` (unique).
   because the directory it reads through is a throwaway mount that is deleted when the scan
   finishes, and a ZFS `mountpoint` is a mutable property besides. So do not assume
   `root_path` starts with `/`. Databases from before 2026-09-10 hold the throwaway mount
-  instead and can be brought into line with `scripts/repair-zfsscan-roots` — see
-  [cli.md](cli.md#zfs-scan).
+  instead and can be brought across with `scripts/convert-db` — see [cli.md](cli.md).
 
 ## Migrations
 
