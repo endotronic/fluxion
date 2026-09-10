@@ -7,27 +7,54 @@ import (
 	"fluxion/internal/models"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-// Status represents the diff status of a file or directory
-type Status string
+// Status represents the diff status of a file or directory.
+//
+// A small integer rather than a string: it is stored on every node of the
+// unified tree, where a string header cost 16 bytes to hold one of nine
+// constants (~7% of the tree's whole footprint). String() keeps it printing
+// exactly as the string form did, so callers comparing or %s-ing a Status are
+// unaffected.
+type Status uint8
 
 const (
-	StatusUnchanged   Status = "Unchanged"
-	StatusAdded       Status = "Added"
-	StatusRemoved     Status = "Removed"
-	StatusModified    Status = "Modified"
-	StatusMixed       Status = "Mixed" // Only for directories containing varying children
-	StatusMove        Status = "Move"
-	StatusCopy        Status = "Copy"
-	StatusMovedSource Status = "MovedSource" // Internal: Source of a move, should be hidden
+	StatusUnchanged Status = iota
+	StatusAdded
+	StatusRemoved
+	StatusModified
+	StatusMixed // Only for directories containing varying children
+	StatusMove
+	StatusCopy
+	StatusMovedSource // Internal: Source of a move, should be hidden
 
 	// StatusTruncated stands in for the lines a directory did not have the
 	// budget to print. It carries their combined counts, so the content is
 	// summarised rather than dropped.
-	StatusTruncated Status = "Truncated"
+	StatusTruncated
 )
+
+// statusNames must stay index-aligned with the constants above.
+var statusNames = [...]string{
+	StatusUnchanged:   "Unchanged",
+	StatusAdded:       "Added",
+	StatusRemoved:     "Removed",
+	StatusModified:    "Modified",
+	StatusMixed:       "Mixed",
+	StatusMove:        "Move",
+	StatusCopy:        "Copy",
+	StatusMovedSource: "MovedSource",
+	StatusTruncated:   "Truncated",
+}
+
+func (s Status) String() string {
+	if int(s) < len(statusNames) {
+		return statusNames[s]
+	}
+	return "Status(" + strconv.Itoa(int(s)) + ")"
+}
 
 // DefaultMaxLinesPerDir is the line budget a single directory gets before the
 // rest of its changes are summarised as one "... and N more" line. A directory
