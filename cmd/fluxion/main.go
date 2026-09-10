@@ -110,6 +110,9 @@ func runSnapshot(args []string) {
 	crossMountsPtr := cmd.Bool("cross-mounts", true, "Traverse mount points")
 	failOnMountPtr := cmd.Bool("fail-on-mount", false, "Fail if mount point encountered")
 	md5Ptr := cmd.Bool("md5", false, "Compute MD5 checksums")
+	noHashPtr := cmd.Bool("no-hash", false,
+		"Record path, size and mtime only, without reading file contents. Fast triage for a huge tree; "+
+			"the snapshot can show that trees differ but never that they match")
 	skipEstPtr := cmd.Bool("skip-estimation", false, "Skip filesystem usage estimation")
 	estimateOnlyPtr := cmd.Bool("estimate", false, "Estimate scan size only (don't scan)")
 
@@ -152,6 +155,7 @@ func runSnapshot(args []string) {
 		CrossMounts:    *crossMountsPtr,
 		FailOnMount:    *failOnMountPtr,
 		ComputeMD5:     *md5Ptr,
+		SkipHashing:    *noHashPtr,
 		SkipEstimation: *skipEstPtr,
 		EstimateOnly:   *estimateOnlyPtr,
 	}
@@ -630,6 +634,8 @@ func runZFSScan(args []string) {
 	dbPtr := cmd.String("db", "", "Path to sqlite DB (required)")
 	threadsPtr := cmd.Int("threads", runtime.NumCPU(), "Number of threads per dataset scan")
 	md5Ptr := cmd.Bool("md5", false, "Compute MD5 checksums")
+	noHashPtr := cmd.Bool("no-hash", false,
+		"Record path, size and mtime only, without reading file contents (see `snapshot --no-hash`)")
 	dryRunPtr := cmd.Bool("dry-run", false, "Print the plan (mount/scan/skip per dataset) without mounting, scanning, or writing to the DB")
 	includeCanMountOffPtr := cmd.Bool("include-canmount-off", false, "Also mount and scan canmount=off datasets, instead of skipping them")
 	forceNewPtr := cmd.Bool("new", false, "Start a new snapshot for every dataset, ignoring any completed/failed/in-progress snapshot already recorded under its name")
@@ -658,6 +664,7 @@ func runZFSScan(args []string) {
 		Roots:              cmd.Args(),
 		Threads:            *threadsPtr,
 		ComputeMD5:         *md5Ptr,
+		SkipHashing:        *noHashPtr,
 		DryRun:             *dryRunPtr,
 		ExcludeDatasets:    excludes,
 		IncludeCanMountOff: *includeCanMountOffPtr,

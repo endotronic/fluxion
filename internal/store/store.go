@@ -27,6 +27,12 @@ type Store interface {
 	// streaming engine requires: like path order, except a directory's contents
 	// immediately follow the directory itself.
 	IterateFilesDFS(snapshotID int64, onFile func(models.FileRecord) error) error
+	// SupportsHashlessFiles reports whether this database can store a file row
+	// carrying no hash at all - what `snapshot --no-hash` produces. Databases
+	// created before 2026-09-10 cannot, and nothing migrates them; see the note
+	// at the top of internal/store/sqlite/schema.go.
+	SupportsHashlessFiles() (bool, error)
+
 	SearchFiles(snapshotID int64, pattern string, caseSensitive bool, onFile func(models.FileRecord) error) error
 	GetFileList(snapshotID int64, onProgress func(int)) ([]*models.FileRecord, error)
 	HasSizes(snapshotID int64) (bool, error)

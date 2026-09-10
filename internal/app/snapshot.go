@@ -89,16 +89,25 @@ type SnapshotConfig struct {
 	// Comparisons are unaffected either way - diff strips the root before
 	// comparing, and the path within the dataset is the same under either
 	// prefix - so this changes what is displayed and stored, not what matches.
-	RecordAs       string
-	DBPath         string
-	Name           string
-	Threads        int
-	ForceNew       bool
-	ResumeFrom     string
-	Hostname       string
-	CrossMounts    bool
-	FailOnMount    bool
-	ComputeMD5     bool
+	RecordAs    string
+	DBPath      string
+	Name        string
+	Threads     int
+	ForceNew    bool
+	ResumeFrom  string
+	Hostname    string
+	CrossMounts bool
+	FailOnMount bool
+	ComputeMD5  bool
+
+	// SkipHashing records path, size and mtime without reading file contents -
+	// see scanner.ScannerConfig.SkipHashing for what it is for and what it
+	// costs. The resulting snapshot carries no hash, so diff reports every one
+	// of its files Modified rather than Unchanged and coverage counts them all
+	// as uncovered: it narrows a question, it never answers "is this safe to
+	// delete".
+	SkipHashing bool
+
 	SkipEstimation bool
 	EstimateOnly   bool
 
@@ -180,6 +189,20 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		return fmt.Errorf("error opening DB: %w", err)
 	}
 	defer dbStore.Close()
+
+	if cfg.SkipHashing {
+		ok, err := dbStore.SupportsHashlessFiles()
+		if err != nil {
+			return fmt.Errorf("checking whether this database can store metadata-only rows: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("this database was created before metadata-only scans existed and still "+
+				"constrains every file row to carry a hash, so %q cannot be recorded without one. "+
+				"Scan into a new database, or convert this one with scripts/convert-db", cfg.TargetDir)
+		}
+		logrus.Warn("Metadata-only scan: recording path, size and mtime, hashing nothing. " +
+			"This snapshot can show that trees differ; it can never show that they match.")
+	}
 
 	// What gets recorded, as opposed to what gets read. See SnapshotConfig.RecordAs.
 	recordRoot := targetDir
@@ -412,6 +435,7 @@ func RunSnapshot(cfg SnapshotConfig) error {
 		CrossMounts: cfg.CrossMounts,
 		FailOnMount: cfg.FailOnMount,
 		ComputeMD5:  cfg.ComputeMD5,
+		SkipHashing: cfg.SkipHashing,
 		StopCh:      cfg.StopCh,
 		OnFileFound: func(path string, size int64) {
 			foundCount.Add(1)

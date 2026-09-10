@@ -29,6 +29,19 @@ type ScannerConfig struct {
 	// New: MD5 Computation
 	ComputeMD5 bool
 
+	// SkipHashing records what the filesystem already knows about a file -
+	// path, size, mtime - without ever opening it.
+	//
+	// It exists to triage a fleet. Hashing 185T to find out which trees even
+	// overlap costs weeks of reading every byte; size and name are enough to
+	// tell "these two directories cannot be the same" from "these two might
+	// be", and only the second kind is worth hashing. A snapshot recorded this
+	// way carries no hash at all, so knowledge/goals.md's rule applies with
+	// full force: diff reports such a file Modified, never Unchanged, and
+	// coverage counts it as not covered. It can narrow the question; it can
+	// never answer "is it safe to delete this".
+	SkipHashing bool
+
 	// StopCh, if non-nil, lets a caller cancel an in-flight scan: once
 	// closed, the walker stops descending (returns filepath.SkipAll) and
 	// idle workers exit, instead of running to completion. A worker already
@@ -189,13 +202,27 @@ func RunScan(cfg ScannerConfig, results chan<- ScanResult) {
 	}
 }
 
+// resumeIsComplete reports whether an already-recorded row has everything this
+// scan would produce, so the file can be skipped rather than re-read.
+//
+// A metadata-only scan asks for no hash, so any row at all is complete. Asking
+// the other way round matters: a row recorded without hashes must NOT satisfy a
+// hashing scan, or resuming would leave the snapshot permanently half-hashed
+// with nothing to say which half.
+func resumeIsComplete(rec models.FileRecord, cfg ScannerConfig) bool {
+	if cfg.SkipHashing {
+		return true
+	}
+	return rec.SHA1 != "" && (rec.MD5 != "" || !cfg.ComputeMD5)
+}
+
 func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
 	var record *models.FileRecord
 	fromResume := false
 
 	// Check resume map
 	if cfg.ResumeMap != nil {
-		if rec, ok := cfg.ResumeMap[path]; ok && rec.SHA1 != "" && (rec.MD5 != "" || !cfg.ComputeMD5) {
+		if rec, ok := cfg.ResumeMap[path]; ok && resumeIsComplete(rec, cfg) {
 			record = &rec
 			fromResume = true
 		}
@@ -208,11 +235,13 @@ func processFile(path string, cfg ScannerConfig, results chan<- ScanResult) {
 			return
 		}
 
-		// Hash the file
-		sha1Hash, md5Hash, err := hashFile(path, cfg.ComputeMD5)
-		if err != nil {
-			results <- ScanResult{Error: err}
-			return
+		var sha1Hash, md5Hash string
+		if !cfg.SkipHashing {
+			sha1Hash, md5Hash, err = hashFile(path, cfg.ComputeMD5)
+			if err != nil {
+				results <- ScanResult{Error: err}
+				return
+			}
 		}
 
 		record = &models.FileRecord{

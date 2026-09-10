@@ -4,10 +4,26 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Current Schema Version
 const CurrentSchemaVersion = 5
+
+// A note on the CHECK that used to be on `files`.
+//
+// The baseline above carried CHECK (length(sha1) > 0 OR length(md5) > 0) until
+// 2026-09-10, when metadata-only scans (`snapshot --no-hash`) made a hash-less
+// row a legitimate thing to store. Databases created before that date still
+// have it, and **nothing here removes it**: SQLite cannot drop a CHECK with
+// ALTER, and the only ways to do it are a full table rebuild - impossible on a
+// 49 GB, 84M-row database with 14 GB free - or a PRAGMA writable_schema edit,
+// which is not something to run automatically on someone's irreplaceable scan.
+//
+// So the schema version deliberately does NOT distinguish the two. Anything
+// that needs to know asks the database instead: see SupportsHashlessFiles. To
+// move an older database across, convert it into a new one with
+// scripts/convert-db rather than migrating it in place.
 
 // Migrations
 // We define them as function closures so we can execute logic if needed, or just SQL.
@@ -37,8 +53,7 @@ var migrations = []func(*sql.DB) error{
 				mod_time DATETIME NOT NULL,
 				sha1 TEXT NOT NULL,
 				md5 TEXT NOT NULL,
-				FOREIGN KEY(snapshot_id) REFERENCES snapshots(id),
-				CHECK (length(sha1) > 0 OR length(md5) > 0)
+				FOREIGN KEY(snapshot_id) REFERENCES snapshots(id)
 			);`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_files_snapshot_path ON files(snapshot_id, path);`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_name ON snapshots(name);`,
@@ -158,7 +173,7 @@ func (s *SqliteStore) migrate() error {
 			// Proceed to apply all migrations.
 		}
 	}
-	
+
 	if version >= CurrentSchemaVersion {
 		return nil // Up to date
 	}
@@ -175,13 +190,13 @@ func (s *SqliteStore) migrate() error {
 		if err != nil {
 			return fmt.Errorf("migration %d failed: %w", i+1, err)
 		}
-		
+
 		// Update version
 		if err := s.setSchemaVersion(i + 1); err != nil {
 			return fmt.Errorf("failed to update schema version to %d: %w", i+1, err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -212,4 +227,22 @@ func (s *SqliteStore) tableExists(name string) bool {
 	var n string
 	err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
 	return err == nil
+}
+
+// SupportsHashlessFiles reports whether this database can store a file row with
+// no hash at all - what a metadata-only scan produces.
+//
+// Asked of the database rather than inferred from the schema version, because
+// the version cannot tell: a database created before 2026-09-10 carries a CHECK
+// constraint that a fresh one does not, and no migration removes it (see the
+// note at the top of this file). This is the one place that difference is
+// visible, and it is checked once per scan, not per row.
+func (s *SqliteStore) SupportsHashlessFiles() (bool, error) {
+	var ddl string
+	err := s.db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'files'`).Scan(&ddl)
+	if err != nil {
+		return false, fmt.Errorf("reading the files table definition: %w", err)
+	}
+	return !strings.Contains(strings.ToLower(ddl), "check"), nil
 }

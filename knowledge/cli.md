@@ -30,7 +30,7 @@ an open v1.0 roadmap item.
 ## snapshot
 
 ```
-fluxion s --db <db> [--name N] [--dir D] [--threads N] [--md5]
+fluxion s --db <db> [--name N] [--dir D] [--threads N] [--md5] [--no-hash]
          [--new] [--resume <id|name>] [--hostname H]
          [--cross-mounts=false] [--fail-on-mount]
          [--skip-estimation] [--estimate] <dir>
@@ -44,6 +44,27 @@ fluxion s --db <db> [--name N] [--dir D] [--threads N] [--md5]
 - Without `--new`, an existing `in_progress` snapshot for the same root is offered for
   resume.
 - `--estimate` does the filesystem-usage estimate (`internal/util/fs_usage.go`) and exits.
+- `--no-hash` (added 2026-09-10) records path, size and mtime **without ever opening a
+  file**. Also on `zfs-scan`.
+
+  It exists to triage a fleet. Hashing 185T to find out which trees even overlap costs
+  weeks of reading every byte; size and name are enough to tell "these two directories
+  cannot be the same" from "these two might be", and only the second kind is worth hashing.
+
+  **What it can and cannot answer is the whole point.** Such a snapshot carries no hash, so
+  under [goals.md](goals.md)'s rule `diff` and `coverage` both **refuse it outright** —
+  "snapshots share no common hash algorithm", non-zero exit — rather than infer a match
+  from size and mtime. It narrows a question; it can never answer *"is it safe to delete
+  this"*. Use it to find the candidate pairs, then hash those.
+
+  Resume is direction-aware: a metadata-only scan happily resumes over rows recorded by a
+  hashing one, but a hashing scan will not accept hash-less rows as done, or resuming would
+  leave a snapshot permanently half-hashed with nothing to say which half.
+
+  **Databases created before 2026-09-10 cannot store hash-less rows** and nothing migrates
+  them — see the note at the top of `internal/store/sqlite/schema.go` for why. The scan
+  checks once, up front, and says so rather than failing on the first insert. Scan into a
+  new database, or move an old one across with `scripts/convert-db`.
 
 ## diff
 

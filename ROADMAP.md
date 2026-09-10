@@ -44,9 +44,14 @@
   directory is a `tmpfs`, which the default usually is), and a hard abort in the engine
   once writing would leave less than 512 MiB free. Still open: nothing exposes the sort
   buffer size from the command line
-- [ ] metadata-only scan mode (no hashing) so a 185T fleet can be triaged by size+name
-  first and hashed only where trees actually overlap — blocked by the
-  `CHECK (length(sha1) > 0 OR length(md5) > 0)` constraint on `files`
+- [x] metadata-only scan mode (no hashing) so a 185T fleet can be triaged by size+name
+  first and hashed only where trees actually overlap — **done 2026-09-10** as
+  `snapshot --no-hash` / `zfs-scan --no-hash`. The `CHECK (length(sha1) > 0 OR length(md5)
+  > 0)` constraint is gone from fresh databases; existing ones keep it and are not
+  migrated, because dropping a CHECK needs either a full table rebuild (impossible on a
+  49 GB database with 14 GB free) or a `PRAGMA writable_schema` edit, which is not
+  something to run unbidden on an irreplaceable scan. `scripts/convert-db` moves an old
+  database across instead
 - [ ] import-legacy gets line count while determining root, then uses that to show progress
 
 ## v0.8.14

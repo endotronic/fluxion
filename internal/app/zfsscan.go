@@ -20,10 +20,14 @@ import (
 )
 
 type ZFSScanConfig struct {
-	DBPath             string
-	Roots              []string
-	Threads            int
-	ComputeMD5         bool
+	DBPath     string
+	Roots      []string
+	Threads    int
+	ComputeMD5 bool
+
+	// SkipHashing triages a pool by metadata alone; see SnapshotConfig.SkipHashing.
+	SkipHashing bool
+
 	DryRun             bool
 	ExcludeDatasets    []string
 	IncludeCanMountOff bool // also mount+scan canmount=off datasets, instead of skipping them
@@ -506,6 +510,7 @@ func RunZFSScan(cfg ZFSScanConfig) (ZFSScanResult, error) {
 			Threads:        cfg.Threads,
 			CrossMounts:    false,
 			ComputeMD5:     cfg.ComputeMD5,
+			SkipHashing:    cfg.SkipHashing,
 			NonInteractive: true,
 			StopCh:         stopCh,
 			OverallLine: func(processed int64) string {
