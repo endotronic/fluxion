@@ -158,7 +158,7 @@ func TestMergeJoin_SharedPathRecordsBothSides(t *testing.T) {
 	a := map[string]models.FileRecord{"/x": {SHA1: "aaa", SizeBytes: 1}}
 	b := map[string]models.FileRecord{"/x": {SHA1: "bbb", SizeBytes: 2}}
 
-	root := &Node{Name: "", Path: "", Children: make(map[string]*Node), Status: StatusUnchanged}
+	root := &Node{Name: "", Children: make(map[string]*Node), Status: StatusUnchanged}
 	if err := mergeJoinInsert(root, mapToIter(a), mapToIter(b), "sha1", nil); err != nil {
 		t.Fatalf("mergeJoinInsert: %v", err)
 	}
@@ -185,12 +185,12 @@ func TestMergeJoin_PropagatesIteratorErrors(t *testing.T) {
 	})
 	ok := mapToIter(map[string]models.FileRecord{"/a": {SHA1: "1"}})
 
-	root := &Node{Name: "", Path: "", Children: make(map[string]*Node), Status: StatusUnchanged}
+	root := &Node{Name: "", Children: make(map[string]*Node), Status: StatusUnchanged}
 	if err := mergeJoinInsert(root, failing, ok, "sha1", nil); err == nil {
 		t.Error("expected the A-side error to surface")
 	}
 
-	root = &Node{Name: "", Path: "", Children: make(map[string]*Node), Status: StatusUnchanged}
+	root = &Node{Name: "", Children: make(map[string]*Node), Status: StatusUnchanged}
 	if err := mergeJoinInsert(root, ok, failing, "sha1", nil); err == nil {
 		t.Error("expected the B-side error to surface")
 	}

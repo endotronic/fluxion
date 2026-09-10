@@ -38,8 +38,18 @@ const DefaultMaxLinesPerDir = 25
 
 // Node represents a file or directory in the diff tree
 type Node struct {
-	Name     string
-	Path     string // Full path
+	Name string
+
+	// Parent is what a node's path is derived from, rather than the path being
+	// stored. Storing it in full on every node re-stored every component once
+	// per depth level and cost ~46 B/node (a 16-byte header plus a distinct
+	// allocation per node, since each was built by concatenation) - measured at
+	// 17% of the whole tree. An 8-byte parent pointer plus path() replaces it.
+	// The trade is CPU at read time, which is cheap here because path() is only
+	// wanted for output lines and move sources, never for every node: see
+	// reinstateHiddenMoveSources, which asks only about MovedSource nodes.
+	Parent *Node
+
 	IsFile   bool
 	Status   Status
 	Children map[string]*Node
@@ -77,6 +87,40 @@ type Node struct {
 	// a rollup. Only a matched status is fixed; a rolled-up one has to be
 	// recomputed whenever the children beneath it change.
 	matched bool
+}
+
+// path builds the node's full path from the parent chain: "/a/b/c", with a
+// leading slash and no trailing one. The virtual root has no parent and yields
+// "", so its children come out as "/name" - identical to what the old stored
+// Path field held.
+//
+// Iterative rather than recursive concatenation so it stays O(depth) work and
+// two allocations, instead of building an intermediate string per level.
+func (n *Node) path() string {
+	if n.Parent == nil {
+		return ""
+	}
+
+	depth := 0
+	for cur := n; cur.Parent != nil; cur = cur.Parent {
+		depth++
+	}
+	parts := make([]string, depth)
+	i := depth - 1
+	size := 0
+	for cur := n; cur.Parent != nil; cur = cur.Parent {
+		parts[i] = cur.Name
+		size += len(cur.Name) + 1
+		i--
+	}
+
+	var b strings.Builder
+	b.Grow(size)
+	for _, p := range parts {
+		b.WriteByte('/')
+		b.WriteString(p)
+	}
+	return b.String()
 }
 
 // presentInA reports whether anything at or under this node existed in A.
@@ -156,7 +200,6 @@ func compareSnapshotsWith(build treeBuilder, iterA, iterB FileIterator, opts Opt
 
 	root := &Node{
 		Name:     "",
-		Path:     "",
 		Children: make(map[string]*Node),
 		Status:   StatusUnchanged,
 	}
@@ -322,17 +365,8 @@ func locateNode(root *Node, path string) *Node {
 			// a few lines below, which allocates on first insert.
 			child = &Node{
 				Name:   part,
-				Path:   "",
+				Parent: current,
 				Status: StatusUnchanged,
-			}
-			if current.Path == "" {
-				child.Path = "/" + part
-			} else {
-				if current.Path == "/" {
-					child.Path = "/" + part
-				} else {
-					child.Path = current.Path + "/" + part
-				}
 			}
 			current.Children[part] = child
 		}
@@ -408,9 +442,11 @@ func splitFileDirCollisions(node *Node) {
 		return
 	}
 
+	// Same Name and Parent as its host, so twin.path() == host.path(): the twin
+	// is the file aspect of the *same* path, and both halves are reported.
 	twin := &Node{
 		Name:   node.Name,
-		Path:   node.Path,
+		Parent: node.Parent,
 		IsFile: true,
 		InA:    node.InA,
 		InB:    node.InB,
@@ -922,7 +958,7 @@ func detectMovesCopies(root *Node, noCopies, noMoves bool) {
 		}
 
 		sourcePath := func(src *Node) string {
-			p := src.Path
+			p := src.path()
 			if !n.IsFile && !strings.HasSuffix(p, "/") {
 				p += "/"
 			}
@@ -1048,7 +1084,7 @@ func sourceNamed(named map[string]bool, path string) bool {
 // was still a suppressed move source is wrong once the node is a removal again.
 func reinstateHiddenMoveSources(node *Node, named map[string]bool) bool {
 	if node.Status == StatusMovedSource {
-		if sourceNamed(named, node.Path) {
+		if sourceNamed(named, node.path()) {
 			// Something in the output names this path or a directory above it,
 			// so everything under it is accounted for and there is nothing to
 			// recurse into.
@@ -1063,7 +1099,7 @@ func reinstateHiddenMoveSources(node *Node, named map[string]bool) bool {
 
 	changed := false
 	if twin := node.FileTwin; twin != nil && twin.Status == StatusMovedSource &&
-		!sourceNamed(named, twin.Path) {
+		!sourceNamed(named, twin.path()) {
 		twin.Status = StatusRemoved
 		changed = true
 	}
@@ -1162,7 +1198,7 @@ func (c *collector) applyBudget(node *Node, start int) {
 	}
 	sum.HiddenCount += int64(len(emitted) - c.maxLinesPerDir)
 
-	sum.Path = node.Path + "/"
+	sum.Path = node.path() + "/"
 	sum.Status = StatusTruncated
 
 	c.results = append(c.results[:start+c.maxLinesPerDir], sum)
@@ -1195,7 +1231,7 @@ func (c *collector) collectNode(node *Node) {
 	if node.Status == StatusAdded || node.Status == StatusRemoved || node.Status == StatusModified || node.Status == StatusMove || node.Status == StatusCopy {
 		// Collapse: Report this node and stop recursion.
 		// e.g. "Added /dir/" implies all children added.
-		path := node.Path
+		path := node.path()
 
 		var added, removed, modified, copied, moved int64
 		var unchangedFiles, unchangedDirs int64
@@ -1253,7 +1289,7 @@ func (c *collector) collectNode(node *Node) {
 			// Check if this mixed node has unchanged content
 			stats := accumulateStats(node)
 			if stats.UnchangedFileCount > 0 || stats.UnchangedDirCount > 0 {
-				path := node.Path
+				path := node.path()
 				if !node.IsFile {
 					path += "/"
 				}

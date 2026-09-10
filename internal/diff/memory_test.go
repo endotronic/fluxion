@@ -35,7 +35,7 @@ func TestMemory_UnifiedTree(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 
-	root := &Node{Name: "", Path: "", Status: StatusUnchanged}
+	root := &Node{Name: "", Status: StatusUnchanged}
 	if err := mergeJoinInsert(root, mapToIter(files), mapToIter(files), "sha1", nil); err != nil {
 		t.Fatalf("mergeJoinInsert: %v", err)
 	}
@@ -56,7 +56,8 @@ func TestMemory_UnifiedTree(t *testing.T) {
 	//   ~1 KiB/node   before the fixed-width digest (diff-memory.md Phase 0)
 	//   322 B/node    after it
 	//   274 B/node    after Children stopped being pre-allocated on leaves
-	const ceilingPerNode = 300.0
+	//   226 B/node    after Path was replaced by a parent pointer + path()
+	const ceilingPerNode = 250.0
 	if perNode > ceilingPerNode {
 		t.Errorf("tree costs %.0f B/node, over the %.0f B ceiling - a memory optimisation in "+
 			"knowledge/diff-memory.md has regressed", perNode, ceilingPerNode)
