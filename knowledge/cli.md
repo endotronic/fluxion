@@ -191,8 +191,17 @@ with no unified tree, no merkle hashes, and no move/copy matching. See
   hash matches. This is the right behavior for the tool's actual question ("would deleting
   the candidate lose anything") but means **`excluded` is not a substitute for a separate
   count of the excluded prefix's true size** — get that from `size` or a direct query
-  against the source snapshot if you need to report it. See [fleet.md](fleet.md) for why
-  excluding a whole unscanned dataset from a comparison is often necessary in the first
+  against the source snapshot if you need to report it. **`--rollup` does not have this
+  quirk** — confirmed by re-running the same 49.7M-file, four-tree-excluded comparison
+  through both modes: `--by-dir` reported `excluded: 16,632,343` (the ~875K undercount
+  above), `--rollup` reported `excluded: 17,507,690` (the trees' exact true size), with
+  `NOT covered` identical (85,846) in both. This is because `--rollup` uses
+  `IterateWithCoverage`, which returns *every* candidate row unconditionally rather than
+  letting SQL pre-filter to the uncovered subset — so `isExcluded` sees every gap-tree file,
+  not just the ones that also happened to fail the hash check. `--rollup`'s `excluded` count
+  is the one to trust if you need this number; don't reach for `size` as a workaround if
+  `--rollup` is already an option. See [fleet.md](fleet.md) for why excluding a whole
+  unscanned dataset from a comparison is often necessary in the first
   place.
 
 Exit status is meaningful: **0** = fully covered, **2** = something would be lost, **1** =
