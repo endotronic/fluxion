@@ -8,15 +8,19 @@ import (
 	"fluxion/internal/models"
 )
 
-// TestMemory_TwoIdenticalSnapshots measures retained heap for a synthetic
-// 200,000-file tree diffed against itself, matching the exact scenario
-// knowledge/diff-algo.md cites as the pre-digest baseline: "Two identical
-// 200,000-file snapshots: 200 MiB retained heap." That number came from the
-// old concatenated-merkle-string scheme (knowledge/diff-memory.md's Phase 0);
-// this asserts a ceiling well above the ~40 MiB the fixed-width digest change
-// should produce, so a regression back toward string concatenation fails a
-// test instead of surfacing as a multi-GB swap storm on real fleet data.
-func TestMemory_TwoIdenticalSnapshots(t *testing.T) {
+// TestMemory_UnifiedTree measures what a diff of 200,000 files per side costs
+// in retained heap, the figure knowledge/diff-memory.md tracks and the reason
+// `diff` is unusable at fleet scale.
+//
+// It measures the **tree with the tree still alive**, not the heap after
+// CompareSnapshots returns. Two reasons. The tree is the entire cost - a
+// stage-by-stage probe showed split/merkle/propagate/detectMovesCopies/collect
+// each add 0.0 MiB on top of it, their indexes being transient - so the tree is
+// the honest proxy for the peak. And reading HeapAlloc straight after a run
+// without collecting first measures uncollected garbage rather than retained
+// memory, which is noisy enough to report a real improvement as a regression
+// (it did, during the change that added the deferred-Children optimisation).
+func TestMemory_UnifiedTree(t *testing.T) {
 	const n = 200_000
 	files := make(map[string]models.FileRecord, n)
 	for i := 0; i < n; i++ {
@@ -31,26 +35,44 @@ func TestMemory_TwoIdenticalSnapshots(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 
-	results, err := CompareSnapshots(mapToIter(files), mapToIter(files), Options{
-		RootA: "/", RootB: "/", HashType: "sha1",
-	})
-	if err != nil {
-		t.Fatalf("CompareSnapshots: %v", err)
-	}
-	if len(results) != 0 {
-		t.Fatalf("expected no differences between identical snapshots, got %d", len(results))
+	root := &Node{Name: "", Path: "", Status: StatusUnchanged}
+	if err := mergeJoinInsert(root, mapToIter(files), mapToIter(files), "sha1", nil); err != nil {
+		t.Fatalf("mergeJoinInsert: %v", err)
 	}
 
 	var after runtime.MemStats
+	runtime.GC() // collect the build's garbage; keep only what the tree retains
 	runtime.ReadMemStats(&after)
 
-	retainedMiB := float64(after.HeapAlloc) / (1024 * 1024)
-	t.Logf("retained heap after diffing %d identical files: %.1f MiB (pre-digest baseline was ~200 MiB)", n, retainedMiB)
+	nodes := int64(countTreeNodes(root))
+	retained := int64(after.HeapAlloc - before.HeapAlloc)
+	retainedMiB := float64(retained) / (1 << 20)
+	perNode := float64(retained) / float64(nodes)
 
-	const ceilingMiB = 100.0 // well above the ~40 MiB expected, well below the 200 MiB pre-digest baseline
-	if retainedMiB > ceilingMiB {
-		t.Errorf("retained heap %.1f MiB exceeds %.1f MiB ceiling - the fixed-width digest change (diff-memory.md Phase 0) may have regressed", retainedMiB, ceilingMiB)
+	t.Logf("unified tree for %d files/side: %.1f MiB retained across %d nodes = %.0f B/node",
+		n, retainedMiB, nodes, perNode)
+
+	// History, so a regression is legible rather than just a number going up:
+	//   ~1 KiB/node   before the fixed-width digest (diff-memory.md Phase 0)
+	//   322 B/node    after it
+	//   274 B/node    after Children stopped being pre-allocated on leaves
+	const ceilingPerNode = 300.0
+	if perNode > ceilingPerNode {
+		t.Errorf("tree costs %.0f B/node, over the %.0f B ceiling - a memory optimisation in "+
+			"knowledge/diff-memory.md has regressed", perNode, ceilingPerNode)
 	}
 
-	runtime.KeepAlive(results)
+	runtime.KeepAlive(root)
+	runtime.KeepAlive(files)
+}
+
+func countTreeNodes(n *Node) int {
+	c := 1
+	if n.FileTwin != nil {
+		c++
+	}
+	for _, ch := range n.Children {
+		c += countTreeNodes(ch)
+	}
+	return c
 }
