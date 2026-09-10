@@ -74,6 +74,16 @@ the glob path. Either honour it with `(?i)` or reject the combination.
 Output files are created unconditionally. Given the tool's "never destroy anything" posture
 this should at least require `--force`.
 
+### 2.7 Rolled-up Move/Copy named a different source on every run — FIXED 2026-09-09
+`propagateNodeStatus` captured "the first Move/Copy child" while ranging `node.Children`, a
+map, so Go's randomised iteration order decided which source a rolled-up line credited: the
+same two snapshots reported `Move d/ <- c/c/b/c` on one run and `Move d/ <- e` on the next.
+Found by the equivalence harness added with the merge-join tree builder, not by the property
+test — both answers are complete and sound, so the invariants held; it is "wrong or
+unstable", not the data-loss class. Fixed by ranging `sortedChildren`, the convention
+`detectMovesCopies` and the collector already used, and pinned by
+`TestDeterminism_RepeatedRunsAgree`.
+
 ---
 
 ## Severity 3 — scale and performance
@@ -84,24 +94,29 @@ depth-5 / 4096-file tree: 1,336,663 total bytes of `HashA`, largest single direc
 string 196,603 bytes — ~326 B/file, growing with depth. Fixed by 2.2's digest change, in
 both packages.
 
-### 3.2 Diff peak memory ~1 KiB/file — REDUCED to ~365 B/file 2026-09-09, not eliminated
-Two identical 200,000-file snapshots used to retain 200 MiB (398 MiB total allocated); the
-2.2/3.1 digest fix brought that to **72.8 MiB** (`internal/diff/memory_test.go`), a real
-2.75x, not the full fix. The store side streams (that was ROADMAP 0.8.11's "memory use
-optimization"), but the whole unified tree is still fully materialised — `Node` struct/map
-overhead is untouched by the digest change, and a 10M-file tree still wants several GiB,
-just no longer ~10 GiB.
+### 3.2 Diff peak memory — REDUCED 5.75x 2026-09-09, not eliminated
+Two identical 200,000-file snapshots used to retain 200 MiB (~1 KiB/node). A run of
+constant-factor work brought that to **34.1 MiB / 178 B per node**: the 2.2/3.1 digest
+fix, then dropping the pre-allocated `Children` map on leaves, replacing the stored `Path`
+with a parent pointer, shrinking `Status` from a string to a `uint8`, and holding hashes
+inline instead of as strings. [diff-memory.md](diff-memory.md) has the table and what was
+left on the table deliberately. `TestMemory_UnifiedTree` pins it with a per-node ceiling.
+
+The store side streams (ROADMAP 0.8.11's "memory use optimization"), but the whole unified
+tree is still materialised, so this is a smaller constant on the same curve. A 10M-node
+diff went from ~10 GiB to ~1.7 GiB, which is the difference between impossible and routine
+on an ordinary machine; a 200M-node one still wants ~34 GB.
 
 **This is the issue that stalled the project.** The author reported needing ~200 GB of
 swap to diff real snapshots, which puts the working set at roughly 100-200M nodes. It is
 severity 3 only by the numbering here; in practice it is what blocks the tool from being
-used at all. The plan to fix it is [diff-memory.md](diff-memory.md).
+used at fleet scale. The plan to actually fix it is [diff-memory.md](diff-memory.md)'s
+Phases 2-5, still unbuilt.
 
-Still open, but no longer blocking the fleet work: the `coverage` command (2026-08-23)
-answers *"is it safe to delete this?"* without building the tree at all, in flat memory.
-Reach for it whenever the question is a delete decision; `diff` remains the only way to
-ask what changed and where it went, and remains unusable at fleet scale until this is
-fixed.
+Not blocking the fleet work in the meantime: the `coverage` command (2026-08-23) answers
+*"is it safe to delete this?"* without building the tree at all, in flat memory. Reach for
+it whenever the question is a delete decision; `diff` remains the only way to ask what
+changed and where it went.
 
 ### 3.5 `dupes`, `merge`, and `import` materialise whole snapshots
 `GetFilesForSnapshot` / `GetFileList` load every row into a map or slice. `merge` only ever

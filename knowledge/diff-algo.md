@@ -22,15 +22,16 @@ Everything below serves those three properties, in that order of importance.
 ```go
 type Node struct {
     Name     string            // basename
-    Path     string            // "/a/b/c", relative to the snapshot root, leading slash
+    Parent   *Node             // path() walks this; the path is NOT stored per node
     IsFile   bool
-    Status   Status
-    Children map[string]*Node
+    Status   Status            // uint8, not a string
+    Children map[string]*Node  // nil on leaves, allocated on first insert
 
     InA, InB   bool            // recorded as a regular *file* on that side
     DirA, DirB bool            // something at or under this path existed on that side
 
-    HashA, HashB string        // leaf: file hash. dir: synthetic merkle string (below)
+    HashA, HashB hashVal       // leaf: file hash. dir: merkle digest (below). Inline,
+                               // 20 bytes + a length; n == 0 means "no hash of this type"
     SizeA, SizeB int64
 
     FileTwin   *Node           // the file half of a path that is a dir on the other side
@@ -39,6 +40,14 @@ type Node struct {
     matched bool              // Move/Copy came from content matching, not a rollup
 }
 ```
+
+Every field above that looks unusual is there for memory: the tree is materialised in full,
+so anything per-node is multiplied by the file count. `Sizeof(Node)` is 136 B and the whole
+tree costs 178 B/node, down from ~1 KiB — [diff-memory.md](diff-memory.md) has the
+change-by-change table. Two consequences worth knowing before editing:
+**`node.path()` is computed, not stored** (cheap, but do not call it per-node in a hot
+loop), and **`Children` is nil until a node has a child**, which is safe to range and read
+but not to write without the guard `locateNode` already has.
 
 **One tree holds both snapshots.** There is no "tree A" and "tree B" — `insertNode` is
 called for every file of A and then every file of B into the *same* root. That is what
@@ -51,7 +60,7 @@ legitimately carry no hash *of the type being compared* — an MD5-only legacy i
 into a SHA-1 snapshot is the reachable case — and every one of those files then read as
 absent from A. `presentInA()` / `presentInB()` combine the flags with the twin's.
 
-**Statuses** (`Status` is a plain string type):
+**Statuses** (`Status` is a `uint8` with a `String()` method, not a string type):
 
 | Status | Meaning |
 |---|---|
@@ -82,7 +91,8 @@ entirely. That was the worst class of bug in the project.
 
 `splitFileDirCollisions` (stage 3) resolves it structurally: any node that is both
 `IsFile` and a parent of children hands its file aspect to a newly allocated `FileTwin`
-and keeps only the directory aspect for itself. The twin shares the node's `Path`, carries
+and keeps only the directory aspect for itself. The twin shares the node's `Name` and
+`Parent` (so `twin.path()` equals its host's), carries
 its own status, and is matched, propagated and emitted alongside its host — so such a path
 produces **two lines**, one for each aspect. If the two aspects disagree, `propagateStatus`
 forces the host to `Mixed` so no ancestor can collapse over it and hide one of them.
@@ -380,17 +390,21 @@ See stage 4 above. Was the single highest-value change available in this package
 built (`digestEntries`/`compactHash`), measured (200 MiB → 72.8 MiB retained heap on the
 200,000-file case), and validated against 400,000 property-test seeds.
 
-### Memory — reduced, not solved
+### Memory — reduced 5.75×, not solved
 
-Two identical 200,000-file snapshots now retain **72.8 MiB** (was 200 MiB — see stage 4).
-The tree is still fully materialised — `Node` struct/map overhead and the `Path`/`Name`
-strings stored per node are untouched by the digest fix — so this is a constant-factor
-win, not the `O(1)`-memory fix. ROADMAP 0.8.11 claims "memory use optimization for diff";
-that optimisation was on the *store* side (streaming iterators), and the tree itself is
-still fully materialised. [diff-memory.md](diff-memory.md)'s Phases 1-5 (external
-sort-based streaming, replacing the tree with a DFS stream) are what actually removes the
-`O(files)` scaling, and remain unbuilt — `coverage` is still the command to reach for at
+Two identical 200,000-file snapshots now retain **34.1 MiB / 178 B per node**, down from
+200 MiB / ~1 KiB. [diff-memory.md](diff-memory.md) has the change-by-change table and what
+was deliberately left on the table.
+
+The tree is still fully materialised, so this is constant-factor work: a 200M-node diff
+still wants ~34 GB. It does move the practical ceiling a long way — a 10M-node diff went
+from ~10 GiB to ~1.7 GiB — but [diff-memory.md](diff-memory.md)'s Phases 2–5 (external
+sort-based streaming, replacing the tree with a DFS stream) remain what actually removes
+the `O(files)` scaling, and remain unbuilt. `coverage` is still the command to reach for at
 fleet scale, per [fleet.md](fleet.md).
+
+`TestMemory_UnifiedTree` asserts a per-node ceiling, so any of this regressing is a test
+failure rather than a swap storm.
 
 ## Testing notes
 

@@ -11,7 +11,8 @@ refers to stages by number. Read [fleet.md](fleet.md) for why the numbers are th
 
 | | |
 |---|---|
-| Measured cost today | **~1 KiB per unique path** (CONFIRMED: two identical 200,000-file snapshots retained 200 MiB) |
+| Measured cost when this was written | ~1 KiB per unique path (two identical 200,000-file snapshots retained 200 MiB) |
+| **Measured cost now** | **178 B/node** (same case, 34.1 MiB — an 83% reduction, see "What the constant-factor work achieved") |
 | Observed failure | 200 GB of swap ⇒ roughly 100–200M nodes in the unified tree |
 | Target | **1 GB resident**, temp storage unconstrained |
 | Implied budget at 200M nodes | **≈5 bytes per node** |
@@ -20,14 +21,46 @@ Five bytes per node settles the design question before it is asked: **nothing pr
 to file count can live in RAM.** Compaction is not a route to the goal — it is a
 multiplier on a curve that still goes to infinity. The tree has to leave memory.
 
-That does not make compaction worthless; see phase 0 below, **built 2026-09-09**, which
-measured 2.75× on its own (200 MiB → 72.8 MiB on the 200,000-file case; less than the ~5×
-estimated here, since `Node` struct/map overhead this phase doesn't touch turned out to be
-a larger fraction of the total than assumed) and is a prerequisite for the rest anyway.
+**That conclusion survived the constant-factor work, and is the thing to keep in mind
+before doing more of it.** 178 B/node is a 5.75× improvement and it moves the practical
+ceiling a long way — a 10M-node diff went from ~10 GiB to ~1.7 GiB, which is the
+difference between impossible and routine on an ordinary machine. It does nothing for the
+200M-node case that stalled the project: that is still ~34 GB. Phases 2–5 remain the only
+route to the stated target.
 
-## Where the 1 KiB goes
+## What the constant-factor work achieved
 
-Per `Node` (see the struct in `internal/diff/diff.go`):
+All measured on the same case — two identical 200,000-file snapshots, 200,551 nodes — by
+`TestMemory_UnifiedTree`, which asserts a per-node ceiling so these cannot silently regress.
+
+| Change | B/node | Note |
+|---|---|---|
+| (original) | ~1024 | Concatenated merkle strings dominated. |
+| Phase 0: fixed-width digests, byte leaf hashes | 322 | 2026-09-09. Also fixed a real collision bug. |
+| `Children` no longer pre-allocated on leaves | 274 | An empty Go map is a ~48 B allocation that most nodes never use. |
+| `Path` replaced by `Parent` + `path()` | 226 | Storing the path per node re-stored every component once per depth level. |
+| `Status` string → `uint8` | 210 | 16 bytes of string header to hold one of nine constants. |
+| `HashA`/`HashB` string → inline `hashVal` | 178 | Header plus a separate allocation each; now 21 B inline. |
+
+`Sizeof(Node)` is 136 B; the rest is the `Name` text and the parent map's per-entry
+overhead. What remains, and why it was left:
+
+- **`SourcePath string` (16 B)** is set only on Move/Copy nodes but costs every node its
+  header. A side map keyed by `*Node` would reclaim it, at the price of threading that map
+  through `propagateStatus`, `detectMovesCopies` and the collector, and a lookup per
+  Move/Copy child on every one of stage 8's up-to-32 rollup passes. ~9% for a real
+  complexity increase in the most delicate code in the package.
+- **The `Children` map's per-entry overhead (~29 B/node)** is the largest single item left.
+  A sorted `[]*Node` would be far smaller, but `locateNode` needs lookup *while* building,
+  so a slice makes construction O(k²) per directory — fatal for a wide one. Converting
+  after the build does not help, because the peak is what matters.
+- **`Name` text** could be interned; trees repeat names heavily. Variable payoff, and it
+  trades a bounded win for an unbounded intern table.
+
+## Where it used to go
+
+Kept because it explains what each change above was aimed at. Per `Node`, as measured
+before any of this work:
 
 | Component | Approx. | Note |
 |---|---|---|
