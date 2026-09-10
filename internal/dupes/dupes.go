@@ -3,6 +3,7 @@ package dupes
 import (
 	"crypto/sha1"
 	"encoding/binary"
+	"encoding/hex"
 	"fluxion/internal/models"
 	"sort"
 	"strings"
@@ -219,10 +220,35 @@ func insertNode(root *Node, path string, rec models.FileRecord) {
 	current.Size = rec.SizeBytes
 	// Hash Priority: SHA1 -> MD5
 	if rec.SHA1 != "" {
-		current.Hash = rec.SHA1
+		current.Hash = compactHash(rec.SHA1)
 	} else if rec.MD5 != "" {
-		current.Hash = rec.MD5
+		current.Hash = compactHash(rec.MD5)
 	}
+}
+
+// compactHash decodes a hex hash (as stored in the DB) into its raw bytes, so
+// a leaf hash costs 20/16 bytes instead of 40/32 hex characters - ported from
+// internal/diff's identical helper (see knowledge/diff-algo.md "Stage 4").
+// Stored as a plain Go string, which can hold any byte sequence, so every
+// existing comparison (==, map keys, DuplicateGroup.Hash equality) is
+// unchanged; nothing outside this package interprets a Hash value as text
+// (confirmed: app/dupes.go never reads .Hash, only .Paths/.Size/.IsDir/etc).
+//
+// A decode failure (a value that isn't valid hex - never expected from the
+// DB, which only ever writes valid hex or '', but exercised deliberately by
+// this package's own tests, which use short non-hex fixtures like "h1" as
+// leaf hashes) falls back to the original string rather than silently
+// becoming something else: the value stays exactly what it was, just not
+// shrunk, which only matters for memory, never for correctness.
+func compactHash(hexHash string) string {
+	if hexHash == "" {
+		return ""
+	}
+	decoded, err := hex.DecodeString(hexHash)
+	if err != nil {
+		return hexHash
+	}
+	return string(decoded)
 }
 
 // dirEntry is one child's contribution to its parent's directory digest.

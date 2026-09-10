@@ -13,7 +13,13 @@ one do not propagate to the other.
 `FindDuplicates(files map[string]models.FileRecord, minSize int64, rootPath string)`
 
 1. **Build the tree** from the map. Leaves get `Size` and a `Hash` chosen SHA-1-first,
-   MD5-fallback (so legacy MD5-only snapshots work).
+   MD5-fallback (so legacy MD5-only snapshots work), decoded from hex text to raw bytes
+   (`compactHash`, ported 2026-09-09 from `internal/diff`'s identical helper) so a leaf hash
+   costs 20/16 bytes instead of 40/32 hex characters. A value that fails to decode (never
+   expected from the DB, but true of this package's own test fixtures, which use short
+   non-hex strings like `"h1"` as leaf hashes) falls back to the original string unchanged -
+   correctness never depends on the encoding, only memory does, and every hash goes through
+   the same transform uniformly so equal inputs still decode to equal outputs.
 2. **`computeMetadata`** post-order: a directory's `Size` is the sum of its children's, and
    its `Hash` is a digest over the sorted `(child.Name, child.Hash)` pairs (`dirDigest`,
    ported 2026-09-09 from `internal/diff`'s identical `digestEntries` fix — see
