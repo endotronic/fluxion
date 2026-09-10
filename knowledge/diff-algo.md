@@ -95,8 +95,7 @@ budget `MaxLinesPerDir`, and the progress callback.
 
 | # | Stage | Function |
 |---|---|---|
-| 1 | insert all of A | `insertNode` |
-| 2 | insert all of B (leaf status set by `fileStatus`) | `insertNode` |
+| 1+2 | build the unified tree from both streams (leaf status set by `fileStatus`) | `mergeJoinInsert` (default) or `twoPassInsert`, chosen via the `treeBuilder` parameter of `compareSnapshotsWith` |
 | 3 | split file/directory collisions into host + twin | `splitFileDirCollisions` |
 | 4 | compute directory hashes and `DirA`/`DirB` bottom-up | `computeMerkleHashes` |
 | 5 | roll child statuses up into directories (**pass 1**) | `propagateStatus` |
@@ -105,6 +104,12 @@ budget `MaxLinesPerDir`, and the progress callback.
 | 8 | collect a trial output, reinstate any move source it failed to mention, repeat to a fixed point | `collector.collect` → `accountedPaths` → `reinstateHiddenMoveSources` → `propagateStatus` |
 | 9 | the last trial run *is* the output | `collector` |
 | 10 | turn relative node paths back into absolute paths | inline in `CompareSnapshots` |
+
+Stages 1 and 2 were two independent passes (all of A, then all of B) until 2026-09-09;
+they are now one merge join over both streams, which locates a path present on both sides
+once instead of twice. `twoPassInsert` is retained as the oracle the merge-join builder is
+checked against — see [diff-memory.md](diff-memory.md)'s Phase 1 notes for why, and
+`mergejoin_test.go` for the equivalence harness that later phases should extend.
 
 Two `propagateStatus` passes are required: `detectMovesCopies` needs directory hashes and
 per-node statuses to exist (so it can index `Removed` nodes and match whole directories),
@@ -206,7 +211,13 @@ Order of decisions in `propagateNodeStatus` (first match wins):
      of add-like (Move + Copy, etc.) → `Modified` (deliberately refuses to pick a winner)
    - else `Move` > `Added` > `Copy`, where a lone `Move` or lone `Copy`
      (`changeCount == 1`) degrades to `Mixed` so the child is shown individually
-   - rolled-up `Move`/`Copy` inherit `SourcePath` from the *first* such child
+   - rolled-up `Move`/`Copy` inherit `SourcePath` from the *first* such child — where
+     "first" means **first by name**. `propagateNodeStatus` ranges `sortedChildren`, not
+     `node.Children`, for exactly this reason: over a map, "first" meant "whichever the
+     runtime handed us", and the same input named a different source on every run
+     (fixed 2026-09-09; see `TestDeterminism_RepeatedRunsAgree` and
+     [diff-memory.md](diff-memory.md)'s Phase 1 notes). Any new "pick one child" rule added
+     here must iterate in sorted order too.
    - fallthrough: `!DirA` → `Added`, else `Modified`
 9. anything else → `Mixed` (recurse and show children).
 

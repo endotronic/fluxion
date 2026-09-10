@@ -136,8 +136,20 @@ type Options struct {
 	OnProgress func(current int)
 }
 
+// treeBuilder populates the unified two-snapshot tree from A's and B's record
+// streams. Two implementations exist - mergeJoinInsert and twoPassInsert - and
+// they must be interchangeable; mergejoin_test.go asserts that over the same
+// corpus property_test.go uses. Later phases of knowledge/diff-memory.md
+// replace stages beyond this one the same way, so the seam is deliberately a
+// parameter rather than a hardcoded call.
+type treeBuilder func(root *Node, iterA, iterB FileIterator, hashType string, onProgress func(int)) error
+
 // CompareSnapshots computes the diff between two sets of files.
 func CompareSnapshots(iterA, iterB FileIterator, opts Options) ([]DiffResult, error) {
+	return compareSnapshotsWith(mergeJoinInsert, iterA, iterB, opts)
+}
+
+func compareSnapshotsWith(build treeBuilder, iterA, iterB FileIterator, opts Options) ([]DiffResult, error) {
 	rootA, rootB := opts.RootA, opts.RootB
 	hashType := opts.HashType
 	onProgress := opts.OnProgress
@@ -149,36 +161,11 @@ func CompareSnapshots(iterA, iterB FileIterator, opts Options) ([]DiffResult, er
 		Status:   StatusUnchanged,
 	}
 
-	current := 0
-
-	// 1. Insert A
-	err := iterA(func(path string, record models.FileRecord) error {
-		insertNode(root, path, record, true, hashType)
-		current++
-		if onProgress != nil && current%1000 == 0 {
-			onProgress(current)
-		}
-		return nil
-	})
-	if err != nil {
+	// 1+2. Build the unified tree (Phase 1 of knowledge/diff-memory.md: the
+	// default builder co-walks both streams rather than making two independent
+	// passes).
+	if err := build(root, iterA, iterB, hashType, onProgress); err != nil {
 		return nil, err
-	}
-
-	// 2. Insert B
-	err = iterB(func(path string, record models.FileRecord) error {
-		insertNode(root, path, record, false, hashType)
-		current++
-		if onProgress != nil && current%1000 == 0 {
-			onProgress(current)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if onProgress != nil {
-		onProgress(current)
 	}
 
 	// 3. Separate the file and directory aspects of any colliding path
@@ -293,7 +280,27 @@ func CompareSnapshots(iterA, iterB FileIterator, opts Options) ([]DiffResult, er
 	return finalResults, nil
 }
 
+// insertNode places one record's side into the tree, creating the path chain as
+// needed. It is locateNode followed by applySide - kept as one call because the
+// two-pass builder has no reason to separate them, and because the equivalence
+// test in mergejoin_test.go drives this path as the oracle the merge-join
+// builder is checked against.
 func insertNode(root *Node, path string, record models.FileRecord, isA bool, hashType string) {
+	applySide(locateNode(root, path), record, isA, hashType)
+}
+
+// locateNode walks (creating as it goes) to the node for path and returns it.
+//
+// Idempotent by construction: every step is a map lookup that creates only what
+// is missing, so calling it repeatedly for the same path returns the same node.
+// That is what lets the merge-join builder handle a path whose two sides arrive
+// separately - because the stream was not sorted after all - without producing a
+// different tree than if they had arrived together.
+//
+// Note the degenerate case, preserved deliberately: a record at "" or "/" walks
+// no components at all and returns root itself, so the root node ends up marked
+// IsFile. Both builders inherit this identically; it is not new behaviour.
+func locateNode(root *Node, path string) *Node {
 	cleanPath := strings.TrimPrefix(path, "/")
 	parts := strings.Split(cleanPath, "/")
 
@@ -326,7 +333,14 @@ func insertNode(root *Node, path string, record models.FileRecord, isA bool, has
 		}
 		current = child
 	}
+	return current
+}
 
+// applySide records what one snapshot says about an already-located node, and
+// re-derives the node's status from both sides. Applying A then B, or B then A,
+// or either alone, all leave the node in the same state - the intermediate
+// status is simply overwritten.
+func applySide(current *Node, record models.FileRecord, isA bool, hashType string) {
 	// At leaf
 	current.IsFile = true
 
@@ -486,7 +500,15 @@ func propagateNodeStatus(node *Node) (Status, bool) {
 		return s == StatusAdded || s == StatusRemoved || s == StatusModified || s == StatusCopy || s == StatusMove
 	}
 
-	for _, child := range node.Children {
+	// sortedChildren, not node.Children: firstMoveSource/firstCopySource below
+	// capture "the first such child", and over a map that means "whichever the
+	// runtime happened to hand us", which differs run to run. A rolled-up
+	// Move/Copy line would then name a different source on each run for the same
+	// input - confirmed by TestDeterminism_SameBuilderTwice, which caught
+	// `Move d/ <- c/c/b/c` and `Move d/ <- e` from identical inputs. Sorting
+	// makes "first" mean "first by name", the same convention detectMovesCopies
+	// and the collector already follow.
+	for _, child := range sortedChildren(node) {
 		s, childHasUnchanged := propagateStatus(child)
 
 		if childHasUnchanged {

@@ -113,18 +113,57 @@ string concatenation fails a test instead of surfacing as a swap storm on real f
 scaling — a big enough tree still won't fit — it only moves the wall further out. `coverage`
 is still the command for anything at fleet scale ([fleet.md](fleet.md)).
 
-### Phase 1 — a `NodeStream` abstraction, still in memory
+### Phase 1 — a merge-join tree builder, still in memory — BUILT 2026-09-09
 
-Refactor `CompareSnapshots` to build its tree *from* a DFS-ordered merge join of A and B,
-rather than from two independent inserts. No behaviour change; the point is to prove the
-ordering assumptions and the twin/straggler handling against the existing property test
-before any of it runs on disk.
+`CompareSnapshots` now builds its tree from a merge join of A and B
+(`mergeJoinInsert`, `internal/diff/mergejoin.go`) rather than two independent passes. The
+tree is still fully materialised afterwards, so this buys no memory on its own — the point
+was to establish that the tree *can* be built by co-walking two ordered streams, since the
+later phases replace the tree with a stack and will have no map to fall back on.
 
-The merge join itself is `O(1)` memory: both sides arrive sorted, and
-`idx_files_snapshot_path UNIQUE(snapshot_id, path)` means SQLite can produce each side as
-an index scan with no sort. Two things must be checked before relying on that: relative
-paths preserve absolute order only while `root_path` is a genuine prefix (`app/diff.go`
-has a fallback branch for records that are not), and the DFS key is not the index's order.
+What it took, and what it found:
+
+- **`IterateFiles` had no `ORDER BY` at all.** Today's two-pass builder never needed one —
+  `insertNode` works through map lookups and is completely order-independent — so nothing
+  was enforcing the order a merge join wants. Added; it is free, because
+  `idx_files_snapshot_path` is `(snapshot_id, path)` and an equality match on the first
+  column already yields path order (confirmed against the real fleet DB: no temp b-tree in
+  the plan).
+- **`FileIterator` is push-based**, which cannot serve "show me your next record so I can
+  decide". Bridged with stdlib `iter.Pull` (`pullIter`, `internal/diff/pulliter.go`), so
+  the source runs as a runtime coroutine — no goroutine, no channel, and none of the
+  deadlock/leak failure modes the pre-Go-1.23 goroutine+channel idiom would have added to
+  this package.
+- **Sorted input is an optimisation here, not a correctness requirement.** The concern
+  flagged below — that relativisation against `root_path` has a fallback branch for records
+  not underneath it, so sorted-at-SQL does not imply sorted-at-yield — turns out not to
+  threaten this phase: every loop iteration consumes at least one record, the loop runs
+  until both sides are exhausted, and `locateNode` is idempotent, so every record is applied
+  exactly once whatever the order. Order only decides whether a path's two sides are handled
+  in one step or two. `TestEquivalence_MergeJoinToleratesUnsortedInput` asserts that against
+  deliberately shuffled input rather than trusting the argument. **The stack-based phases
+  below will not enjoy this property** — they need genuine subtree contiguity — which is
+  exactly why establishing the seam here first was worth it.
+
+**The equivalence harness is the durable part.** `twoPassInsert` is retained, not deleted:
+it is the behaviour every golden test and all 400,000 property-test seeds were validated
+against, so it is the only trustworthy definition of "the tree we are supposed to get".
+`compareSnapshotsWith(build treeBuilder, ...)` makes the builder a parameter, and
+`mergejoin_test.go` runs both over the same corpus asserting byte-identical `[]DiffResult`
+— unbudgeted, budgeted at 1 line (truncation being the one mechanism that removes output on
+purpose), and with shuffled input. **Phases 2–5 should extend this file rather than start
+over**; swapping a stage for an external one is the same shape of change.
+
+**It immediately found a real bug that had nothing to do with the merge join.**
+`propagateNodeStatus` captured "the first Move/Copy child" while ranging over
+`node.Children` — a map — so a rolled-up Move/Copy line named a *different source on every
+run of the same input* (`Move d/ <- c/c/b/c` one run, `Move d/ <- e` the next). The property
+test never caught it because both answers are complete and sound; it is "wrong or unstable",
+not the data-loss class. Fixed by ranging `sortedChildren`, the convention
+`detectMovesCopies` and the collector already followed, and pinned by
+`TestDeterminism_RepeatedRunsAgree`. The lesson worth carrying into later phases: **an
+equivalence check is worthless while the thing being checked disagrees with itself**, so
+determinism is the first property to establish, not the last.
 
 ### Phase 2 — streaming rollup and collector
 
