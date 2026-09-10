@@ -77,9 +77,18 @@ fluxion d --db <db> [-u|--update] [-e|--exclude PATH]...
   counts. It applies per directory, not to the run as a whole — the top level is exempt.
   A directory containing unchanged files may not be collapsed (that would claim something
   about files that did not change), so this is the only lever that shortens such a block.
-- `--exclude` is repeatable (`arrayFlags`). **It currently matches by raw
-  `strings.HasPrefix` with no path-boundary check**, so `--exclude data` also excludes
-  `data2/` and `database/`. Confirmed bug; see [known-issues.md](known-issues.md).
+- `--exclude` is repeatable (`arrayFlags`) and matches at path boundaries: `--exclude data`
+  covers `data` and everything under `data/`, and does **not** touch `data2/`, `database/`
+  or `data.bak`. An absolute exclude is matched against the path directly; a relative one is
+  anchored at the snapshot's root (`$ROOT/data`), and also matched against the path as given
+  so it works on the already-relativised second pass. It is not a "match anywhere" rule —
+  `--exclude node_modules` does not exclude `src/node_modules/`. An empty `--exclude ''`
+  matches nothing.
+  Until 2026-09-10 this was a raw `strings.HasPrefix` with no boundary check, which made a
+  diff read clean because content had been silently excluded rather than because it was
+  covered — the severity-1 direction in [goals.md](goals.md). `scripts/verify.sh` now uses
+  confusable siblings (`exclude_me2/`, `exclude_me.bak`) so a regression fails the smoke
+  test.
 - `--no-moves` / `--no-copies` disable the corresponding half of `detectMovesCopies`;
   setting both skips the stage entirely.
 - `--engine` (added 2026-09-10, default `auto`) picks how the diff is computed. The

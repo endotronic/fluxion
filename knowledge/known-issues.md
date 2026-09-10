@@ -6,11 +6,16 @@ it is not can cost the user data; a bug that over-reports only costs reading tim
 
 Items marked **CONFIRMED** were reproduced with executed tests, not inferred from reading.
 
-**Everything listed here is still open.** Issues fixed since the review have been removed
-from this file rather than annotated — `git log` is the record of what was fixed. As of
-2026-08-23 that is 1.1, 1.2, 1.4, 1.5, 2.1, 2.3, 3.3, 3.4, and 3.6, plus the cgo
-modernisation item; the numbering of what remains is unchanged so earlier references still
-resolve.
+Issues fixed since the review are removed from this file rather than annotated — `git log`
+is the record of what was fixed. As of 2026-09-10 that is 1.1, 1.2, 1.3, 1.4, 1.5, 2.1,
+2.3, 3.3, 3.4, and 3.6, plus the cgo modernisation item; the numbering of what remains is
+unchanged so earlier references still resolve. **No severity-1 issue is open.**
+
+Four entries are kept in place with a FIXED/solved marker rather than deleted (2.2, 2.7,
+3.1, 3.2), because what they explain — the merkle collision, the map-order
+non-determinism, and where diff's memory went — is the reasoning behind how those areas
+are now built, and it is referenced from the other knowledge files. Everything else here
+is open.
 
 The diff rewrite that closed 1.1, 1.2 and 2.1 also added `internal/diff/property_test.go`,
 which found and closed four further data-loss bugs that this review had missed entirely —
@@ -22,23 +27,10 @@ See [diff-algo.md](diff-algo.md) for what it asserts and why. **Anything you fix
 
 ## Severity 1 — silent data loss in diff output
 
-### 1.3 `--exclude` over-excludes on non-boundary prefixes — CONFIRMED
-`isExcluded` (`internal/app/diff.go:254`) tests `strings.HasPrefix(path, excl)` with no
-path-separator check. Verified:
-
-| exclude | also silently excluded |
-|---|---|
-| `data` | `/project/data2/file`, `/project/database/file` |
-| `secrets.txt` | `secrets.txt.bak` |
-| `backup` | `backup2/x` |
-
-In a backup-verification tool this makes a diff look clean when it is not. Fix: require the
-match to end at a separator or at end-of-string (`path == excl || strings.HasPrefix(path,
-excl + string(os.PathSeparator))`). `scripts/verify.sh` already tests the over-exclusion
-direction, but only with a name (`exclude_me`) that has no confusable sibling.
-
-The same non-boundary `HasPrefix` appears in `createIter` (`internal/app/diff.go:113`) and
-in `import-legacy`'s root autodetection (`internal/app/import.go`).
+**Nothing open.** 1.3 was the last one; it was fixed 2026-09-10 (see `git log`, and
+[cli.md](cli.md) for what `--exclude` now means). Every path prefix test in `internal/app`
+goes through `pathHasPrefix` (`internal/app/paths.go`), which requires the match to land on
+a path boundary.
 
 ---
 
@@ -94,7 +86,7 @@ depth-5 / 4096-file tree: 1,336,663 total bytes of `HashA`, largest single direc
 string 196,603 bytes — ~326 B/file, growing with depth. Fixed by 2.2's digest change, in
 both packages.
 
-### 3.2 Diff peak memory — REDUCED 5.75x 2026-09-09, not eliminated
+### 3.2 Diff peak memory — SOLVED 2026-09-10
 Two identical 200,000-file snapshots used to retain 200 MiB (~1 KiB/node). A run of
 constant-factor work brought that to **34.1 MiB / 178 B per node**: the 2.2/3.1 digest
 fix, then dropping the pre-allocated `Children` map on leaves, replacing the stored `Path`

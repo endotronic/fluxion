@@ -138,9 +138,18 @@ func RunImportLegacy(cfg ImportLegacyConfig) error {
 				commonPrefix = filepath.Dir(path) // Start with dir of first file
 				first = false
 			} else {
-				// Find common prefix
-				// Simple approach: shrink commonPrefix until it fits
-				for !strings.HasPrefix(path, commonPrefix) {
+				// Shrink commonPrefix until every path so far is under it.
+				//
+				// pathHasPrefix, not strings.HasPrefix: given /a/data/x then
+				// /a/data2/y, a plain prefix test says /a/data2/y is already
+				// under /a/data and stops there, so the snapshot records a root
+				// that half its own files are not beneath. Every one of those
+				// then falls into diff's "not under root" branch and compares by
+				// absolute path against a relative one - which is silent
+				// non-comparison, in a command whose whole purpose is diffing a
+				// current scan against the author's years of dupe-finder
+				// baselines (knowledge/goals.md, "Lineage").
+				for !pathHasPrefix(path, commonPrefix) {
 					// Move up one dir
 					if commonPrefix == "" || commonPrefix == "/" || commonPrefix == "." {
 						commonPrefix = "/"

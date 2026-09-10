@@ -134,14 +134,18 @@ func RunDiff(cfg DiffConfig) error {
 
 				var rel string
 				var err error
-				if strings.HasPrefix(f.Path, rootPath) {
+				if pathHasPrefix(f.Path, rootPath) {
 					rel, err = filepath.Rel(rootPath, f.Path)
 					if err != nil {
 						// Should not happen if prefix matches, but fallback
 						rel = f.Path
 					}
 				} else {
-					// Fallback for paths not under root?
+					// Not under the root: keep the absolute path. A plain
+					// HasPrefix said /mnt/database/x was under /mnt/data, and
+					// filepath.Rel then handed back "../database/x", which the
+					// diff engine would nest under a directory literally named
+					// "..".
 					rel = f.Path
 				}
 
@@ -331,24 +335,34 @@ func isExcluded(path, root string, excludes []string) bool {
 	path = filepath.Clean(path)
 
 	for _, excl := range excludes {
-		// 1. If exclude matches absolute path prefix (if path is absolute)
+		if strings.TrimSpace(excl) == "" {
+			// An empty exclude joined with the root is the root, which would
+			// exclude the entire snapshot and report a diff of nothing. Same
+			// severity-1 direction as over-excluding, so it matches nothing.
+			continue
+		}
+
+		// Every comparison here goes through pathHasPrefix rather than
+		// strings.HasPrefix: an exclude must match at a path boundary or not at
+		// all. See the comment there for why over-excluding is a severity-1 bug
+		// and not a cosmetic one.
 		if filepath.IsAbs(excl) {
-			if strings.HasPrefix(path, excl) {
+			// 1. Absolute exclude: matches the path directly.
+			if pathHasPrefix(path, excl) {
 				return true
 			}
 		} else {
-			// 2. Relative exclude
-			// If we have a root, we can check if path is under root/excl
+			// 2. Relative exclude, anchored at the snapshot root when we have
+			// one: "node_modules" means "$ROOT/node_modules".
 			if root != "" {
-				absExcl := filepath.Join(root, excl)
-				if strings.HasPrefix(path, absExcl) {
+				if pathHasPrefix(path, filepath.Join(root, excl)) {
 					return true
 				}
 			}
 
-			// 3. Or check if path itself starts with exclude (relative match)
-			// This matches "node_modules" against "node_modules/foo"
-			if strings.HasPrefix(path, excl) {
+			// 3. Or the path is itself relative, as it is on the second call in
+			// createIter: "node_modules" matches "node_modules/foo".
+			if pathHasPrefix(path, excl) {
 				return true
 			}
 

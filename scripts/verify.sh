@@ -74,6 +74,14 @@ mkdir -p "$TEST_DIR/exclude_me"
 echo "I should be ignored" > "$TEST_DIR/exclude_me/ignored.txt"
 echo "I should be seen" > "$TEST_DIR/safe_dir.txt"
 
+# Confusable siblings: names that share a prefix with the excluded one but do
+# not sit underneath it. A prefix test with no path-boundary check drops these
+# too, and the diff then reads clean because content was excluded rather than
+# because it is covered - issue 1.3, the severity-1 direction in goals.md.
+mkdir -p "$TEST_DIR/exclude_me2"
+echo "I share a prefix but am not excluded" > "$TEST_DIR/exclude_me2/kept.txt"
+echo "I share a prefix but am not excluded" > "$TEST_DIR/exclude_me.bak"
+
 ./fluxion s --db "$DB_FILE" --name "ExcludeTest" "$TEST_DIR"
 
 # Diff against "WithDupes" (which doesn't have these new files)
@@ -88,13 +96,25 @@ fi
 # With exclude, exclude_me should be gone, but safe_dir.txt should remain
 DIFF_EXCL=$(./fluxion d --db "$DB_FILE" --exclude "exclude_me" "WithDupes" "ExcludeTest")
 
-if [[ "$DIFF_EXCL" == *"exclude_me"* ]]; then
+# Match on the excluded directory's own content, not on the name "exclude_me" -
+# the confusable siblings below deliberately contain that string.
+if [[ "$DIFF_EXCL" == *"ignored.txt"* || "$DIFF_EXCL" == *"exclude_me/"* ]]; then
     echo "Error: Exclude failed! Found ignored file/dir."
     exit 1
 fi
 
 if [[ "$DIFF_EXCL" != *"[+] "*"safe_dir.txt"* ]]; then
     echo "Error: Exclude was too aggressive! Missing safe file."
+    exit 1
+fi
+
+if [[ "$DIFF_EXCL" != *"exclude_me2"* ]]; then
+    echo "Error: Exclude matched a sibling that merely shares its prefix (exclude_me2)."
+    exit 1
+fi
+
+if [[ "$DIFF_EXCL" != *"exclude_me.bak"* ]]; then
+    echo "Error: Exclude matched a file that merely shares its prefix (exclude_me.bak)."
     exit 1
 fi
 
