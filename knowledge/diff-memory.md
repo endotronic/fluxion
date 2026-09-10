@@ -345,6 +345,24 @@ against the tree engine on the same input:
 | 1,600,000 | ~1.5 GiB (extrapolated; would not fit) | 215 MiB |
 | 6,400,000 | ~6 GiB (extrapolated) | **210 MiB** |
 
+And on real fleet data rather than synthetic, which is the number to quote when sizing a
+machine. `luna/mike/archives` vs `luna/mike/unsorted` from the author's `luna-md5.db`
+(1,158,320 + 1,112,170 files ≈ 2.27M nodes, out of a 49 GB database), **with move and copy
+detection on** — the configuration that before Phase 3 forced the tree engine:
+
+| | |
+|---|---|
+| Tree engine, moves on (the only option before Phase 3) | 1,362 MiB |
+| Streaming, `--no-moves --no-copies` (Phase 2) | 127 MiB |
+| **Streaming, moves and copies on (Phase 3)** | **222 MiB**, 110 s wall, 83 output lines |
+
+So the full-featured diff now costs 6.1× less than it did, and the ~95 MiB it costs over
+the no-moves case is the sort buffer, not anything per file. Note that `du` on the temp
+directory reports nothing throughout: the spill files are unlinked the moment they are
+created, so the space is charged to the filesystem but reachable only through the open
+handle. That is deliberate — an interrupted fleet diff cannot leave tens of gigabytes
+behind — but it does mean `spillMeter.peak` is the only way to see what a run actually used.
+
 **The streaming column is flat, not merely slower-growing** — the last two rows differ by
 4× in input and 5 MiB in the wrong direction, which is measurement noise. What is left
 resident is the sort buffer (`sortMemLimit`, 64 MiB) plus `O(depth × budget)` plus Go's GC
