@@ -145,7 +145,7 @@ overlap — `TestRunMerge_OverlappingPathsCollapse` and
 `TestRunMerge_ConflictingContentTakesLastInput` pin that path;
 `TestRunMerge_DisjointRootsStillMergesCorrectly` and `TestRootsDisjoint` pin the new one.
 
-### 3.6 `diff --from`/`--to` refused disjoint ZFS dataset hierarchies — FIXED 2026-09-13
+### 3.8 `diff --from`/`--to` refused disjoint ZFS dataset hierarchies — FIXED 2026-09-13
 
 Found running the new multi-source `diff` feature (`--from`/`--to`, built earlier the same
 day) against the author's real fleet within hours of building it: combining `luna/kevin` with `luna/kevin/archives/2016-2020` (a
@@ -167,10 +167,10 @@ walking one: two sources tied for the same next path is still refused
 `TestMultiSnapshotIter_CatchesGenuineCollision` pins that a real collision is still caught.
 See [diff-algo.md](diff-algo.md)'s "Multi-source sides" section.
 
-### 3.7 `diff --from`/`--to`'s k-way merge compared the wrong key — FIXED 2026-09-14
+### 3.9 `diff --from`/`--to`'s k-way merge compared the wrong key — FIXED 2026-09-14
 
-Found immediately after 3.6 above, running the same real-fleet comparison with the fix for
-3.6 in place: the run got much further (38% through, ~32M of ~84M files, streaming engine
+Found immediately after 3.8 above, running the same real-fleet comparison with the fix for
+3.8 in place: the run got much further (38% through, ~32M of ~84M files, streaming engine
 active) and then aborted with `errMultiSourceOverlap` naming a path that, on inspection,
 existed in only one of the 21 combined snapshots — not a real collision at all.
 

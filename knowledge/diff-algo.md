@@ -461,7 +461,7 @@ had walked out of the order its data actually satisfied. Fixed with a `key` func
 `IterateFiles` actually produced each source) used consistently for both picking the winner
 and the monotonicity check below. `TestMultiSnapshotIter_UsesDFSOrderWhenStreamable` pins
 the classic `a`/`a.txt`/`a/x` shape split across two sources — see
-`knowledge/known-issues.md` 3.7.
+`knowledge/known-issues.md` 3.9.
 
 **Refuse, don't guess, on the one thing that's actually left: a genuine collision.** The
 only way this can still go wrong is two sources really producing the same relative path —

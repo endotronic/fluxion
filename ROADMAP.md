@@ -73,7 +73,7 @@
   *root paths* meant no collision was possible - wrong for a real ZFS fleet, where
   `--cross-mounts=false` makes a parent dataset's root a normal string-prefix of a child's
   despite the two never sharing a file, so it refused exactly the hierarchy this was built
-  for within hours of shipping. See `knowledge/known-issues.md` 3.6. Proven equivalent to
+  for within hours of shipping. See `knowledge/known-issues.md` 3.8. Proven equivalent to
   physically merging the same sources and diffing the result
   (`TestMultiSourceDiff_EquivalentToMergeThenDiff`). See `knowledge/cli.md` and
   `knowledge/diff-algo.md`.
