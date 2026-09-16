@@ -76,6 +76,43 @@ unstable", not the data-loss class. Fixed by ranging `sortedChildren`, the conve
 `detectMovesCopies` and the collector already used, and pinned by
 `TestDeterminism_RepeatedRunsAgree`.
 
+### 2.9 An empty snapshot poisons hash negotiation for every other side — CONFIRMED 2026-09-16
+
+`coverage` (and `diff`) negotiate the hash algorithm by **intersecting** the
+algorithms present across the candidate and *every* keeper. A snapshot with zero
+file rows has no algorithms at all, so including one as a keeper collapses the
+intersection to empty and the whole run dies with:
+
+```
+Error: snapshots share no common hash algorithm
+```
+
+Reproduced at fleet scale: a `coverage` sweep of `artemis/deprecated` against all
+22 `artemis/luna*` snapshots as a union keeper set **failed all 109 candidate
+datasets in seconds**. Three keepers were empty — `artemis/luna` and
+`artemis/luna/mike` (ZFS container datasets holding no files of their own) and
+`artemis/luna/kevin/archives/deprecated-backups`. Every log showed the negotiation
+dump with `artemis/luna has: []` alongside 19 keepers reporting `[sha1]`.
+
+**An empty keeper constrains nothing** — it can never cover anything, so dropping
+it from the intersection cannot change a verdict. It should be ignored during
+negotiation (or treated as compatible with any algorithm) rather than being
+allowed to veto the run. The same applies to an empty *candidate*, where the
+correct answer is trivially "fully covered, nothing to lose" rather than an error.
+
+This is squarely in the way of the job the command was built for: a ZFS fleet
+scanned per dataset *always* produces empty snapshots, because `canmount=off`
+container datasets are normal and `zfs-scan` records them. In this DB 37 of 109
+candidates and 3 of 22 keepers are empty. It fails safe (an error, not a wrong
+answer), which is why it is here and not in severity 1 — but it makes the union
+keeper set, the feature's whole point, unusable without an external workaround.
+
+Workaround in use meanwhile (`../stash/sweep-artemis-coverage.sh`): pre-filter
+both lists with a SQL existence check before invoking fluxion —
+`SELECT s.name FROM snapshots s WHERE NOT EXISTS
+ (SELECT 1 FROM files f WHERE f.snapshot_id = s.id)`, an index seek that takes
+~1.5s over a 47 GB database.
+
 ---
 
 ## Severity 3 — scale and performance
