@@ -42,8 +42,12 @@
   seeds, budgeted and not, with `--show-unchanged` on and off. Temp space is guarded two
   ways: an advisory estimate against free space up front (plus a warning when the temp
   directory is a `tmpfs`, which the default usually is), and a hard abort in the engine
-  once writing would leave less than 512 MiB free. Still open: nothing exposes the sort
-  buffer size from the command line
+  once writing would leave less than 512 MiB free. Measured 2026-09-10 whether the sort
+  buffer (`sortMemLimit`, 64 MiB) was worth exposing as a flag: raising it to 1 GiB gave no
+  wall-time improvement (29.51s vs 29.49s at 1.6M files a side, everything moving — the
+  worst case for the matcher) because the external sort is already a single-pass k-way
+  merge, so a bigger buffer only means fewer/larger runs, not fewer I/O passes. Not adding
+  the flag — see `knowledge/diff-memory.md`'s Phase 5.
 - [x] metadata-only scan mode (no hashing) so a 185T fleet can be triaged by size+name
   first and hashed only where trees actually overlap — **done 2026-09-10** as
   `snapshot --no-hash` / `zfs-scan --no-hash`. The `CHECK (length(sha1) > 0 OR length(md5)

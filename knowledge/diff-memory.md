@@ -496,9 +496,36 @@ been a silently worse memory profile. `--temp-dir` is the other knob; see
 The tree engine is kept permanently, as planned: it is faster below a few million nodes,
 and it is the oracle for the equivalence test.
 
-Still unbuilt: nothing tunes `sortMemLimit` (a package-level 64 MiB) from the command line.
-It is the single largest resident item once a diff is big enough for the file count not to
-matter, so it is the knob to expose first if a fleet run needs to trade RAM for I/O.
+**Measured 2026-09-10, not built.** This section used to say raising `sortMemLimit` (a
+package-level 64 MiB) was the knob to expose first if a fleet run needed to trade RAM for
+I/O. Tested instead of guessed: `TestBenchSortLimit` (a throwaway benchmark, not kept)
+ran the external matcher at 1.6M files a side with everything moving — the worst case,
+maximal record volume — on real disk rather than `tmpfs`, comparing `sortMemLimit` at
+64 MiB against 1 GiB.
+
+| | 64 MiB | 1 GiB |
+|---|---|---|
+| Wall time | 29.51s | 29.49s |
+| Temp disk peak | 150.3 MiB | 115.1 MiB |
+
+No wall-time difference, because `mergeRuns` (`extsort.go`) is already a single-pass k-way
+heap merge, not a multi-level merge sort: build-then-merge is exactly two I/O passes
+regardless of buffer size, and a bigger buffer only changes how many runs that splits
+across (fewer, larger runs, cheaper heap comparisons — not fewer passes). The one case a
+bigger buffer changes qualitatively is a diff whose total record volume fits entirely
+under the cap: `extSorter.finish()` then skips run-flushing and sorts once in memory. Even
+there, on the volume actually tested (~90 MiB, comfortably under a 1 GiB cap), it bought
+nothing — hashing and per-record overhead dominate, not the sort.
+
+**Not adding a flag for this.** The downside is real and the upside isn't: raising the
+cap makes the arena grow to whatever the *data volume* needs up to the new limit rather
+than the old one, so on any diff whose record volume lands between 64 MiB and 1 GiB —
+which is most of the practical range below true fleet scale — peak RSS grows with no
+measured benefit. At genuine fleet scale (100–200M nodes, tens of GB of records) a
+diff exceeds even a 1 GiB cap regardless, so the flag would not help the case it was
+meant for either. `spillMemLimit` (8 MiB, separate) still gates the decision/candidate/
+output logs to disk independent of this knob, which is most of why temp-disk peak barely
+moved between the two runs above.
 
 ## How this gets verified
 
