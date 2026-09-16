@@ -239,6 +239,12 @@ func runDiff(args []string) {
 	cmd.Var(&excludes, "exclude", "Exclude directory from diff (relative or absolute)")
 	cmd.Var(&excludes, "e", "Exclude directory from diff (shorthand)")
 
+	var fromFlags arrayFlags
+	cmd.Var(&fromFlags, "from", "Snapshot for the 'old' side; repeatable to combine several snapshots "+
+		"with disjoint roots into one side, standing in for the snapshot a `merge` of them would produce")
+	var toFlags arrayFlags
+	cmd.Var(&toFlags, "to", "Snapshot for the 'new' side; repeatable, same rules as --from")
+
 	var noCopies bool
 	cmd.BoolVar(&noCopies, "no-copies", false, "Do not detect copies")
 
@@ -281,15 +287,30 @@ func runDiff(args []string) {
 	}
 
 	tail := cmd.Args()
-	if len(tail) != 2 {
+	var oldQueries, newQueries []string
+	switch {
+	case len(fromFlags) > 0 || len(toFlags) > 0:
+		if len(tail) > 0 {
+			fmt.Println("Error: cannot mix --from/--to with positional snapshot arguments")
+			os.Exit(1)
+		}
+		if len(fromFlags) == 0 || len(toFlags) == 0 {
+			fmt.Println("Error: --from and --to must each be given at least once")
+			os.Exit(1)
+		}
+		oldQueries, newQueries = fromFlags, toFlags
+	case len(tail) == 2:
+		oldQueries, newQueries = []string{tail[0]}, []string{tail[1]}
+	default:
 		fmt.Println("Usage: fluxion diff --db <db> <old_snapshot_id> <new_snapshot_id>")
+		fmt.Println("   or: fluxion diff --db <db> --from <snap>... --to <snap>...")
 		os.Exit(1)
 	}
 
 	cfg := app.DiffConfig{
 		DBPath:        *dbPtr,
-		OldQuery:      tail[0],
-		NewQuery:      tail[1],
+		OldQueries:    oldQueries,
+		NewQueries:    newQueries,
 		UpdateMode:    updateMode,
 		Excludes:      excludes,
 		NoCopies:      noCopies,

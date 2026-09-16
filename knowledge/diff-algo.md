@@ -405,6 +405,91 @@ it in place, so two things are load-bearing:
 Truncation interacts with stage 8: dropping a `Move` line un-names its source. That is
 handled by stage 8 running *after* collection rather than before it.
 
+## Multi-source sides (`--from`/`--to`), and the overlap case that isn't built
+
+Added 2026-09-13, in `internal/app/diffmulti.go` — above `internal/diff` entirely, not a
+change to the engine. `CompareSnapshots` takes exactly two `FileIterator`s; what's new is
+how a `FileIterator` for one side gets built, not the engine that consumes it.
+
+**Why this exists.** The fleet's actual comparison (`knowledge/fleet.md`) is one legacy
+baseline snapshot against a *union* of a fleet's many per-dataset `zfs-scan` snapshots —
+`coverage` already does unions of keepers, but `diff` took exactly two snapshot IDs. The
+naive fix is `merge` (`internal/app/merge.go`) into one physical snapshot, then diff that —
+but `merge` still has to read every source *and* write every row back out before `diff` can
+read it a second time, doubling the I/O for no reason: `diff` only ever needs to read a
+side once anyway.
+
+**First version, and the real-fleet bug that replaced it same-day.** The first cut sorted
+sources by root path and *concatenated* their whole streams, reasoning that snapshots with
+pairwise-disjoint roots (`rootsDisjoint`, checked up front) can't share a path, so root order
+is already global path order. That reasoning has a hole a real ZFS fleet hits immediately:
+`zfs-scan` scans each dataset with `--cross-mounts=false`, so a parent dataset's root
+(`luna/kevin`) is a completely normal *string* prefix of a child dataset's root
+(`luna/kevin/archives/2016-2020`) despite the two never sharing a single file — the child is
+a separate mounted filesystem the parent's own scan never descended into. `rootsDisjoint`
+can't tell that apart from a genuine overlap, so it refused the pair outright — making the
+feature unusable for exactly the fleet hierarchy it exists for, discovered running it against
+the author's actual data. Worse, concatenation would have produced wrong *output* even
+without the false refusal: a parent's own files can sort anywhere relative to a child's
+entire subtree, so emitting one source's whole block before another's can violate global
+order with zero real collisions.
+
+**The fix: a genuine k-way merge, and dropping the static check entirely.** There is no
+cheap, static way to tell "nested names, disjoint content" from "nested names, colliding
+content" — that depends on the data, not the root paths, so it can't be decided before
+reading them. `multiSnapshotIter` now runs a real k-way merge: one pull cursor per source
+(`pullIter`, mirroring `internal/diff`'s own — see `internal/diff/pulliter.go`'s doc comment
+for why `iter.Pull` rather than a goroutine and channel), each source relativized to the
+combined set's common ancestor (`findLCA`, the same function `merge` uses to name its
+physical output), repeatedly taking whichever active cursor holds the lexicographically
+smallest current path. This interleaves sources correctly regardless of how their roots
+relate, string-wise, to each other. `rootsDisjoint` is no longer consulted here at all (it
+remains correct and in use for `merge`'s own, different, question — see
+`knowledge/known-issues.md` 3.5). When a side has exactly one source this still degenerates
+to the plain case `diff` has always had (`singleSnapshotIter`, unchanged).
+
+**"Smallest" by which order? A second real-fleet bug, found the same day.** A streamable
+source is read via `IterateFilesDFS`, sorted by DFS key (`/` sorting below every other byte -
+see Stage 2's streaming engine notes and `internal/diff/streaming.go`'s `dfsKey`), not plain
+path order. The merge's "smallest current path" comparison has to use that same key or it
+can pick the wrong winner: plain order says `a < a.txt < a/x`, DFS order says
+`a < a/x < a.txt`, because `'\x01'` (what `/` becomes) sorts below `'.'`. Comparing
+DFS-sorted sources with plain `<` produced exactly this on the real fleet - a "collision"
+error naming a path that existed in only one snapshot, because the merge's own comparator
+had walked out of the order its data actually satisfied. Fixed with a `key` function
+(`dfsKey` when streamable, identity otherwise, matching whichever of `IterateFilesDFS` /
+`IterateFiles` actually produced each source) used consistently for both picking the winner
+and the monotonicity check below. `TestMultiSnapshotIter_UsesDFSOrderWhenStreamable` pins
+the classic `a`/`a.txt`/`a/x` shape split across two sources — see
+`knowledge/known-issues.md` 3.7.
+
+**Refuse, don't guess, on the one thing that's actually left: a genuine collision.** The
+only way this can still go wrong is two sources really producing the same relative path —
+the last-input-wins case `merge` resolves with its collision map, which this does not
+attempt. That surfaces naturally during the merge as two cursors tied for the next record;
+`multiSnapshotIter` requires every taken path to sort strictly after the previous one across
+the *whole* merge, so a tie (or, defensively, any other ordering violation) returns
+`errMultiSourceOverlap` and the diff stops rather than picking a winner arbitrarily.
+`TestMultiSnapshotIter_CatchesGenuineCollision` pins that; `TestRunDiff_AllowsNestedRootsWithDisjointContent`
+pins the fixed bug itself — the exact parent/child dataset shape that used to be refused.
+
+**Verified equivalent, not just plausible.** `TestMultiSourceDiff_EquivalentToMergeThenDiff`
+asserts the same `[]diff.DiffResult` from (a) the new multi-source path and (b) physically
+merging the same sources and diffing the result the ordinary, long-trusted way — the same
+"is the shortcut actually equal to the slow, obviously-correct thing" proof this package
+always asks for before trusting a new fast path.
+
+**Future work: the overlapping-content case.** Two sources that genuinely hold the same
+path are still refused; combining them is `merge`'s job today. Removing that restriction
+needs `merge`'s last-input-wins precedence built into the k-way merge itself: when cursors
+tie, decide instead of refusing, using input order (the same rule `merge` documents) to pick
+a winner and require duplicate-path decisions to be threaded through the merge as a first-class
+outcome rather than an abort. That's real but bounded work — the k-way merge machinery
+built here is exactly what a tie-breaking version would extend, not a mechanism to replace —
+and, as `internal/diff`-adjacent code, it should get the same equivalence-testing rigor as
+everything else in this file: an oracle test proving the tie-breaking result matches
+physically merging the same overlapping sources and diffing that.
+
 ## Remaining known defects
 
 Full details in [known-issues.md](known-issues.md).

@@ -72,9 +72,29 @@ fluxion s --db <db> [--name N] [--dir D] [--threads N] [--md5] [--no-hash]
 fluxion d --db <db> [-u|--update] [-e|--exclude PATH]... 
          [--no-copies] [--no-moves] [--show-unchanged] [--max-lines N]
          [--engine auto|tree|streaming] [--temp-dir DIR] <A> <B>
+   or:   fluxion d --db <db> [...same flags...] --from <snap>... --to <snap>...
 ```
 
-`A` and `B` are snapshot IDs or names. Output symbols:
+`A` and `B` are snapshot IDs or names. `--from`/`--to` (each repeatable, added 2026-09-13)
+replace them when one side needs to be more than one snapshot — comparing one baseline
+against a fleet's many per-dataset `zfs-scan` snapshots, for instance, without physically
+`merge`-ing them first. The two forms are mutually exclusive (positional args error out if
+either `--from` or `--to` is given), and `--from`/`--to` each require at least one snapshot.
+A single `--from` or `--to` behaves exactly like the positional form; see
+[diff-algo.md](diff-algo.md)'s "Multi-source sides" section for how several are combined and
+why it's cheaper than `merge`-then-diff.
+
+**Combining works regardless of how the sources' root paths relate to each other** — nested
+names are fine, including a ZFS parent/child pair like `luna/kevin` and
+`luna/kevin/archives/2016-2020` (independent datasets under `--cross-mounts=false`, so they
+never share a file despite one root being a string-prefix of the other). It's a genuine
+k-way merge by relative path, not a root-order concatenation, so the only thing that's
+actually refused is two sources really holding the *same* path — reported as an error naming
+that path once found, with `fluxion merge` pointed to as today's workaround. Combining
+sources whose content genuinely overlaps is not yet built (see [diff-algo.md](diff-algo.md)'s
+"Future work").
+
+Output symbols:
 
 | Symbol | Status |
 |---|---|

@@ -63,6 +63,24 @@
   while trying to build one union snapshot from a fleet's 21 `zfs-scan` datasets (~34.6M
   files) to compare against a legacy baseline: the old collision map alone would have
   needed ~7-10 GB resident.
+- [x] `diff --from <snap>... --to <snap>...`: combine several snapshots into one side of a
+  diff on the fly, for exactly the case above — comparing one baseline against a fleet's
+  many per-dataset snapshots — without paying for `merge`'s extra read-then-write pass.
+  **Done 2026-09-13**, via a genuine k-way merge by relative path (`multiSnapshotIter` in
+  `internal/app/diffmulti.go`) with one pull cursor per source; two sources actually holding
+  the same path are refused rather than silently collapsed. A first version instead sorted
+  sources by root path and concatenated whole streams, reasoning that pairwise-disjoint
+  *root paths* meant no collision was possible - wrong for a real ZFS fleet, where
+  `--cross-mounts=false` makes a parent dataset's root a normal string-prefix of a child's
+  despite the two never sharing a file, so it refused exactly the hierarchy this was built
+  for within hours of shipping. See `knowledge/known-issues.md` 3.6. Proven equivalent to
+  physically merging the same sources and diffing the result
+  (`TestMultiSourceDiff_EquivalentToMergeThenDiff`). See `knowledge/cli.md` and
+  `knowledge/diff-algo.md`.
+- [ ] `diff --from`/`--to` for two sources that genuinely hold the *same path* — needs
+  `merge`'s last-input-wins precedence built into the k-way merge as a tie-breaking decision
+  rather than a refusal. Separate from, and smaller than, what the item above turned out to
+  be; see "Future work" in `knowledge/diff-algo.md`.
 
 ## v0.8.14
 - [ ] if copies are disabled, don't show the copies as additions since the hash is not new

@@ -115,7 +115,7 @@ func TestSnapshot_NoHash_NeverReportsFilesAsMatching(t *testing.T) {
 	// diff refuses outright: with no hash on either side there is no algorithm
 	// in common, and guessing "unchanged" from size and mtime is exactly the
 	// claim goals.md forbids.
-	err := RunDiff(DiffConfig{DBPath: dbPath, OldQuery: "A", NewQuery: "B"})
+	err := RunDiff(DiffConfig{DBPath: dbPath, OldQueries: []string{"A"}, NewQueries: []string{"B"}})
 	if err == nil {
 		t.Fatal("diff of two hash-less snapshots succeeded; it must refuse rather than " +
 			"report files as unchanged on the strength of size and mtime")

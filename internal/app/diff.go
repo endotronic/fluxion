@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"fluxion/internal/diff"
-	"fluxion/internal/models"
 	"fluxion/internal/store"
 	"fluxion/internal/store/sqlite"
 	"fluxion/internal/util"
@@ -17,9 +16,14 @@ import (
 )
 
 type DiffConfig struct {
-	DBPath     string
-	OldQuery   string
-	NewQuery   string
+	DBPath string
+	// OldQueries and NewQueries each name one or more snapshots. A single
+	// entry is the plain case this has always supported. Several are combined
+	// into one virtual union for that side - see multiSnapshotIter - which
+	// only works when that side's snapshots have pairwise disjoint roots;
+	// anything else is refused rather than guessed at.
+	OldQueries []string
+	NewQueries []string
 	UpdateMode bool
 
 	// MaxLinesPerDir caps how many lines one directory may contribute; 0 shows
@@ -54,39 +58,29 @@ func RunDiff(cfg DiffConfig) error {
 	defer dbStore.Close()
 
 	// 1. Find Snapshots
-	snapA, err := dbStore.FindSnapshot(cfg.OldQuery)
-	if err != nil {
-		return fmt.Errorf("could not find 'old' snapshot '%s': %w", cfg.OldQuery, err)
+	if len(cfg.OldQueries) == 0 || len(cfg.NewQueries) == 0 {
+		return fmt.Errorf("at least one 'old' and one 'new' snapshot are required")
 	}
 
-	snapB, err := dbStore.FindSnapshot(cfg.NewQuery)
+	snapsA, err := resolveSnapshots(dbStore, cfg.OldQueries)
 	if err != nil {
-		return fmt.Errorf("could not find 'new' snapshot '%s': %w", cfg.NewQuery, err)
+		return fmt.Errorf("could not resolve 'old' snapshot(s): %w", err)
+	}
+	snapsB, err := resolveSnapshots(dbStore, cfg.NewQueries)
+	if err != nil {
+		return fmt.Errorf("could not resolve 'new' snapshot(s): %w", err)
 	}
 
-	oldID := snapA.ID
-	newID := snapB.ID
+	if len(snapsA) > 1 {
+		logrus.Infof("Combining %d snapshots for the 'old' side: %s", len(snapsA), snapshotNames(snapsA))
+	}
+	if len(snapsB) > 1 {
+		logrus.Infof("Combining %d snapshots for the 'new' side: %s", len(snapsB), snapshotNames(snapsB))
+	}
 
 	// Determine Hash Strategy
-	hasSHA1A, hasMD5A := false, false
-	for _, h := range snapA.Hashes {
-		if h == "sha1" {
-			hasSHA1A = true
-		}
-		if h == "md5" {
-			hasMD5A = true
-		}
-	}
-
-	hasSHA1B, hasMD5B := false, false
-	for _, h := range snapB.Hashes {
-		if h == "sha1" {
-			hasSHA1B = true
-		}
-		if h == "md5" {
-			hasMD5B = true
-		}
-	}
+	hasSHA1A, hasMD5A := sideHashes(snapsA)
+	hasSHA1B, hasMD5B := sideHashes(snapsB)
 
 	commonSHA1 := hasSHA1A && hasSHA1B
 	commonMD5 := hasMD5A && hasMD5B
@@ -98,8 +92,8 @@ func RunDiff(cfg DiffConfig) error {
 		strategy = "md5"
 	} else {
 		logrus.Errorf("Error: Incompatible hash types.\n")
-		logrus.Errorf("Snapshot A Hashes: %v\n", snapA.Hashes)
-		logrus.Errorf("Snapshot B Hashes: %v\n", snapB.Hashes)
+		logrus.Errorf("'old' side hashes: sha1=%v md5=%v\n", hasSHA1A, hasMD5A)
+		logrus.Errorf("'new' side hashes: sha1=%v md5=%v\n", hasSHA1B, hasMD5B)
 		return fmt.Errorf("snapshots must share at least one common hash algorithm")
 	}
 
@@ -109,8 +103,8 @@ func RunDiff(cfg DiffConfig) error {
 	logrus.Info("Computing Diff...")
 
 	// Setup Progress Bar
-	countA, _ := dbStore.GetFileCount(oldID)
-	countB, _ := dbStore.GetFileCount(newID)
+	countA := sumFileCounts(dbStore, snapsA)
+	countB := sumFileCounts(dbStore, snapsB)
 	totalExpected := countA + countB
 
 	// The streaming engine needs DFS-key order, which costs a temp b-tree sort;
@@ -132,53 +126,15 @@ func RunDiff(cfg DiffConfig) error {
 
 	barDiff := progressbar.Default(totalExpected)
 
-	// Helper to create iterator
-	createIter := func(id int64, rootPath string) diff.FileIterator {
-		return func(yield func(string, models.FileRecord) error) error {
-			iterate := dbStore.IterateFiles
-			if streamable {
-				iterate = dbStore.IterateFilesDFS
-			}
-			return iterate(id, func(f models.FileRecord) error {
-				if isExcluded(f.Path, rootPath, cfg.Excludes) {
-					return nil
-				}
-
-				var rel string
-				var err error
-				if pathHasPrefix(f.Path, rootPath) {
-					rel, err = filepath.Rel(rootPath, f.Path)
-					if err != nil {
-						// Should not happen if prefix matches, but fallback
-						rel = f.Path
-					}
-				} else {
-					// Not under the root: keep the absolute path. A plain
-					// HasPrefix said /mnt/database/x was under /mnt/data, and
-					// filepath.Rel then handed back "../database/x", which the
-					// diff engine would nest under a directory literally named
-					// "..".
-					rel = f.Path
-				}
-
-				if err == nil {
-					if isExcluded(rel, "", cfg.Excludes) {
-						return nil
-					}
-					return yield(rel, f)
-				}
-				// If error in Rel, default to full path (legacy behavior)
-				return yield(f.Path, f)
-			})
-		}
-	}
+	iterA, rootA := buildSideIter(dbStore, snapsA, streamable, cfg.Excludes)
+	iterB, rootB := buildSideIter(dbStore, snapsB, streamable, cfg.Excludes)
 
 	results, err := diff.CompareSnapshots(
-		createIter(oldID, snapA.RootPath),
-		createIter(newID, snapB.RootPath),
+		iterA,
+		iterB,
 		diff.Options{
-			RootA:          snapA.RootPath,
-			RootB:          snapB.RootPath,
+			RootA:          rootA,
+			RootB:          rootB,
 			HashType:       strategy,
 			NoCopies:       cfg.NoCopies,
 			NoMoves:        cfg.NoMoves,

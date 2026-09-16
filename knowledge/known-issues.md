@@ -145,6 +145,56 @@ overlap — `TestRunMerge_OverlappingPathsCollapse` and
 `TestRunMerge_ConflictingContentTakesLastInput` pin that path;
 `TestRunMerge_DisjointRootsStillMergesCorrectly` and `TestRootsDisjoint` pin the new one.
 
+### 3.6 `diff --from`/`--to` refused disjoint ZFS dataset hierarchies — FIXED 2026-09-13
+
+Found running the new multi-source `diff` feature (`--from`/`--to`, built earlier the same
+day) against the author's real fleet within hours of building it: combining `luna/kevin` with `luna/kevin/archives/2016-2020` (a
+real parent/child ZFS dataset pair) was refused as "overlapping," even though `zfs-scan`'s
+`--cross-mounts=false` means the two never share a single file - the child is a separate
+mounted filesystem the parent's own scan never descended into. The first version of the
+feature decided disjointness from root *path strings* (`rootsDisjoint`) and, having
+confirmed it, concatenated whole per-source streams in root order rather than truly merging
+them - both steps assumed a nested root string implied nested content, which a
+`--cross-mounts=false` fleet violates constantly and normally.
+
+Fixed by replacing root-string reasoning with a genuine k-way merge by relative path
+(`multiSnapshotIter`, `internal/app/diffmulti.go`) and dropping the static root check
+entirely - there is no cheap way to tell "nested names, disjoint content" from "nested
+names, colliding content" without reading the data, so the only remaining check is the
+walking one: two sources tied for the same next path is still refused
+(`errMultiSourceOverlap`), now for a *real* collision rather than a shape of root path.
+`TestRunDiff_AllowsNestedRootsWithDisjointContent` pins the fixed shape;
+`TestMultiSnapshotIter_CatchesGenuineCollision` pins that a real collision is still caught.
+See [diff-algo.md](diff-algo.md)'s "Multi-source sides" section.
+
+### 3.7 `diff --from`/`--to`'s k-way merge compared the wrong key — FIXED 2026-09-14
+
+Found immediately after 3.6 above, running the same real-fleet comparison with the fix for
+3.6 in place: the run got much further (38% through, ~32M of ~84M files, streaming engine
+active) and then aborted with `errMultiSourceOverlap` naming a path that, on inspection,
+existed in only one of the 21 combined snapshots — not a real collision at all.
+
+The actual bug: `multiSnapshotIter`'s k-way merge picked the next record by comparing
+cursors' raw paths with plain `<`, but a streamable source is read via `IterateFilesDFS`,
+which is sorted by **DFS key** (`replace(path, '/', char(1))` - `/` sorting below every
+other byte, so a directory's contents are adjacent to it; see `internal/diff/streaming.go`'s
+`dfsKey` and its doc comment). Plain order and DFS order disagree for the classic case
+`a`, `a.txt`, `a/x`: plain order is `a < a.txt < a/x`, DFS order is `a < a/x < a.txt`: because
+`'\x01'` (what `/` becomes) sorts below `'.'`. Merging DFS-sorted sources with a plain-order
+comparator can therefore pick a "winner" that violates the walking monotonicity check even
+though nothing actually collided - which is exactly what happened on real data containing
+this shape.
+
+Fixed by giving the merge a `key` function matching each source's actual order - `dfsKey`
+(mirrored from `internal/diff/streaming.go`, which keeps that helper unexported) when
+streamable, the identity function otherwise, matching `IterateFiles`'s plain path order.
+`TestMultiSnapshotIter_UsesDFSOrderWhenStreamable` pins both cases against the classic
+`a`/`a.txt`/`a/x` shape, split across two sources so the comparator (not a single source's
+own already-correct `IterateFilesDFS` call) is what's under test. Two real bugs in the same
+new feature on the same day is a sign the multi-source path needed more adversarial-shape
+testing before being called done, not just the equivalence-vs-`merge` proof it already had -
+worth remembering if this file grows a third entry for it.
+
 ---
 
 ## Severity 4 — usability and hygiene
