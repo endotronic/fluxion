@@ -44,6 +44,29 @@ func pathHasPrefix(path, prefix string) bool {
 // must not record that: the directory is gone by the time anyone reads the
 // snapshot, and a ZFS mountpoint is a property that can change under you
 // anyway. What is stable is the dataset's own name and the path within it.
+// rootsDisjoint reports whether no root in roots can contain a path also
+// reachable through another root in the list: none are equal, and none is a
+// path-boundary prefix of another.
+//
+// Every file's stored path is guaranteed to begin with its own snapshot's
+// root path (rebasePath above feeds CreateSnapshot in snapshot.go, and the
+// scanner's own walk root does the same for an ordinary snapshot), so when a
+// set of inputs' roots are pairwise disjoint by this definition, their file
+// paths cannot collide - a merge across them needs no collision bookkeeping
+// at all. Per-dataset zfs-scan snapshots are exactly this case: each is
+// rooted at its own dataset name, or, before issue 2.8 was fixed, its own
+// randomly generated scan mount - either way, disjoint.
+func rootsDisjoint(roots []string) bool {
+	for i := 0; i < len(roots); i++ {
+		for j := i + 1; j < len(roots); j++ {
+			if pathHasPrefix(roots[i], roots[j]) || pathHasPrefix(roots[j], roots[i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func rebasePath(p, oldRoot, newRoot string) string {
 	if oldRoot == newRoot || !pathHasPrefix(p, oldRoot) {
 		return p

@@ -604,8 +604,14 @@ as `coverage`'s exit 2.
 ## merge / import
 
 `merge` builds a new snapshot from two or more existing ones in the same DB (`--name`
-required). `import` copies snapshots between DBs (`--source` DB, `--all` or named
-snapshots). Both materialise each source snapshot in memory and both log-and-continue on
+required), collapsing any path several inputs share into one record (last input listed
+wins; conflicts are reported). As of 2026-09-10 it streams each source via `IterateFiles`
+rather than materialising it, and skips the cross-input collision map entirely when the
+inputs' root paths are pairwise disjoint — always true for a merge of independent
+`zfs-scan` datasets, since every stored path is guaranteed prefixed by its own snapshot's
+root. See [known-issues.md](known-issues.md) 3.5. `import` copies snapshots between DBs
+(`--source` DB, `--all` or named snapshots); as of 2026-09-13 it also streams via
+`IterateFiles` rather than materialising each source into a map. Both log-and-continue on
 batch-insert failures.
 
 ## Legacy `dupe-finder` format

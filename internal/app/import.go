@@ -358,28 +358,20 @@ func RunImportDB(cfg ImportDBConfig) error {
 			continue
 		}
 
-		// Retrieve files from Source
+		// Retrieve files from Source. Streamed via IterateFiles rather than
+		// GetFilesForSnapshot: the latter loads the whole snapshot into a
+		// map[string]FileRecord at once, which for a fleet-scale snapshot
+		// (tens of millions of rows) is the same "materialise the whole
+		// thing" defect merge's own read path had before 2026-09-11 (see
+		// knowledge/known-issues.md 3.5) - here with no rootsDisjoint
+		// shortcut available, since a single source snapshot has nothing to
+		// be disjoint from. Streaming removes the cost entirely rather than
+		// trading it for a narrower one.
 		count, _ := sourceStore.GetFileCount(s.ID)
 		bar := progressbar.Default(count, fmt.Sprintf("Copying %s", s.Name))
 
-		files, err := sourceStore.GetFilesForSnapshot(s.ID, func(c int) {
-			// GetFiles callback provides loaded count, not incremental
-			// progressbar Set(c) handles absolute
-			bar.Set(c)
-		})
-		if err != nil {
-			logrus.Errorf("Error reading files from source: %v", err)
-			continue
-		}
-		bar.Finish()
-		logrus.Println()
-
-		// Insert into Dest
 		batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
-
-		// We iterate map. Order doesn't matter.
-		for _, f := range files {
-			// Create new record bound to new snapshot
+		iterErr := sourceStore.IterateFiles(s.ID, func(f models.FileRecord) error {
 			newRec := &models.FileRecord{
 				SnapshotID: newSnap.ID,
 				Path:       f.Path,
@@ -397,7 +389,15 @@ func RunImportDB(cfg ImportDBConfig) error {
 				}
 				batch = batch[:0]
 			}
+			bar.Add(1)
+			return nil
+		})
+		if iterErr != nil {
+			logrus.Errorf("Error reading files from source: %v", iterErr)
+			continue
 		}
+		bar.Finish()
+		logrus.Println()
 
 		if len(batch) > 0 {
 			if err := destStore.BatchAddFiles(batch); err != nil {

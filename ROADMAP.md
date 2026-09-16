@@ -57,6 +57,12 @@
   something to run unbidden on an irreplaceable scan. `scripts/convert-db` moves an old
   database across instead
 - [ ] import-legacy gets line count while determining root, then uses that to show progress
+- [x] `merge` streams instead of materialising each source, and skips its cross-input
+  collision map entirely when the inputs' roots are pairwise disjoint (`rootsDisjoint`,
+  `internal/app/paths.go`) — **done 2026-09-11**, see `knowledge/known-issues.md` 3.5. Found
+  while trying to build one union snapshot from a fleet's 21 `zfs-scan` datasets (~34.6M
+  files) to compare against a legacy baseline: the old collision map alone would have
+  needed ~7-10 GB resident.
 
 ## v0.8.14
 - [ ] if copies are disabled, don't show the copies as additions since the hash is not new

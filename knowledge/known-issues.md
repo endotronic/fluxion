@@ -123,10 +123,27 @@ Not blocking the fleet work in the meantime: the `coverage` command (2026-08-23)
 it whenever the question is a delete decision; `diff` remains the only way to ask what
 changed and where it went.
 
-### 3.5 `dupes`, `merge`, and `import` materialise whole snapshots
-`GetFilesForSnapshot` / `GetFileList` load every row into a map or slice. `merge` only ever
-iterates its input and could stream trivially. `dupes` cannot without restructuring its
-tree build. [architecture.md](architecture.md).
+### 3.5 `dupes` materialises whole snapshots
+`GetFilesForSnapshot` / `GetFileList` load every row into a map or slice. `dupes` cannot
+stream without restructuring its tree build. [architecture.md](architecture.md).
+
+**`merge` and `import` (DB→DB) were the same shape and are both fixed** (`merge`
+2026-09-10, `import` 2026-09-13). Both now read via `IterateFiles`
+(`O(1)` per snapshot instead of materialising the whole thing) — `import`'s fix was found
+re-importing the author's native 49.7M-file `/luna` baseline (`RunImportDB` used
+`GetFilesForSnapshot`, the same map-the-whole-snapshot call `merge` used to make) and pinned
+by `TestRunImportDB_CopiesFilesBetweenDBs`. `merge` additionally skips
+the `path → hash` collision map entirely when `rootsDisjoint(rootPaths)` holds — true by
+construction for a merge of independent zfs-scan datasets, since every stored path is
+guaranteed prefixed by its own snapshot's root (`rebasePath` + `CreateSnapshot` in
+`snapshot.go`), so disjoint roots cannot produce colliding paths. This was the actual
+blocker for using `merge` to build a single union snapshot from a fleet's per-dataset
+`zfs-scan` runs before comparing it against a legacy baseline — at ~34.6M files across 21
+datasets the old map alone would have needed ~7-10 GB resident, more than this project's
+usual test/dev VM has. The map is still built (and still needed) when inputs' roots
+overlap — `TestRunMerge_OverlappingPathsCollapse` and
+`TestRunMerge_ConflictingContentTakesLastInput` pin that path;
+`TestRunMerge_DisjointRootsStillMergesCorrectly` and `TestRootsDisjoint` pin the new one.
 
 ---
 

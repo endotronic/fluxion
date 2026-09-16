@@ -278,6 +278,48 @@ func TestRunMerge_ConflictingContentTakesLastInput(t *testing.T) {
 	}
 }
 
+// The whole point of skipping collision tracking for disjoint roots is that it
+// must still produce the exact same answer as the tracked path would - this
+// pins that against a case with several genuinely non-overlapping trees, the
+// shape a fleet merge of independent zfs-scan datasets actually has.
+func TestRunMerge_DisjointRootsStillMergesCorrectly(t *testing.T) {
+	dbPath, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	createDummySnapshot(t, dbPath, "dataset-a", "luna/kevin/archives", []string{"luna/kevin/archives/f1", "luna/kevin/archives/f2"})
+	createDummySnapshot(t, dbPath, "dataset-b", "luna/mike/archives", []string{"luna/mike/archives/f1"})
+	createDummySnapshot(t, dbPath, "dataset-c", "luna/witness/scribe-minio", []string{"luna/witness/scribe-minio/f1", "luna/witness/scribe-minio/f2", "luna/witness/scribe-minio/f3"})
+
+	cfg := MergeConfig{
+		DBPath:    dbPath,
+		Name:      "merged_fleet",
+		Snapshots: []string{"dataset-a", "dataset-b", "dataset-c"},
+	}
+
+	if err := RunMerge(cfg); err != nil {
+		t.Fatalf("RunMerge failed: %v", err)
+	}
+
+	s, err := sqlite.NewSqliteStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	defer s.Close()
+
+	merged, err := s.FindSnapshot("merged_fleet")
+	if err != nil {
+		t.Fatalf("failed to find merged snapshot: %v", err)
+	}
+
+	count, err := s.GetFileCount(merged.ID)
+	if err != nil {
+		t.Fatalf("failed to get file count: %v", err)
+	}
+	if count != 6 {
+		t.Errorf("expected 6 files (no collisions possible across disjoint roots), got %d", count)
+	}
+}
+
 func writeSnapshotWithHash(t *testing.T, dbPath, name, path, sha1 string) {
 	t.Helper()
 	s, err := sqlite.NewSqliteStore(dbPath)

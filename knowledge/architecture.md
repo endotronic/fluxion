@@ -78,11 +78,20 @@ ROADMAP 0.8.11 set out to fix:
 | `GetFilesForSnapshot(id, onProgress)` | `map[path]FileRecord` | O(snapshot) |
 | `GetFileList(id, onProgress)` | `[]*FileRecord` | O(snapshot) |
 
-Current users: `diff` and `export-legacy` stream. `dupes`, `merge`, `import` (DB→DB), and
-snapshot **resume** all materialise. `merge` in particular loads each source snapshot
-fully into a slice before writing it out, which is unnecessary — it only ever iterates.
-(It does now also hold a `path → hash` map across *all* inputs, to detect and report
-paths that several inputs disagree about; that part is inherent, the slice is not.)
+Current users: `diff`, `export-legacy`, `find`, and (as of 2026-09-10) `merge`, and (as of
+2026-09-13) `import` (DB→DB) stream. `dupes` and snapshot **resume** still materialise —
+`resume`'s use of `GetFilesForSnapshot` is a deliberate map for path lookup, not an
+oversight, unlike the other two before their fixes.
+
+**`merge`'s memory is now two independent pieces, one gone and one conditional.** It reads
+each source via `IterateFiles` instead of `GetFileList` — the O(snapshot) slice is gone.
+The `path → hash` map across *all* inputs, kept to detect and report paths that several
+inputs disagree about, is still O(total files merged) — but only when it is actually
+needed: every stored path is guaranteed prefixed by its own snapshot's root (`rebasePath` +
+`CreateSnapshot` in `snapshot.go`), so when the inputs' roots are pairwise disjoint
+(`rootsDisjoint`, `internal/app/paths.go`) their paths cannot collide and the map is skipped
+entirely. A fleet merge of independent `zfs-scan` datasets is exactly this case — see
+[known-issues.md](known-issues.md) 3.5 for the numbers this was measured against.
 
 ## Output conventions (inconsistent — worth knowing before changing them)
 

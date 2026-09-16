@@ -76,3 +76,27 @@ func TestPathHasPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestRootsDisjoint(t *testing.T) {
+	tests := []struct {
+		name  string
+		roots []string
+		want  bool
+	}{
+		{"independent zfs-scan datasets", []string{"luna/kevin/archives/2016-2020", "luna/mike/archives", "luna/witness/scribe-minio"}, true},
+		{"pre-issue-2.8 scan mounts, always distinct temp dirs", []string{"/tmp/fluxion-zfsscan-1", "/tmp/fluxion-zfsscan-2"}, true},
+		{"identical roots", []string{"/tmp", "/tmp"}, false},
+		{"one root nested under another", []string{"/luna/kevin", "/luna/kevin/archives"}, false},
+		{"a sibling that only shares a text prefix is still disjoint", []string{"/luna/kevin", "/luna/kevin2"}, true},
+		{"single root is trivially disjoint", []string{"/a"}, true},
+		{"empty list is trivially disjoint", nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rootsDisjoint(tt.roots); got != tt.want {
+				t.Errorf("rootsDisjoint(%v) = %v, want %v", tt.roots, got, tt.want)
+			}
+		})
+	}
+}

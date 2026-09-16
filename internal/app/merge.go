@@ -91,8 +91,27 @@ func RunMerge(cfg MergeConfig) error {
 	// into a single record and the last input listed wins. Collapsing identical
 	// content is silent; collapsing *different* content discards a version, so
 	// that is reported.
-	seenHash := make(map[string]string)
-	var collapsed, conflicts int
+	//
+	// Detecting a collision needs a map of every path merged so far, which costs
+	// memory proportional to the whole run - unaffordable at fleet scale (a
+	// union of a fleet's zfs-scan snapshots can be tens of millions of files).
+	// But it is also unnecessary whenever rootsDisjoint(rootPaths) holds: every
+	// stored path is guaranteed prefixed by its own snapshot's root, so inputs
+	// with disjoint roots cannot possibly share a path. That is the normal case
+	// for a fleet merge - independent zfs-scan datasets - so the common case
+	// pays no memory for collision tracking at all, and only the rarer
+	// overlapping-roots case pays the map. Note this does not cover a single
+	// input snapshot that already holds two rows for the same path on its own
+	// (schema allows it - see the missing (snapshot_id, path) constraint in
+	// knowledge/data-model.md) - that is a pre-existing data-quality issue in
+	// the source, not something a merge across disjoint trees can introduce.
+	trackCollisions := !rootsDisjoint(rootPaths)
+
+	var seenHash map[string]string
+	if trackCollisions {
+		seenHash = make(map[string]string)
+	}
+	var collapsed, conflicts, uniquePaths int
 	var conflictSamples []string
 
 	totalImported := 0
@@ -103,33 +122,29 @@ func RunMerge(cfg MergeConfig) error {
 		count, _ := dbStore.GetFileCount(s.ID)
 		bar := progressbar.Default(count, fmt.Sprintf("Reading %s", s.Name))
 
-		files, err := dbStore.GetFileList(s.ID, func(c int) {
-			bar.Set(c)
-		})
-		if err != nil {
-			logrus.Errorf("Error reading files from '%s': %v", s.Name, err)
-			continue
-		}
-		bar.Finish()
-		fmt.Println() // newline because logrus might not handle progressbar newline well? or bar does.
-
-		// Insert into new snapshot
 		batch := make([]*models.FileRecord, 0, consts.DBBatchSize)
-		for _, f := range files {
+		snapImported := 0
+		iterErr := dbStore.IterateFiles(s.ID, func(f models.FileRecord) error {
 			hash := f.SHA1
 			if hash == "" {
 				hash = f.MD5
 			}
-			if prev, ok := seenHash[f.Path]; ok {
-				collapsed++
-				if prev != hash {
-					conflicts++
-					if len(conflictSamples) < 10 {
-						conflictSamples = append(conflictSamples, f.Path)
+			if trackCollisions {
+				if prev, ok := seenHash[f.Path]; ok {
+					collapsed++
+					if prev != hash {
+						conflicts++
+						if len(conflictSamples) < 10 {
+							conflictSamples = append(conflictSamples, f.Path)
+						}
 					}
+				} else {
+					uniquePaths++
 				}
+				seenHash[f.Path] = hash
+			} else {
+				uniquePaths++
 			}
-			seenHash[f.Path] = hash
 
 			newRec := &models.FileRecord{
 				SnapshotID: newSnap.ID,
@@ -141,6 +156,7 @@ func RunMerge(cfg MergeConfig) error {
 				MD5:        f.MD5,
 			}
 			batch = append(batch, newRec)
+			snapImported++
 
 			if len(batch) >= consts.DBBatchSize {
 				if err := dbStore.BatchAddFiles(batch); err != nil {
@@ -148,13 +164,21 @@ func RunMerge(cfg MergeConfig) error {
 				}
 				batch = batch[:0]
 			}
+			bar.Add(1)
+			return nil
+		})
+		if iterErr != nil {
+			logrus.Errorf("Error reading files from '%s': %v", s.Name, iterErr)
+			continue
 		}
 		if len(batch) > 0 {
 			if err := dbStore.BatchAddFiles(batch); err != nil {
 				logrus.Errorf("Error writing batch: %v", err)
 			}
 		}
-		totalImported += len(files)
+		bar.Finish()
+		fmt.Println() // newline because logrus might not handle progressbar newline well? or bar does.
+		totalImported += snapImported
 	}
 
 	// 4. Complete
@@ -176,7 +200,7 @@ func RunMerge(cfg MergeConfig) error {
 	}
 
 	logrus.Infof("Successfully merged %d records into snapshot '%s' (%d unique paths).",
-		totalImported, finalName, len(seenHash))
+		totalImported, finalName, uniquePaths)
 
 	return nil
 }
