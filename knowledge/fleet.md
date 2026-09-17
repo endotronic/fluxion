@@ -1,7 +1,7 @@
 # The fleet — what Fluxion is actually for
 
 Recorded 2026-08-23, from the author's live infrastructure and the sibling planning
-project in `../scratch`. [goals.md](goals.md) says *why* the tool exists in the abstract;
+project in `../stash`. [goals.md](goals.md) says *why* the tool exists in the abstract;
 this file says what it is being pointed at, and it is the context that should settle most
 judgement calls about priorities.
 
@@ -39,9 +39,9 @@ Scale, from `terra.txt` / `saturn.txt`: **339 datasets** (82 on terra, 257 on sa
 **2,916 snapshots**. A one-time full hash pass over luna at a disk-bound ~800 MB/s is
 roughly 30 hours; artemis is another ~35. That is the budget any plan has to fit inside.
 
-## The sibling project: `../scratch`
+## The sibling project: `../stash`
 
-`/home/kevin/projects/scratch` is an ongoing, separate effort to reorganise ZFS
+`/home/kevin/projects/stash` is an ongoing, separate effort to reorganise ZFS
 replication across these hosts. **Read its `CLAUDE.md`, `REPLICATION_REPORT.md`, and
 `RECONCILIATION_PLAN.md` before proposing anything fleet-related** — they hold the
 current inventory, the replica analysis, and the phased execution plan.
@@ -139,7 +139,7 @@ be, because of the following.
 - **Scan per dataset with `--cross-mounts=false`.** The flag defaults to **true**
   (`cmd/fluxion/main.go`), so pointing a scan at `/luna` walks into all 82 child dataset
   mountpoints and produces one 82.8T snapshot record. Setting it false yields one Fluxion
-  snapshot per ZFS dataset — the granularity `../scratch` reasons in — and, because each
+  snapshot per ZFS dataset — the granularity `../stash` reasons in — and, because each
   `.zfs/snapshot/<name>` automount has its own `st_dev`, it also makes the snapdir hazard
   below disappear for free. **`fluxion zfs-scan` (`zs`) does this whole pass for you**: it
   enumerates every dataset under a root with `zfs list`, then mounts *every* dataset it
@@ -187,6 +187,89 @@ be, because of the following.
    rollup against.
 2. `artemis/deprecated` vs luna. This is where the terabytes are.
 3. The stale replicas, `kevin/photos` and `kevin/images`.
+
+## The artemis scan (2026-08-25 → 2026-09-16) and its 22-dataset gap
+
+Fluxion has now been run against the fleet for real, twice. Recorded 2026-09-16.
+
+| DB (on `/mnt/fleet-hdd`, a 503G spinning disk) | Size | Snapshots | Hashes |
+|---|---|---|---|
+| `artemis-fixed.db` | 47.2G | 154 | **SHA-1 only** |
+| `artemis.db` | 44.8G | 154 | SHA-1 only — pre-`convert-db`, dead `/tmp/fluxion-zfsscan-*` roots |
+| `luna-fixed.db` | 46.3G | 28 | SHA-1 + MD5, 34.5M rows |
+| `luna-md5.db` | 24.1G | 27 + the imported 2025-12-24 legacy baseline | SHA-1 + MD5 |
+
+Both `*-fixed.db` files came from `scripts/convert-db` and carry dataset-name
+`root_path`s plus a `UNIQUE(snapshot_id, path)` index. **Queries over these on
+that disk take many minutes to hours** — background them.
+
+**Hash negotiation consequence.** `artemis-fixed.db` was scanned without `--md5`,
+so artemis↔luna comparisons negotiate to **SHA-1** (fine, both sides have it), but
+artemis can **never** be compared against the MD5-only 2025-12-24 legacy baseline.
+Worth knowing before planning a comparison that needs it; a re-scan would be the
+only fix, and at ~100T that is not a realistic one.
+
+### The gap: 176 artemis datasets, 154 scanned
+
+Own-bytes below are `USEDDS + USEDSNAP` (excludes children, so no double-count).
+
+| Tree | Scanned | Unscanned filesystem | zvol |
+|---|---|---|---|
+| `artemis/deprecated` (32.50T) | 79 ds, 14.51T | 10 ds, **16.76T** | 7 ds, 1.28T |
+| `artemis/zroot` (2.46T) | 51 ds, 1.84T | — | 3 ds, 641G |
+| `artemis/temp` (1.52T) | 1 ds, 1.52T | — | — |
+
+Two distinct causes, and only one is a real problem:
+
+1. **The entire `artemis/deprecated/historian_newer` subtree (10 datasets,
+   16.76T) was skipped** — including `content` (9.36T) and `untagged_content`
+   (5.21T), which the table above in this file names as the single biggest prize
+   on the board. Run #1 (2026-08-25) walked `artemis/deprecated` alphabetically,
+   died on `historian_newer/comments`, and left it `in_progress`. Run #2
+   (2026-08-28) resumed and jumped straight from `artemis/deprecated` to
+   `artemis/deprecated/kevin`. An `--exclude-dataset` on run #2 is the likely
+   cause but is **not recoverable from the DB** — nothing records which roots or
+   excludes a run used, the same gap this file already flags below. Two of these
+   have `mountpoint=none` and may also be `canmount=off`, which needs
+   `--include-canmount-off`.
+2. **10 zvols (1.91T) were skipped as `not a filesystem`**, which is correct and
+   permanent. `zroot/vm/hyperion` (573G), `zroot_backup/var/lib/docker_ext4`
+   (431G), `kevin/docker_ext4_backup` (334G), `zroot_backup/vm/hyperion` (266G),
+   the three `DiskImages/win11*` (215G), two `vm/dev` (130G), `vm/testvm` (3.4G).
+   Fluxion cannot and should not answer these — see "Not filesystem-aware" in
+   [goals.md](goals.md). The only route to real evidence is mounting the
+   filesystem *inside* a clone read-only and scanning that as an ordinary tree.
+
+**`artemis/deprecated/historian_newer/comments` (785G, snapshot id 21) is still
+`in_progress` from 2026-08-25.** An incomplete *candidate* under-reports what
+would be lost — a false-safe answer, the exact failure [goals.md](goals.md)'s
+severity rule forbids. `coverage` warns but still uses it. Rescan with
+`zfs-scan --new` before any verdict involving it.
+
+### The candidate-side variant of the unscanned-equals-deleted trap
+
+The section below documents this trap with the gap on the **keeper** side. This
+run has it on the **candidate** side, which inverts the symptom and makes it
+worse, not better:
+
+- An unscanned **keeper** makes real content look uncovered — noisy, but safe.
+- An unscanned **candidate** subtree is simply *invisible*. A `coverage` run over
+  `artemis/deprecated` as one unit would return a verdict that silently omits
+  16.76T and **would look clean**.
+
+So: run per-dataset against the explicit list of scanned datasets, never against
+the tree root, while a gap exists — and report the gap's size alongside every
+verdict.
+
+### What this unblocks
+
+The primary comparison needs **no cross-DB work**: both sides of "is
+`artemis/deprecated` covered by `artemis/luna`?" are snapshots in
+`artemis-fixed.db`. One DB, one host, one hash. 17.87T of candidates are scanned
+and awaiting a `coverage` run today. `../stash`'s plan is stalled on 7.79T of
+artemis space (the deferred `kevin/photos` + `kevin/images` catch-up) while
+artemis has fallen to 3.89T AVAIL at 95% CAP — so roughly 45% of that 17.87T
+proving redundant is enough to restart it.
 
 ## `zfs-scan` coverage is not self-verifying — cross-check before trusting a comparison
 
