@@ -218,6 +218,15 @@ with no unified tree, no merkle hashes, and no move/copy matching. See
 - The hash is negotiated across the candidate and every keeper — SHA-1 if they all have it,
   otherwise MD5 (legacy imports), otherwise an error. Printed in the header so the answer
   is never ambiguous about what it compared.
+- **An empty snapshot (zero files — a `canmount=off` ZFS container dataset, which
+  `zfs-scan` records as a real snapshot) does not break negotiation** (fixed 2026-09-16,
+  see [known-issues.md](known-issues.md)'s history). As a keeper it is silently skipped —
+  it could never contribute a covered match on any algorithm, so it cannot veto one the
+  real keepers share. As the candidate it short-circuits to trivially "fully covered,
+  0 files, nothing to lose" without negotiating a hash at all. Neither case is confused
+  with a `--no-hash` scan, which also has no recorded algorithm but *does* have real
+  files — that must still refuse rather than guess, per [goals.md](goals.md)'s severity
+  rule, and is checked by file count, not by which hashes are present.
 - **A file with no comparable hash counts against coverage**, listed separately in the
   summary as `no hash`. Per [goals.md](goals.md), absent evidence is not evidence of
   absence.

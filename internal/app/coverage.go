@@ -125,6 +125,26 @@ func RunCoverage(cfg CoverageConfig) (CoverageResult, error) {
 		keeperIDs = append(keeperIDs, k.ID)
 	}
 
+	// An empty candidate has nothing to lose - trivially "fully covered", not an
+	// error. This can't be folded into commonHash the way an empty keeper is
+	// (above): an empty keeper still leaves other keepers to negotiate a hash
+	// type against, but an empty candidate leaves nothing to negotiate for at
+	// all, so there is no hash type to report either. Checked by file count
+	// rather than by candidate.Hashes being empty, because those mean different
+	// things: zero files (a canmount=off ZFS container dataset, say) really is
+	// nothing to lose, but a --no-hash scan with real files also has empty
+	// Hashes and must still refuse - see knowledge/cli.md's --no-hash section -
+	// so it has to fall through to commonHash's error below like it always has.
+	candidateFileCount, err := dbStore.GetFileCount(candidate.ID)
+	if err != nil {
+		return res, fmt.Errorf("error counting candidate files: %w", err)
+	}
+	if candidateFileCount == 0 {
+		fmt.Printf("Checking %s at %s (0 files) - empty, nothing to lose by deleting it.\n",
+			candidate.Name, candidate.RootPath)
+		return CoverageResult{}, nil
+	}
+
 	hashType, err := commonHash(candidate, keepers)
 	if err != nil {
 		return res, err
@@ -588,6 +608,17 @@ func runCoverageRollup(dbStore store.Store, candidate *models.Snapshot, keeperID
 }
 
 // commonHash picks an algorithm that every snapshot involved actually carries.
+//
+// A keeper with no hash data at all - recorded.Hashes empty, whether because it
+// has zero files (a canmount=off ZFS container dataset, which zfs-scan records)
+// or because it was scanned --no-hash - can never match anything by content
+// regardless of which algorithm is negotiated, so it must not be able to veto
+// one the rest of the keepers share. Skipping it here changes nothing about
+// what it can contribute: it already could never produce a covered match, on
+// any algorithm. See knowledge/known-issues.md 2.9 - confirmed sweeping a real
+// fleet, where empty container-dataset keepers made every candidate fail
+// negotiation in seconds. A keeper with *some* hash data but not the one being
+// tried still correctly vetoes that one; only total absence is exempted.
 func commonHash(candidate *models.Snapshot, keepers []*models.Snapshot) (string, error) {
 	for _, want := range []string{"sha1", "md5"} {
 		if !hasHash(candidate, want) {
@@ -595,6 +626,9 @@ func commonHash(candidate *models.Snapshot, keepers []*models.Snapshot) (string,
 		}
 		ok := true
 		for _, k := range keepers {
+			if len(k.Hashes) == 0 {
+				continue
+			}
 			if !hasHash(k, want) {
 				ok = false
 				break

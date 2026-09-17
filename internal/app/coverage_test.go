@@ -179,3 +179,89 @@ func TestRunCoverage_MinSizeSkips(t *testing.T) {
 		t.Errorf("want 0 files checked, got %d", res.TotalFiles)
 	}
 }
+
+// TestRunCoverage_EmptyKeeperDoesNotBlockNegotiation pins knowledge/known-issues.md
+// 2.9: a keeper with zero files has no recorded hash algorithm at all, and used
+// to veto hash negotiation for every other keeper regardless of what they
+// shared - a canmount=off ZFS container dataset in the keeper set failed the
+// whole run. An empty keeper can never contribute a covered match on any
+// algorithm, so it must not be able to block one the real keepers agree on.
+func TestRunCoverage_EmptyKeeperDoesNotBlockNegotiation(t *testing.T) {
+	dbPath, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	createHashedSnapshot(t, dbPath, "cand", "/cand", map[string]string{"/cand/a": "aaa"})
+	createHashedSnapshot(t, dbPath, "real-keeper", "/keeper", map[string]string{"/keeper/a": "aaa"})
+	createHashedSnapshot(t, dbPath, "empty-keeper", "/keeper-empty", map[string]string{})
+
+	res := runCoverageQuiet(t, CoverageConfig{
+		DBPath: dbPath, CandidateQuery: "cand",
+		KeeperQueries: []string{"real-keeper", "empty-keeper"},
+	})
+	if res.HashType != "sha1" {
+		t.Errorf("want negotiation to settle on sha1 despite the empty keeper, got %q", res.HashType)
+	}
+	if !res.Covered() {
+		t.Error("candidate's only file matches real-keeper's; the empty keeper should not change that")
+	}
+}
+
+// TestRunCoverage_EmptyCandidateIsTriviallyCovered pins the other half of
+// knowledge/known-issues.md 2.9: an empty candidate has nothing to lose, so it
+// must answer "fully covered" rather than fail hash negotiation the same way
+// an empty keeper used to.
+func TestRunCoverage_EmptyCandidateIsTriviallyCovered(t *testing.T) {
+	dbPath, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	createHashedSnapshot(t, dbPath, "empty-cand", "/cand-empty", map[string]string{})
+	createHashedSnapshot(t, dbPath, "keeper", "/keeper", map[string]string{"/keeper/a": "aaa"})
+
+	res := runCoverageQuiet(t, CoverageConfig{
+		DBPath: dbPath, CandidateQuery: "empty-cand", KeeperQueries: []string{"keeper"},
+	})
+	if !res.Covered() {
+		t.Error("an empty candidate has nothing to lose and must be trivially covered")
+	}
+	if res.TotalFiles != 0 {
+		t.Errorf("want 0 files, got %d", res.TotalFiles)
+	}
+}
+
+// TestRunCoverage_NoHashCandidateStillRefuses is the negative case for the fix
+// above: a candidate with real files but no recorded hash (a --no-hash scan)
+// also has an empty Hashes list, exactly like a truly empty candidate - but it
+// is not trivially covered, it is unverifiable, and knowledge/goals.md's
+// severity rule requires refusing rather than guessing "covered". File count,
+// not Hashes, is what must distinguish the two.
+func TestRunCoverage_NoHashCandidateStillRefuses(t *testing.T) {
+	dbPath, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	s, err := sqlite.NewSqliteStore(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	snap, err := s.CreateSnapshot("/cand-nohash", "nohash-cand", "host1")
+	if err != nil {
+		t.Fatalf("CreateSnapshot: %v", err)
+	}
+	if err := s.BatchAddFiles([]*models.FileRecord{
+		{SnapshotID: snap.ID, Path: "/cand-nohash/a", Filename: "a", SizeBytes: 100, ModTime: time.Now()},
+	}); err != nil {
+		t.Fatalf("BatchAddFiles: %v", err)
+	}
+	if err := s.CompleteSnapshot(snap.ID, time.Now()); err != nil {
+		t.Fatalf("CompleteSnapshot: %v", err)
+	}
+	s.Close()
+
+	createHashedSnapshot(t, dbPath, "keeper", "/keeper", map[string]string{"/keeper/a": "aaa"})
+
+	_, err = RunCoverage(CoverageConfig{
+		DBPath: dbPath, CandidateQuery: "nohash-cand", KeeperQueries: []string{"keeper"},
+	})
+	if err == nil {
+		t.Fatal("a --no-hash candidate with real files must refuse, not report trivially covered")
+	}
+}
